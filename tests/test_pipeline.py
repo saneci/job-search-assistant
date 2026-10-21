@@ -3,21 +3,25 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 from agent.config import AppConfig, load_config
 from agent.logging_setup import RunLogger
-from agent.models import SentVacancy
+from agent.models import SentVacancy, SkippedVacancy, VacancyCard
 from agent.pipeline import (
     OUTCOME_ERROR,
     OUTCOME_QUEUED,
     OUTCOME_SENT,
     OUTCOME_SKIPPED,
+    _counters,
     _final_message,
     _outcome,
+    _outcome_reason,
+    _remember_processing,
     _VacancyLog,
 )
+from agent.processed import ProcessedStore
 from agent.report import RunStats
 
 
@@ -121,3 +125,68 @@ def test_outcome_detects_queue_and_error() -> None:
 def test_outcome_is_none_when_nothing_happened() -> None:
     """Сработал лимит откликов — вакансию не запоминаем, пройдём в следующий раз."""
     assert _outcome((1, 0, 0, 0), (1, 0, 0, 0)) is None
+
+
+def test_outcome_reason_takes_skip_reason() -> None:
+    stats = RunStats(started_at=datetime(2026, 10, 21, 9, 0))
+    stats.skipped.append(
+        SkippedVacancy(
+            title="Java",
+            company="Ozon",
+            url="https://hh.ru/vacancy/1",
+            reason="вероятность 0.08 не выше порога 0.80",
+        )
+    )
+
+    assert _outcome_reason(stats, 0, OUTCOME_SKIPPED) == "вероятность 0.08 не выше порога 0.80"
+
+
+def test_outcome_reason_empty_for_other_outcomes() -> None:
+    stats = RunStats(started_at=datetime(2026, 10, 21, 9, 0))
+
+    assert _outcome_reason(stats, 0, OUTCOME_SENT) == ""
+    assert _outcome_reason(stats, 0, OUTCOME_QUEUED) == ""
+    assert _outcome_reason(stats, 0, OUTCOME_SKIPPED) == ""
+
+
+def test_remember_processing_writes_reason_to_day_report(tmp_path: Path) -> None:
+    """Причина пропуска должна попасть в файл дня."""
+    logger = RunLogger(tmp_path / "logs", run_id="reason")
+    store = ProcessedStore(tmp_path / "report", today=date(2026, 10, 21))
+    card = VacancyCard(title="Java", company="Ozon", url="https://hh.ru/vacancy/1")
+
+    _remember_processing(store, logger, card, OUTCOME_SKIPPED, "стоп-слово в названии: 1С")
+    logger.close()
+
+    records = json.loads((tmp_path / "report" / "2026-10-21.json").read_text(encoding="utf-8"))
+
+    assert records[0]["status"] == "skipped"
+    assert records[0]["reason"] == "стоп-слово в названии: 1С"
+
+
+def test_loop_chain_records_skip_reason(tmp_path: Path) -> None:
+    """Цепочка как в цикле: счётчики -> _outcome -> _outcome_reason -> файл дня."""
+    stats = RunStats(started_at=datetime(2026, 10, 21, 9, 0))
+    store = ProcessedStore(tmp_path / "report", today=date(2026, 10, 21))
+    logger = RunLogger(tmp_path / "logs", run_id="chain")
+    card = VacancyCard(title="Java", company="Ozon", url="https://hh.ru/vacancy/1")
+
+    counters = _counters(stats)
+    stats.skipped.append(
+        SkippedVacancy(
+            title="Java",
+            company="Ozon",
+            url="https://hh.ru/vacancy/1",
+            reason="исключённая компания: Сбер",
+        )
+    )
+    outcome = _outcome(counters, _counters(stats))
+    _remember_processing(
+        store, logger, card, outcome, _outcome_reason(stats, counters[1], outcome)
+    )
+    logger.close()
+
+    records = json.loads((tmp_path / "report" / "2026-10-21.json").read_text(encoding="utf-8"))
+
+    assert outcome == OUTCOME_SKIPPED
+    assert records[0]["reason"] == "исключённая компания: Сбер"

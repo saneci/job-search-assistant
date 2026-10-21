@@ -233,7 +233,13 @@ def _process_vacancies(
                 )
                 outcome = _outcome(counters, _counters(stats))
                 if outcome:
-                    _remember_processing(processed, logger, card, outcome)
+                    _remember_processing(
+                        processed,
+                        logger,
+                        card,
+                        outcome,
+                        _outcome_reason(stats, counters[1], outcome),
+                    )
 
                 if _page_closed(page):
                     raise SessionLostError("окно браузера закрыто — запуск остановлен")
@@ -610,19 +616,34 @@ def _outcome(
     return None
 
 
+def _outcome_reason(stats: RunStats, skipped_before: int, outcome: str) -> str:
+    """Причина пропуска для файла дня: берётся из последней записи stats.skipped."""
+    if outcome != OUTCOME_SKIPPED or len(stats.skipped) <= skipped_before:
+        return ""
+    return stats.skipped[-1].reason
+
+
 def _remember_processing(
     processed: ProcessedStore,
     logger: RunLogger,
     card: VacancyCard,
     outcome: str,
+    reason: str = "",
 ) -> None:
-    """Запоминает вакансию, чтобы не проходить её в следующих запусках."""
+    """Запоминает вакансию, чтобы не проходить её в следующих запусках.
+
+    Для пропусков пишется причина — по файлу дня потом видно, почему вакансию
+    не взяли.
+    """
+    if outcome == OUTCOME_SKIPPED and not reason:
+        logger.event("skip_reason_missing", url=card.url, title=card.title)
     try:
         processed.add(
             url=card.url,
             title=card.title,
             company=card.company,
             status=outcome,
+            reason=reason,
         )
     except ProcessedError as exc:
         logger.event("processed_error", url=card.url, error=str(exc))
