@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from hh_agent.profile import ProfileError, load_profile, split_style_section
+from agent.profile import ProfileError, load_profile, split_style_section
 
 SAMPLE_PROFILE = """# PROFILE: Тестовый пользователь
 

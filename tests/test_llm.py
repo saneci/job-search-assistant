@@ -10,13 +10,14 @@ from typing import Any
 import httpx
 import pytest
 
-from hh_agent.config import PROJECT_ROOT, DecisionConfig, GenerationConfig, LLMConfig
-from hh_agent.llm import (
+from agent.config import PROJECT_ROOT, DecisionConfig, GenerationConfig, LLMConfig
+from agent.llm import (
     FIT_LABEL,
     LLMClient,
     LLMError,
     LLMResponseError,
     add_signature,
+    ensure_greeting,
     extract_json_object,
     extract_probabilities,
     normalize_verdict,
@@ -24,9 +25,9 @@ from hh_agent.llm import (
     probability_for,
     truncate_cover_letter,
 )
-from hh_agent.models import VacancyDetails
-from hh_agent.profile import Profile
-from hh_agent.prompts import (
+from agent.models import VacancyDetails
+from agent.profile import Profile
+from agent.prompts import (
     FALLBACK_SYSTEM_PROMPT,
     REJECTION_MAX_LENGTH,
     REJECTION_MAX_TOKENS,
@@ -290,24 +291,24 @@ def test_add_signature_for_empty_letter_returns_empty() -> None:
 
 def test_parse_generation_adds_signature() -> None:
     result = parse_generation(
-        {"verdict": "подходит", "reason": "ok", "cover_letter": "Текст."},
+        {"verdict": "подходит", "reason": "ok", "cover_letter": "Здравствуйте! Текст."},
         1500,
         SIGNATURE,
     )
 
-    assert result.cover_letter == "Текст.\n\n" + SIGNATURE
+    assert result.cover_letter == "Здравствуйте! Текст.\n\n" + SIGNATURE
 
 
 def test_generate_adds_signature_from_argument() -> None:
     content = json.dumps(
-        {"verdict": "подходит", "reason": "ok", "cover_letter": "Текст."},
+        {"verdict": "подходит", "reason": "ok", "cover_letter": "Здравствуйте! Текст."},
         ensure_ascii=False,
     )
 
     with make_client(lambda request: chat_response(content)) as client:
         result = client.generate(PROFILE, VACANCY, signature=SIGNATURE)
 
-    assert result.cover_letter == "Текст.\n\n" + SIGNATURE
+    assert result.cover_letter == "Здравствуйте! Текст.\n\n" + SIGNATURE
 
 
 def test_truncate_cover_letter_by_sentence() -> None:
@@ -416,6 +417,53 @@ def test_system_prompt_keeps_simple_typography() -> None:
 
     assert "—" not in prompt
     assert ";" not in prompt
+
+
+def test_ensure_greeting_keeps_existing() -> None:
+    for text in ("Здравствуйте! Текст.", "Здравствуйте. Текст.", "Добрый день! Текст."):
+        assert ensure_greeting(text) == (text, False)
+
+
+def test_ensure_greeting_adds_missing() -> None:
+    letter, added = ensure_greeting("Мне интересна задача.")
+
+    assert letter == "Здравствуйте! Мне интересна задача."
+    assert added is True
+
+
+def test_ensure_greeting_removes_dangling_lead() -> None:
+    """Инцидент 2026-10-21: письмо начиналось с обрывка «3PL. Мне интересна…»."""
+    letter, added = ensure_greeting("3PL. Мне интересна задача строить бэкенд.")
+
+    assert letter == "Здравствуйте! Мне интересна задача строить бэкенд."
+    assert added is True
+
+
+def test_ensure_greeting_empty_letter() -> None:
+    assert ensure_greeting("   ") == ("", False)
+
+
+def test_parse_generation_adds_greeting_before_signature() -> None:
+    result = parse_generation(
+        {"verdict": "подходит", "reason": "ok", "cover_letter": "3PL. Мне интересна задача."},
+        1500,
+        SIGNATURE,
+    )
+
+    assert result.greeting_added is True
+    assert result.cover_letter.startswith("Здравствуйте! Мне интересна задача.")
+    assert result.cover_letter.endswith(SIGNATURE)
+
+
+def test_parse_generation_flags_greeting_present() -> None:
+    result = parse_generation(
+        {"verdict": "подходит", "reason": "ok", "cover_letter": "Здравствуйте! Текст."},
+        1500,
+        SIGNATURE,
+    )
+
+    assert result.greeting_added is False
+    assert result.cover_letter.startswith("Здравствуйте! Текст.")
 
 
 def test_decide_sends_criteria_from_config() -> None:

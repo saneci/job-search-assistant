@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from hh_agent.queue import QueueError, QueueStore
+from agent.queue import QueueError, QueueStore
 
 
 def test_add_and_reload(tmp_path: Path) -> None:

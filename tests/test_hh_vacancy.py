@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from hh_agent.hh_vacancy import detect_response_blocker
+from agent.hh_vacancy import detect_response_blocker
 
 
 class FakeElement:

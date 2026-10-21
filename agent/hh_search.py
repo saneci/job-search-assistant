@@ -16,6 +16,12 @@ from .models import VacancyCard
 SEARCH_URL = "https://hh.ru/search/vacancy"
 HH_BASE_URL = "https://hh.ru"
 
+# hh.ru отдаёт в вёрстке не больше 20 карточек на страницу, даже если просить
+# items_on_page=50. Если отправить 50, hh сдвигает страницы по 50, а карточек
+# рисует 20 — часть вакансий терялась. Поэтому просим ровно столько, сколько
+# реально приходит в DOM, а глубину задаём через pages_limit.
+HH_PAGE_SIZE = 20
+
 TITLE_SELECTOR = "a[data-qa='serp-item__title'], a[data-qa='vacancy-serp__vacancy-title']"
 
 _VACANCY_ID_RE = re.compile(r"/vacancy/(\d+)")
@@ -44,7 +50,7 @@ def build_search_url(search: SearchConfig, query: str, page_index: int = 0) -> s
         "text": query,
         "area": str(search.area_id),
         "page": str(page_index),
-        "items_on_page": str(search.per_page),
+        "items_on_page": str(min(search.per_page, HH_PAGE_SIZE)),
     }
     if search.salary_from is not None:
         params["salary"] = str(search.salary_from)
@@ -106,8 +112,11 @@ def open_search_page(
     search: SearchConfig,
     query: str,
     page_index: int,
-) -> list[VacancyCard]:
-    """Открывает страницу выдачи и собирает карточки вакансий."""
+) -> tuple[list[VacancyCard], int | None]:
+    """Открывает страницу выдачи и собирает карточки вакансий.
+
+    Возвращает (карточки, сколько всего вакансий нашёл hh.ru).
+    """
     url = build_search_url(search, query, page_index)
     try:
         page.goto(url, wait_until="domcontentloaded", timeout=NAVIGATION_TIMEOUT_MS)
@@ -119,7 +128,29 @@ def open_search_page(
     if detect_captcha(page):
         raise CaptchaError("hh.ru показал капчу на странице поиска")
     _wait_for_results(page)
-    return collect_cards(page)
+    return collect_cards(page), read_total(page)
+
+
+TOTAL_RE = re.compile(r"Найден[оа]\s+([\d\s\u00a0]+)\s+ваканс")
+
+
+def parse_total(html: str) -> int | None:
+    """Извлекает из шапки выдачи число найденных вакансий («Найдено 44 вакансии»)."""
+    text = (html or "").replace("&nbsp;", " ")
+    match = TOTAL_RE.search(text)
+    if not match:
+        return None
+    digits = re.sub(r"\D", "", match.group(1))
+    return int(digits) if digits else None
+
+
+def read_total(page: Page) -> int | None:
+    """Сколько всего вакансий нашёл hh.ru по запросу (для лога и диагностики)."""
+    try:
+        html = page.content()
+    except PlaywrightError:
+        return None
+    return parse_total(html)
 
 
 def collect_cards(page: Page) -> list[VacancyCard]:

@@ -26,6 +26,7 @@ class RunStats:
     errors: list[RunError] = field(default_factory=list)
     stop_reason: str = ""
     last_action: str = ""
+    reviewed: int = 0
 
     @property
     def sent_count(self) -> int:
@@ -40,6 +41,7 @@ def build_report(stats: RunStats, details_path: Path, sent_limit: int = 3) -> st
         separator,
         f"Отчёт за {stats.started_at.strftime('%Y-%m-%d %H:%M')}",
         separator,
+        f"- Обработано вакансий: {stats.reviewed}",
         f"- Отправлено откликов: {len(stats.sent)}",
         f"- Пропущено (не подошло): {len(stats.skipped)}",
         f"- Отложено (тесты/анкеты): {len(stats.queued)}",
@@ -73,6 +75,7 @@ def build_details(stats: RunStats, run_id: str) -> dict[str, Any]:
         "stop_reason": stats.stop_reason,
         "last_action": stats.last_action,
         "summary": {
+            "reviewed": stats.reviewed,
             "sent": len(stats.sent),
             "skipped": len(stats.skipped),
             "queued": len(stats.queued),

@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from hh_agent.config import ConfigError, load_config, resolve_area_id
+from agent.config import ConfigError, load_config, resolve_area_id
 
 
 def write_config(tmp_path: Path, **overrides: Any) -> Path:

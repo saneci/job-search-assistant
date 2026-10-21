@@ -29,9 +29,25 @@ class RunLogger:
         self._file.flush()
 
     def info(self, message: str) -> None:
-        """Печатает сообщение пользователю и дублирует его в лог."""
+        """Печатает сообщение пользователю и дублирует его в лог.
+
+        В консоль строка выводится с меткой времени в локальной зоне
+        ([2026-10-21 16:02:37]); в JSONL время уже есть в поле ts.
+        """
+        self.event("info", message=message)
+        print(self._stamped(message), flush=True)
+
+    def info_plain(self, message: str) -> None:
+        """Печатает многострочный блок (например, отчёт) без меток времени."""
         self.event("info", message=message)
         print(message, flush=True)
+
+    @staticmethod
+    def _stamped(message: str) -> str:
+        if not message:
+            return message
+        stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        return f"[{stamp}] {message}"
 
     def close(self) -> None:
         if not self._file.closed:

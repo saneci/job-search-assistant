@@ -53,6 +53,7 @@ class GenerationResult:
     verdict: str
     reason: str
     cover_letter: str
+    greeting_added: bool = False
 
 
 class LLMClient:
@@ -350,18 +351,47 @@ def parse_generation(
     reason = str(payload.get("reason") or "").strip()
     raw_letter = payload.get("cover_letter") or ""
     cover_letter = raw_letter.strip() if isinstance(raw_letter, str) else str(raw_letter).strip()
+    greeting_added = False
 
     if verdict == NOT_FIT_LABEL:
         cover_letter = ""
     elif cover_letter:
+        cover_letter, greeting_added = ensure_greeting(cover_letter)
         cover_letter = add_signature(cover_letter, signature, max_length)
 
-    return GenerationResult(verdict=verdict, reason=reason, cover_letter=cover_letter)
+    return GenerationResult(
+        verdict=verdict,
+        reason=reason,
+        cover_letter=cover_letter,
+        greeting_added=greeting_added,
+    )
 
 
 SIGNATURE_SEPARATOR = "\n\n"
 _EMAIL_RE = re.compile(r"[\w.+-]+@[\w.-]+\.\w+")
 _TELEGRAM_RE = re.compile(r"@[A-Za-z][\w_]{2,}")
+_GREETING_RE = re.compile(
+    r"^\s*(?:здравствуйте|добрый день|добрый вечер|приветствую)\b[\s!.,]*",
+    re.IGNORECASE,
+)
+# Обрывок в начале письма вроде «3PL.»: короткое слово/аббревиатура с точкой.
+_SHORT_LEAD_RE = re.compile(r"^[A-ZА-ЯЁ0-9][\w+-]{0,5}\.\s+")
+
+
+def ensure_greeting(text: str) -> tuple[str, bool]:
+    """Гарантирует приветствие в начале письма.
+
+    Модель иногда начинает письмо с обрывка («3PL. Мне интересна…») или сразу
+    с сути. Тогда приветствие добавляется кодом, без повторного вызова LLM.
+    Возвращает (текст, было ли приветствие добавлено).
+    """
+    text = (text or "").strip()
+    if not text:
+        return "", False
+    if _GREETING_RE.match(text):
+        return text, False
+    body = _SHORT_LEAD_RE.sub("", text, count=1).strip() or text
+    return f"Здравствуйте! {body}", True
 
 
 def add_signature(text: str, signature: str, limit: int = 1500) -> str:

@@ -6,7 +6,7 @@ import json
 from datetime import date
 from pathlib import Path
 
-from hh_agent.processed import ProcessedStore
+from agent.processed import ProcessedStore
 
 
 def test_add_and_find_in_same_run(tmp_path: Path) -> None:
@@ -135,3 +135,4 @@ def test_prune_without_directory_is_noop(tmp_path: Path) -> None:
     store = ProcessedStore(tmp_path / "missing", today=date(2026, 10, 21))
 
     assert store.prune(days=7) == []
+

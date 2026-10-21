@@ -9,7 +9,7 @@ from pathlib import Path
 from playwright.sync_api import Error as PlaywrightError, Page
 
 from .browser import BrowserError, BrowserSession, CaptchaError, PageLoadError, save_screenshot
-from .config import AppConfig
+from .config import FIT_LABEL, NOT_FIT_LABEL, AppConfig
 from .hh_search import (
     is_company_excluded,
     is_excluded,
@@ -110,7 +110,7 @@ def run(config: AppConfig, logger: RunLogger) -> tuple[RunStats, Path]:
 
     report = build_report(stats, details_path)
     logger.info("")
-    logger.info(report)
+    logger.info_plain(report)
 
     email_sent, email_message = send_email(
         config.email,
@@ -121,7 +121,6 @@ def run(config: AppConfig, logger: RunLogger) -> tuple[RunStats, Path]:
     if not email_sent:
         logger.info(f"Email-отчёт не отправлен: {email_message}")
 
-    logger.info("")
     logger.info(_final_message(stats, config))
 
     return stats, details_path
@@ -161,7 +160,7 @@ def _process_vacancies(
 
             logger.info(f"Поиск «{query}», страница {page_index + 1}: открываю страницу...")
             try:
-                cards = open_search_page(page, search, query, page_index)
+                cards, total = open_search_page(page, search, query, page_index)
             except CaptchaError as exc:
                 stats.stop_reason = f"капча на странице поиска ({query}, стр. {page_index + 1})"
                 logger.event("captcha", query=query, page=page_index, url=page.url, error=str(exc))
@@ -173,10 +172,20 @@ def _process_vacancies(
                 break
 
             if not cards:
-                logger.info(f"Запрос «{query}», страница {page_index + 1}: вакансий не найдено.")
+                if total:
+                    logger.info(
+                        f"Запрос «{query}», страница {page_index + 1}: вакансий нет "
+                        f"(hh.ru всего нашёл {total})."
+                    )
+                else:
+                    logger.info(f"Запрос «{query}», страница {page_index + 1}: вакансий не найдено.")
                 break
 
-            logger.info(f"Запрос «{query}», страница {page_index + 1}: найдено {len(cards)} вакансий.")
+            found_total = f" (hh.ru всего нашёл {total})" if total and page_index == 0 else ""
+            logger.info(
+                f"Запрос «{query}», страница {page_index + 1}: "
+                f"найдено {len(cards)} вакансий{found_total}."
+            )
 
             for card in cards:
                 if _should_stop(search.limit_per_run, stats, logger):
@@ -195,6 +204,7 @@ def _process_vacancies(
                     continue
                 seen.update(keys)
 
+                stats.reviewed += 1
                 previous = processed.find(card.title, card.company, card.url)
                 if previous:
                     logger.event(
@@ -359,6 +369,8 @@ def _process_vacancy(
 
     llm_reason = ""
     llm_reason_source = ""
+    # Вердикт приложения: Decide API даёт вероятности, порог применяем мы.
+    verdict = FIT_LABEL if decision.fits else NOT_FIT_LABEL
     if not decision.fits:
         llm_reason = (
             f"вероятность {decision.probability:.2f} не выше порога {decision.threshold:.2f}"
@@ -383,7 +395,8 @@ def _process_vacancy(
         probability=decision.probability,
         threshold=decision.threshold,
         fits=decision.fits,
-        llm_verdict=decision.chosen,
+        llm_verdict=verdict,
+        model_choice=decision.chosen,
         llm_reason=llm_reason,
         llm_reason_source=llm_reason_source,
         probabilities=decision.probabilities,
@@ -392,7 +405,7 @@ def _process_vacancy(
         f"{label}={value:.2f}" for label, value in decision.probabilities.items()
     )
     log.info(
-        f"LLM-решение: «{decision.chosen}» (порог {decision.threshold:.2f}, {probabilities})"
+        f"LLM-решение: «{verdict}» (порог {decision.threshold:.2f}, {probabilities})"
     )
     if llm_reason and config.llm.decision.explain_rejections:
         log.info(f"LLM-вердикт: {llm_reason}")
@@ -443,8 +456,11 @@ def _process_vacancy(
         llm_reason_source="model",
         letter=generation.cover_letter,
         letter_length=len(generation.cover_letter),
+        greeting_added=generation.greeting_added,
     )
     log.info(f"LLM-вердикт: {generation.reason or '—'}")
+    if generation.greeting_added:
+        log.info("в письме не было приветствия, добавил «Здравствуйте!»")
 
     try:
         status = respond(page, generation.cover_letter)

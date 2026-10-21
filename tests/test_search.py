@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from urllib.parse import parse_qs, urlparse
 
-from hh_agent.config import DelayRange, SearchConfig
-from hh_agent.hh_search import (
+from agent.config import DelayRange, SearchConfig
+from agent.hh_search import (
     build_search_url,
     is_company_excluded,
     is_excluded,
+    parse_total,
     vacancy_id,
     vacancy_keys,
 )
@@ -45,7 +46,7 @@ def test_build_search_url_minimal() -> None:
     assert params["text"] == ["Java backend engineer"]
     assert params["area"] == ["1"]
     assert params["page"] == ["0"]
-    assert params["items_on_page"] == ["50"]
+    assert params["items_on_page"] == ["20"]
     assert "salary" not in params
     assert "experience" not in params
 
@@ -128,7 +129,20 @@ def test_vacancy_keys_normalize_case_and_yo() -> None:
     )
 
 
-def test_vacancy_id_from_url() -> None:
+def test_parse_total_from_search_header() -> None:
+    assert parse_total("<div>Найдено 44 вакансии</div>") == 44
+    assert parse_total("Найдена 1 вакансия") == 1
+    assert parse_total("Найдено 1 234 вакансии") == 1234
+    assert parse_total("Найдено&nbsp;7&nbsp;вакансий") == 7
+    assert parse_total("Ничего не найдено") is None
+    assert parse_total("") is None
+
+
+def test_per_page_is_capped_by_hh_page_size() -> None:
+    """hh отдаёт 20 карточек на страницу, даже если просить 50."""
+    params = parse_qs(urlparse(build_search_url(make_search(per_page=50), "Java", 0)).query)
+
+    assert params["items_on_page"] == ["20"]
     assert vacancy_id("https://hh.ru/vacancy/1234356?query=java") == "1234356"
     assert vacancy_id("https://hh.ru/vacancy/1234356/") == "1234356"
     assert vacancy_id("https://hh.ru/search/vacancy") is None

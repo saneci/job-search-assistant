@@ -6,10 +6,10 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-from hh_agent.config import AppConfig, load_config
-from hh_agent.logging_setup import RunLogger
-from hh_agent.models import SentVacancy
-from hh_agent.pipeline import (
+from agent.config import AppConfig, load_config
+from agent.logging_setup import RunLogger
+from agent.models import SentVacancy
+from agent.pipeline import (
     OUTCOME_ERROR,
     OUTCOME_QUEUED,
     OUTCOME_SENT,
@@ -18,7 +18,7 @@ from hh_agent.pipeline import (
     _outcome,
     _VacancyLog,
 )
-from hh_agent.report import RunStats
+from agent.report import RunStats
 
 
 def make_config(tmp_path: Path) -> AppConfig:
