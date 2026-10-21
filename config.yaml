@@ -10,7 +10,7 @@ search_query:
 # или числовой id региона hh.ru (Москва — 1, Россия — 113).
 area: Москва
 
-# Минимальная зарплата (необязательно).
+# Минимальная зарплата (необязательно).в
 #salary_from: 150000
 
 # Опыт работы (необязательно): noExperience, between1And3, between3And6, moreThan6.
@@ -62,13 +62,14 @@ cover_letter_signature: |
   Телеграм: @saneci
   Почта: a.gladskoy@gmail.com
 
-# Локальные данные: профиль, сессия, очередь, память обработанных вакансий.
+# Локальные данные: профиль, сессия, очередь и дневные отчёты о вакансиях.
 paths:
   profile: data/profile.md
   session_state: data/state.json
-  queue: data/queue.json
-  # Память об обработанных вакансиях: по файлу на дату, повторно их не проходим.
-  processed_dir: data/processed
+  # Очередь ручных действий и дневные отчёты лежат в одном каталоге data/report.
+  queue: data/report/queue.json
+  # Дневные отчёты по вакансиям: файл на дату, повторно эти вакансии не проходим.
+  report_dir: data/report
   logs_dir: logs
 
 # LLM: два независимых вызова (решение и генерация письма).

@@ -33,8 +33,12 @@ class RunStats:
         return len(self.sent)
 
 
-def build_report(stats: RunStats, details_path: Path, sent_limit: int = 3) -> str:
-    """Формирует текст отчёта по разделу 3.6 требований."""
+def build_report(stats: RunStats, details_path: Path | None, sent_limit: int = 3) -> str:
+    """Формирует текст отчёта по разделу 3.6 требований.
+
+    С `details_path=None` строка «Файл с деталями» не добавляется — её
+    печатает консоль отдельной строкой с меткой времени.
+    """
     finished = stats.finished_at or datetime.now()
     separator = "=" * 33
     lines = [
@@ -61,8 +65,9 @@ def build_report(stats: RunStats, details_path: Path, sent_limit: int = 3) -> st
     else:
         lines.append("Отправленных откликов нет.")
 
-    lines.append("")
-    lines.append(f"Файл с деталями: {details_path}")
+    if details_path is not None:
+        lines.append("")
+        lines.append(f"Файл с деталями: {details_path}")
     return "\n".join(lines)
 
 

@@ -159,7 +159,7 @@ class AppConfig:
     state_path: Path
     queue_path: Path
     logs_dir: Path
-    processed_dir: Path
+    report_dir: Path
     cover_letter_max_length: int = 1500
     cover_letter_signature: str = ""
     processed_retention_days: int = 7
@@ -218,8 +218,9 @@ def load_config(config_path: Path | str | None = None) -> AppConfig:
         state_path=_resolve_project_path(paths.get("session_state", "state.json"), "paths.session_state"),
         queue_path=_resolve_project_path(paths.get("queue", "queue.json"), "paths.queue"),
         logs_dir=_resolve_project_path(paths.get("logs_dir", ".logs"), "paths.logs_dir"),
-        processed_dir=_resolve_project_path(
-            paths.get("processed_dir", "data/processed"), "paths.processed_dir"
+        report_dir=_resolve_project_path(
+            paths.get("report_dir") or paths.get("processed_dir") or "data/report",
+            "paths.report_dir",
         ),
         processed_retention_days=_positive_int(
             raw.get("processed_retention_days", 7), "processed_retention_days"

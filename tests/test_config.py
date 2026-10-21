@@ -257,15 +257,22 @@ def test_explain_rejections_must_be_bool(tmp_path: Path) -> None:
         load_config(write_config(tmp_path, llm={"decision": {"explain_rejections": "да"}}))
 
 
-def test_processed_dir_default(tmp_path: Path) -> None:
+def test_report_dir_default(tmp_path: Path) -> None:
     config = load_config(write_config(tmp_path))
 
-    assert config.processed_dir.name == "processed"
-    assert config.processed_dir.parent.name == "data"
+    assert config.report_dir.name == "report"
+    assert config.report_dir.parent.name == "data"
 
 
-def test_processed_dir_from_config(tmp_path: Path) -> None:
-    config = load_config(write_config(tmp_path, paths={"processed_dir": "data/my-processed"}))
+def test_report_dir_from_config(tmp_path: Path) -> None:
+    config = load_config(write_config(tmp_path, paths={"report_dir": "data/my-report"}))
 
-    assert config.processed_dir.name == "my-processed"
+    assert config.report_dir.name == "my-report"
+
+
+def test_report_dir_accepts_legacy_key(tmp_path: Path) -> None:
+    """Старый ключ paths.processed_dir продолжает работать."""
+    config = load_config(write_config(tmp_path, paths={"processed_dir": "data/legacy"}))
+
+    assert config.report_dir.name == "legacy"
 

@@ -110,7 +110,8 @@ def run(config: AppConfig, logger: RunLogger) -> tuple[RunStats, Path]:
 
     report = build_report(stats, details_path)
     logger.info("")
-    logger.info_plain(report)
+    logger.info_plain(build_report(stats, None))
+    logger.info(f"Файл с деталями: {details_path}")
 
     email_sent, email_message = send_email(
         config.email,
@@ -138,7 +139,7 @@ def _process_vacancies(
     search = config.search
     seen: set[str] = set()
     reviewed = 0
-    processed = ProcessedStore(config.processed_dir)
+    processed = ProcessedStore(config.report_dir)
     removed = processed.prune(config.processed_retention_days)
     if removed:
         logger.event(

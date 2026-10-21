@@ -136,3 +136,49 @@ def test_prune_without_directory_is_noop(tmp_path: Path) -> None:
 
     assert store.prune(days=7) == []
 
+
+def test_skipped_record_has_reason(tmp_path: Path) -> None:
+    """По файлу дня видно, почему вакансию пропустили."""
+    store = ProcessedStore(tmp_path, today=date(2026, 10, 21))
+    store.add(
+        url="https://hh.ru/vacancy/1",
+        title="Java",
+        company="Ozon",
+        status="skipped",
+        reason="вероятность 0.57 не выше порога 0.80",
+    )
+
+    records = json.loads((tmp_path / "2026-10-21.json").read_text(encoding="utf-8"))
+
+    assert records[0]["status"] == "skipped"
+    assert records[0]["reason"] == "вероятность 0.57 не выше порога 0.80"
+
+
+def test_sent_record_has_no_reason(tmp_path: Path) -> None:
+    store = ProcessedStore(tmp_path, today=date(2026, 10, 21))
+    store.add(url="https://hh.ru/vacancy/1", title="Java", company="Ozon", status="sent")
+
+    records = json.loads((tmp_path / "2026-10-21.json").read_text(encoding="utf-8"))
+
+    assert "reason" not in records[0]
+
+
+def test_queue_file_in_report_dir_is_ignored(tmp_path: Path) -> None:
+    """queue.json лежит в том же каталоге, но историей вакансий не считается."""
+    queue = [
+        {"url": "https://hh.ru/vacancy/9", "title": "Java", "company": "Ozon", "reason": "test"}
+    ]
+    (tmp_path / "queue.json").write_text(json.dumps(queue, ensure_ascii=False), encoding="utf-8")
+    ProcessedStore(tmp_path, today=date(2026, 10, 21)).add(
+        url="https://hh.ru/vacancy/1",
+        title="Java",
+        company="Sber",
+        status="sent",
+    )
+
+    store = ProcessedStore(tmp_path, today=date(2026, 10, 22))
+    store.load()
+
+    assert store.find("Java", "Ozon", "https://hh.ru/vacancy/9") is None
+    assert store.find("Java", "Sber", "https://hh.ru/vacancy/1") == "2026-10-21"
+

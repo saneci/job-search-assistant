@@ -65,6 +65,14 @@ def test_build_report(tmp_path: Path) -> None:
     assert str(details_path) in report
 
 
+def test_build_report_without_details_footer() -> None:
+    """Консоль печатает путь к деталям отдельной строкой с меткой времени."""
+    report = build_report(make_stats(), None)
+
+    assert "Файл с деталями" not in report
+    assert not report.endswith("\n")
+
+
 def test_build_report_without_sent() -> None:
     stats = RunStats(started_at=datetime(2026, 10, 21, 9, 44, 56))
 
