@@ -1,0 +1,402 @@
+"""Загрузка и валидация конфигурации приложения."""
+
+from __future__ import annotations
+
+import os
+import random
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Mapping, Sequence
+
+import yaml
+
+try:  # python-dotenv нужен только для чтения .env, для тестов логики не обязателен
+    from dotenv import load_dotenv
+except ImportError:  # pragma: no cover - зависимость есть в requirements.txt
+    load_dotenv = None  # type: ignore[assignment]
+
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config.yaml"
+
+AREA_IDS: dict[str, int] = {
+    "москва": 1,
+    "санкт-петербург": 2,
+    "екатеринбург": 3,
+    "новосибирск": 4,
+    "казань": 88,
+    "россия": 113,
+}
+
+EXPERIENCE_VALUES = frozenset({"noExperience", "between1And3", "between3And6", "moreThan6"})
+SCHEDULE_VALUES = frozenset({"fullDay", "shift", "flexible", "remote", "flyInFlyOut"})
+
+
+class ConfigError(RuntimeError):
+    """Некорректная конфигурация."""
+
+
+@dataclass(frozen=True)
+class DelayRange:
+    """Случайная пауза между действиями."""
+
+    minimum: float
+    maximum: float
+
+    def next(self) -> float:
+        return random.uniform(self.minimum, self.maximum)
+
+
+@dataclass(frozen=True)
+class SearchConfig:
+    """Параметры поиска вакансий."""
+
+    queries: tuple[str, ...]
+    area: str
+    area_id: int
+    salary_from: int | None
+    experience: str | None
+    schedule: str | None
+    exclude_keywords: tuple[str, ...]
+    daily_limit: int
+    delay: DelayRange
+    pages_limit: int
+    per_page: int
+    max_vacancies: int
+
+
+@dataclass(frozen=True)
+class DecisionConfig:
+    """Параметры Decision-вызова (модель решений)."""
+
+    base_url: str
+    model: str
+    threshold: float
+
+
+@dataclass(frozen=True)
+class GenerationConfig:
+    """Параметры Generation-вызова (чат-модель)."""
+
+    base_url: str
+    model: str
+    max_tokens: int
+    temperature: float
+    json_mode: bool
+    retry_on_invalid_json: bool
+
+
+@dataclass(frozen=True)
+class LLMConfig:
+    """Настройки LLM-слоя."""
+
+    api_key: str
+    timeout: float
+    decision: DecisionConfig
+    generation: GenerationConfig
+
+
+@dataclass(frozen=True)
+class BrowserConfig:
+    """Настройки браузера."""
+
+    headless: bool
+    slow_mo_ms: int
+
+
+@dataclass(frozen=True)
+class EmailConfig:
+    """Настройки отправки отчёта на email."""
+
+    enabled: bool
+    smtp_host: str
+    smtp_port: int
+    use_ssl: bool
+    sender: str
+    recipient: str
+    username: str
+    password: str
+
+
+@dataclass(frozen=True)
+class AppConfig:
+    """Полная конфигурация запуска."""
+
+    source_path: Path
+    search: SearchConfig
+    llm: LLMConfig
+    browser: BrowserConfig
+    email: EmailConfig
+    profile_path: Path
+    state_path: Path
+    queue_path: Path
+    logs_dir: Path
+    cover_letter_max_length: int = 1500
+
+
+def resolve_area_id(value: Any) -> int:
+    """Преобразует регион из конфигурации в id региона hh.ru."""
+    if isinstance(value, bool):
+        raise ConfigError("Параметр area должен быть названием региона или числовым id")
+    if isinstance(value, int):
+        if value <= 0:
+            raise ConfigError("Параметр area: числовой id региона должен быть положительным")
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            raise ConfigError("Параметр area не может быть пустым")
+        if text.isdigit():
+            return int(text)
+        key = text.lower().replace("ё", "е")
+        if key in AREA_IDS:
+            return AREA_IDS[key]
+        raise ConfigError(
+            f"Неизвестный регион area: {value!r}. Укажите числовой id hh.ru "
+            f"или одно из названий: {', '.join(sorted(AREA_IDS))}"
+        )
+    raise ConfigError("Параметр area должен быть названием региона или числовым id")
+
+
+def load_config(config_path: Path | str | None = None) -> AppConfig:
+    """Читает YAML-конфигурацию и переменные окружения."""
+    load_env()
+
+    path = Path(config_path) if config_path is not None else DEFAULT_CONFIG_PATH
+    if not path.is_absolute():
+        path = PROJECT_ROOT / path
+    if not path.exists():
+        raise ConfigError(f"Файл конфигурации не найден: {path}")
+
+    try:
+        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except yaml.YAMLError as exc:
+        raise ConfigError(f"Не удалось разобрать {path.name}: {exc}") from exc
+
+    if not isinstance(raw, Mapping):
+        raise ConfigError("Корневой элемент config.yaml должен быть словарём")
+
+    paths = _section(raw, "paths")
+    return AppConfig(
+        source_path=path,
+        search=_load_search(raw),
+        llm=_load_llm(raw),
+        browser=_load_browser(raw),
+        email=_load_email(raw),
+        profile_path=_resolve_project_path(paths.get("profile", "PROFILE.md"), "paths.profile"),
+        state_path=_resolve_project_path(paths.get("session_state", "state.json"), "paths.session_state"),
+        queue_path=_resolve_project_path(paths.get("queue", "queue.json"), "paths.queue"),
+        logs_dir=_resolve_project_path(paths.get("logs_dir", ".logs"), "paths.logs_dir"),
+        cover_letter_max_length=_positive_int(
+            raw.get("cover_letter_max_length", 1500), "cover_letter_max_length"
+        ),
+    )
+
+
+def load_env() -> None:
+    """Подхватывает .env из корня проекта (если он есть)."""
+    if load_dotenv is None:
+        return
+    env_path = PROJECT_ROOT / ".env"
+    if env_path.exists():
+        load_dotenv(env_path, override=False)
+
+
+def _load_search(raw: Mapping[str, Any]) -> SearchConfig:
+    queries = _parse_queries(raw.get("search_query"))
+    area = _require(raw, "area", "")
+    area_id = resolve_area_id(area)
+
+    experience = _optional_str(raw.get("experience"))
+    if experience is not None and experience not in EXPERIENCE_VALUES:
+        raise ConfigError(
+            "experience должен быть одним из: " + ", ".join(sorted(EXPERIENCE_VALUES))
+        )
+    schedule = _optional_str(raw.get("schedule"))
+    if schedule is not None and schedule not in SCHEDULE_VALUES:
+        raise ConfigError(
+            "schedule должен быть одним из: " + ", ".join(sorted(SCHEDULE_VALUES))
+        )
+
+    return SearchConfig(
+        queries=queries,
+        area=str(area),
+        area_id=area_id,
+        salary_from=_optional_non_negative_int(raw.get("salary_from"), "salary_from"),
+        experience=experience,
+        schedule=schedule,
+        exclude_keywords=_str_list(raw.get("exclude_keywords"), "exclude_keywords"),
+        daily_limit=_positive_int(_require(raw, "daily_limit", ""), "daily_limit"),
+        delay=_parse_delay(_require(raw, "delay_between_actions", "")),
+        pages_limit=_positive_int(raw.get("pages_limit", 5), "pages_limit"),
+        per_page=min(_positive_int(raw.get("per_page", 50), "per_page"), 100),
+        max_vacancies=_positive_int(raw.get("max_vacancies", 200), "max_vacancies"),
+    )
+
+
+def _load_llm(raw: Mapping[str, Any]) -> LLMConfig:
+    section = _section(raw, "llm")
+    api_key_env = _optional_str(section.get("api_key_env")) or "AITUNNEL_API_KEY"
+    api_key = os.environ.get(api_key_env, "").strip()
+
+    decision_raw = _section(section, "decision")
+    generation_raw = _section(section, "generation")
+
+    threshold = _float(decision_raw.get("threshold", 0.8), "llm.decision.threshold")
+    if not 0 < threshold <= 1:
+        raise ConfigError("llm.decision.threshold должен быть в диапазоне (0, 1]")
+
+    return LLMConfig(
+        api_key=api_key,
+        timeout=float(_positive_int(section.get("timeout_seconds", 120), "llm.timeout_seconds")),
+        decision=DecisionConfig(
+            base_url=_str(decision_raw.get("base_url", "https://api.aitunnel.ru/v1"), "llm.decision.base_url"),
+            model=_str(decision_raw.get("model", "gpt-6-luna-decisions"), "llm.decision.model"),
+            threshold=threshold,
+        ),
+        generation=GenerationConfig(
+            base_url=_str(
+                generation_raw.get("base_url", "https://api.aitunnel.ru/v1"),
+                "llm.generation.base_url",
+            ),
+            model=_str(generation_raw.get("model", "gpt-6-luna-pro"), "llm.generation.model"),
+            max_tokens=_positive_int(generation_raw.get("max_tokens", 2000), "llm.generation.max_tokens"),
+            temperature=_float(generation_raw.get("temperature", 0.7), "llm.generation.temperature"),
+            json_mode=bool(generation_raw.get("json_mode", False)),
+            retry_on_invalid_json=bool(generation_raw.get("retry_on_invalid_json", True)),
+        ),
+    )
+
+
+def _load_browser(raw: Mapping[str, Any]) -> BrowserConfig:
+    section = _section(raw, "browser")
+    slow_mo = _optional_non_negative_int(section.get("slow_mo_ms"), "browser.slow_mo_ms")
+    return BrowserConfig(
+        headless=bool(section.get("headless", False)),
+        slow_mo_ms=slow_mo or 0,
+    )
+
+
+def _load_email(raw: Mapping[str, Any]) -> EmailConfig:
+    notifications = _section(raw, "notifications")
+    section = _section(notifications, "email")
+    sender = _optional_str(section.get("sender")) or ""
+    username = os.environ.get("SMTP_USERNAME", "").strip() or sender
+    return EmailConfig(
+        enabled=bool(section.get("enabled", False)),
+        smtp_host=_optional_str(section.get("smtp_host")) or "",
+        smtp_port=_positive_int(section.get("smtp_port", 465), "notifications.email.smtp_port"),
+        use_ssl=bool(section.get("use_ssl", True)),
+        sender=sender,
+        recipient=_optional_str(section.get("recipient")) or "",
+        username=username,
+        password=os.environ.get("SMTP_PASSWORD", ""),
+    )
+
+
+def _section(raw: Mapping[str, Any], key: str) -> Mapping[str, Any]:
+    value = raw.get(key)
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping):
+        raise ConfigError(f"Раздел {key} должен быть словарём")
+    return value
+
+
+def _require(raw: Mapping[str, Any], key: str, section: str) -> Any:
+    if key not in raw or raw[key] is None:
+        name = f"{section}.{key}" if section else key
+        raise ConfigError(f"Обязательный параметр отсутствует: {name}")
+    return raw[key]
+
+
+def _parse_queries(value: Any) -> tuple[str, ...]:
+    if isinstance(value, str):
+        queries = (value.strip(),)
+    elif isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        queries = tuple(str(item).strip() for item in value)
+    else:
+        raise ConfigError("Обязательный параметр отсутствует или некорректен: search_query")
+    queries = tuple(query for query in queries if query)
+    if not queries:
+        raise ConfigError("search_query должен содержать хотя бы один непустой запрос")
+    return queries
+
+
+def _str_list(value: Any, key: str) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        return (value.strip(),) if value.strip() else ()
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        return tuple(str(item).strip() for item in value if str(item).strip())
+    raise ConfigError(f"Параметр {key} должен быть списком строк")
+
+
+def _parse_delay(value: Any) -> DelayRange:
+    if isinstance(value, Mapping):
+        raw_minimum = value.get("from", value.get("min"))
+        raw_maximum = value.get("to", value.get("max"))
+    elif isinstance(value, Sequence) and not isinstance(value, (str, bytes)) and len(value) == 2:
+        raw_minimum, raw_maximum = value[0], value[1]
+    else:
+        raise ConfigError(
+            "delay_between_actions должен быть словарём {from, to} или списком из двух чисел"
+        )
+    minimum = _float(raw_minimum, "delay_between_actions.from")
+    maximum = _float(raw_maximum, "delay_between_actions.to")
+    if minimum < 0 or maximum < 0:
+        raise ConfigError("delay_between_actions не может содержать отрицательные значения")
+    if minimum > maximum:
+        raise ConfigError("delay_between_actions: значение from больше значения to")
+    return DelayRange(minimum=minimum, maximum=maximum)
+
+
+def _positive_int(value: Any, key: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ConfigError(f"Параметр {key} должен быть целым числом")
+    if value <= 0:
+        raise ConfigError(f"Параметр {key} должен быть больше нуля")
+    return value
+
+
+def _optional_non_negative_int(value: Any, key: str) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ConfigError(f"Параметр {key} должен быть целым числом")
+    if value < 0:
+        raise ConfigError(f"Параметр {key} не может быть отрицательным")
+    return value
+
+
+def _float(value: Any, key: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ConfigError(f"Параметр {key} должен быть числом")
+    return float(value)
+
+
+def _str(value: Any, key: str) -> str:
+    text = _optional_str(value)
+    if not text:
+        raise ConfigError(f"Параметр {key} не может быть пустым")
+    return text
+
+
+def _optional_str(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _resolve_project_path(value: Any, key: str) -> Path:
+    text = _str(value, key)
+    path = Path(text)
+    if not path.is_absolute():
+        path = PROJECT_ROOT / path
+    resolved = path.resolve()
+    if resolved != PROJECT_ROOT and PROJECT_ROOT not in resolved.parents:
+        raise ConfigError(f"{key} должен указывать внутрь каталога проекта: {resolved}")
+    return resolved

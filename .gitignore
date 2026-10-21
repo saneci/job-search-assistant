@@ -1,3 +1,11 @@
 .idea
 .tmp
 .plans
+.logs
+.venv
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.env
+state.json
+queue.json

@@ -1,0 +1,92 @@
+# Конфигурация агента автоматических откликов на hh.ru.
+# Подробное описание параметров — в README.md.
+
+# Поисковой запрос: строка или список строк (по каждому запросу поиск выполняется отдельно).
+search_query:
+  - "Java backend engineer"
+  - "Java разработчик"
+
+# Регион: название (Москва, Санкт-Петербург, Россия, Екатеринбург, Новосибирск, Казань)
+# или числовой id региона hh.ru (Москва — 1, Россия — 113).
+area: Москва
+
+# Минимальная зарплата (необязательно).
+salary_from: 150000
+
+# Опыт работы (необязательно): noExperience, between1And3, between3And6, moreThan6.
+experience: between1And3
+
+# График (необязательно): fullDay, shift, flexible, remote, flyInFlyOut.
+schedule: remote
+
+# Стоп-слова в названии вакансии — фильтруются без обращения к LLM.
+exclude_keywords:
+  - senior
+  - lead
+  - "1С"
+
+# Максимум отправленных откликов за один запуск.
+daily_limit: 20
+
+# Случайная пауза между действиями, секунды.
+delay_between_actions:
+  from: 10
+  to: 20
+
+# Сколько страниц выдачи просматривать по каждому запросу.
+pages_limit: 5
+
+# Сколько вакансий просматривать по одной странице выдачи.
+per_page: 50
+
+# Предохранитель: максимум просмотренных вакансий за запуск.
+max_vacancies: 200
+
+# Максимальная длина сопроводительного письма (символы).
+cover_letter_max_length: 1500
+
+# Профиль пользователя: описание, примеры писем и правила стиля.
+paths:
+  profile: PROFILE.md
+  session_state: state.json
+  queue: queue.json
+  logs_dir: .logs
+
+# LLM: два независимых вызова (решение и генерация письма).
+llm:
+  # Имя переменной окружения с ключом. Сам ключ в репозитории не хранится.
+  api_key_env: AITUNNEL_API_KEY
+  timeout_seconds: 120
+
+  # Decision-вызов: модель решений, ответ — вероятности вариантов.
+  decision:
+    base_url: https://api.aitunnel.ru/v1
+    model: gpt-6-luna-decisions
+    # Порог: отклик отправляется, если P("подходит") > threshold.
+    threshold: 0.8
+
+  # Generation-вызов: чат-модель, ответ — JSON с вердиктом и письмом.
+  generation:
+    base_url: https://api.aitunnel.ru/v1
+    model: gpt-6-luna-pro
+    max_tokens: 2000
+    temperature: 0.7
+    # Запрашивать у провайдера JSON-режим ответа (response_format).
+    json_mode: false
+    # Повторная попытка при невалидном JSON (по ТЗ — ровно один повтор).
+    retry_on_invalid_json: true
+
+browser:
+  # false — браузер виден (рекомендуется: проще пройти капчу/проверить работу).
+  headless: false
+  slow_mo_ms: 0
+
+# Отчёт на email. При enabled: false отчёт печатается в консоль и сохраняется в .logs.
+notifications:
+  email:
+    enabled: false
+    smtp_host: smtp.yandex.ru
+    smtp_port: 465
+    use_ssl: true
+    sender: ""
+    recipient: ""
