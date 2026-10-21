@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import re
+import time
 from typing import Sequence
 from urllib.parse import urlparse
 
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import Locator, Page, TimeoutError as PlaywrightTimeoutError
 
-from .browser import CaptchaError, detect_captcha
+from .browser import NAVIGATION_TIMEOUT_MS, CaptchaError, PageLoadError, detect_captcha
 from .models import VacancyCard, VacancyDetails
 
 TITLE_SELECTORS = ("h1[data-qa='vacancy-title']", "h1.bloko-header-1", "h1")
@@ -54,17 +55,56 @@ STATUS_UNKNOWN = "unknown"
 
 RESPOND_RE = re.compile(r"^\s*откликнуться\s*$", re.IGNORECASE)
 LETTER_TOGGLE_RE = re.compile(r"добавить сопроводительное", re.IGNORECASE)
-TEST_ACTION_RE = re.compile(r"пройти тест|начать тест|пройти тестирование", re.IGNORECASE)
+TEST_ACTION_RE = re.compile(
+    r"пройти тест|начать тест|пройти тестирование|запустить тест", re.IGNORECASE
+)
 QUESTIONNAIRE_ACTION_RE = re.compile(
-    r"заполнить анкету|пройти анкет|ответить на вопросы", re.IGNORECASE
+    r"заполнить анкет|пройти анкет|ответить на вопросы|ответьте на вопросы|начать опрос",
+    re.IGNORECASE,
 )
 EXTERNAL_ACTION_RE = re.compile(r"на сайте работодателя|перейти на сайт", re.IGNORECASE)
 
+# Признаки теста/анкеты в форме отклика (описание вакансии сюда не попадает).
+QUESTIONNAIRE_TEXT_RE = re.compile(r"анкет|опросник|ответь(те)? на вопросы", re.IGNORECASE)
+TEST_TEXT_RE = re.compile(
+    r"\bтест(?:ы|а|ов)?\b|\bтестирован\w*|\bтестовое задание", re.IGNORECASE
+)
+EXTERNAL_TEXT_RE = re.compile(
+    r"сайт[еа]? работодателя|внешн(?:яя|ей|юю) (?:форм|анкет)", re.IGNORECASE
+)
+
 QUESTIONNAIRE_SELECTORS = (
     "[data-qa='vacancy-response-questionnaire']",
+    "[data-qa*='questionnaire']",
     "a[href*='questionnaire']",
 )
-TEST_SELECTORS = ("[data-qa='vacancy-response-test']", "[data-qa='vacancy-test']")
+TEST_SELECTORS = (
+    "[data-qa='vacancy-response-test']",
+    "[data-qa='vacancy-test']",
+    "[data-qa*='-test']",
+)
+
+# Текст формы отклика: модалка, заголовки, кнопки и блоки с data-qa="*response*".
+RESPONSE_TEXT_SELECTORS = (
+    "[data-qa='modal-content']",
+    "[role='dialog']",
+    "h1",
+    "h2",
+    "h3",
+    "button",
+    "[role='button']",
+    "[data-qa*='response']",
+)
+
+SUCCESS_TEXTS = (
+    "Отклик отправлен",
+    "Отклик успешно отправлен",
+    "Резюме отправлено",
+    "Вы откликнулись",
+)
+
+RESPONSE_UI_WAIT_SECONDS = 10
+RESPONSE_RESULT_WAIT_SECONDS = 15
 
 
 class VacancyParseError(RuntimeError):
@@ -73,7 +113,12 @@ class VacancyParseError(RuntimeError):
 
 def open_vacancy(page: Page, card: VacancyCard) -> VacancyDetails:
     """Открывает страницу вакансии и извлекает данные."""
-    page.goto(card.url, wait_until="domcontentloaded")
+    try:
+        page.goto(card.url, wait_until="domcontentloaded", timeout=NAVIGATION_TIMEOUT_MS)
+    except PlaywrightTimeoutError as exc:
+        raise PageLoadError(
+            f"страница вакансии не загрузилась за {NAVIGATION_TIMEOUT_MS // 1000} с: {card.url}"
+        ) from exc
     page.wait_for_timeout(1500)
     if detect_captcha(page):
         raise CaptchaError(f"hh.ru показал капчу на странице вакансии: {card.url}")
@@ -117,15 +162,58 @@ def detect_page_blocker(page: Page) -> str | None:
 
 def detect_response_blocker(scope: Locator | Page) -> str | None:
     """Ищет признаки теста/анкеты/внешней формы в форме отклика."""
-    if _has_selector(scope, QUESTIONNAIRE_SELECTORS) or _has_role_name(scope, QUESTIONNAIRE_ACTION_RE):
+    if _has_selector(scope, QUESTIONNAIRE_SELECTORS):
         return "questionnaire"
-    if _has_selector(scope, TEST_SELECTORS) or _has_role_name(scope, TEST_ACTION_RE):
+    if _has_selector(scope, TEST_SELECTORS):
         return "test"
-    if _has_role_name(scope, EXTERNAL_ACTION_RE):
+
+    text = _response_text(scope)
+    if QUESTIONNAIRE_TEXT_RE.search(text):
+        return "questionnaire"
+    if TEST_TEXT_RE.search(text):
+        return "test"
+    if EXTERNAL_TEXT_RE.search(text):
         return "external_form"
+
     if not isinstance(scope, Page) and _has_external_link(scope):
         return "external_form"
     return None
+
+
+def _response_text(scope: Locator | Page) -> str:
+    """Текст интерфейса формы отклика: заголовки, кнопки, модалка (без описания вакансии)."""
+    parts: list[str] = []
+    for selector in RESPONSE_TEXT_SELECTORS:
+        try:
+            items = scope.locator(selector)
+            total = min(items.count(), 30)
+        except PlaywrightError:
+            continue
+        for index in range(total):
+            try:
+                item = items.nth(index)
+                if not item.is_visible():
+                    continue
+                if selector in ("h1", "h2", "h3") and _inside_description(item):
+                    continue
+                text = item.inner_text().strip()
+            except PlaywrightError:
+                continue
+            if text:
+                parts.append(text)
+    return "\n".join(dict.fromkeys(parts))
+
+
+def _inside_description(locator: Locator) -> bool:
+    """Заголовок находится внутри описания вакансии — это не форма отклика."""
+    try:
+        return bool(
+            locator.evaluate(
+                "el => !!el.closest(\"[data-qa='vacancy-description'], .vacancy-description\")"
+            )
+        )
+    except PlaywrightError:
+        return False
 
 
 def respond(page: Page, letter: str) -> str:
@@ -141,9 +229,16 @@ def respond(page: Page, letter: str) -> str:
         button.click()
     except PlaywrightError:
         return STATUS_UNKNOWN
-    page.wait_for_timeout(2000)
-    if detect_captcha(page):
+
+    ui = _wait_for_response_ui(page)
+    if ui == STATUS_CAPTCHA:
         return STATUS_CAPTCHA
+    if ui in ("test", "questionnaire", "external_form"):
+        _dismiss(page)
+        return ui
+    if ui != "ready":
+        _dismiss(page)
+        return STATUS_NO_FORM
 
     scope = _response_scope(page)
     blocker = detect_response_blocker(scope)
@@ -151,23 +246,73 @@ def respond(page: Page, letter: str) -> str:
         _dismiss(page)
         return blocker
 
+    # Письмо вставляем, если форма позволяет (по ТЗ).
     _fill_letter(page, scope, letter)
 
     submit = _find_action(scope, SUBMIT_SELECTORS, RESPOND_RE)
     if submit is None:
+        blocker = detect_response_blocker(scope)
         _dismiss(page)
-        return STATUS_NO_FORM
+        return blocker or STATUS_NO_FORM
 
     try:
         submit.click()
     except PlaywrightError:
         return STATUS_UNKNOWN
-    page.wait_for_timeout(2500)
-    if detect_captcha(page):
-        return STATUS_CAPTCHA
-    if _is_already_responded(page) or _modal_hidden(page):
-        return STATUS_SENT
-    return STATUS_UNKNOWN
+
+    result = _wait_for_response_result(page)
+    if result in ("test", "questionnaire", "external_form"):
+        _dismiss(page)
+    return result
+
+
+def _wait_for_response_ui(page: Page, seconds: int = RESPONSE_UI_WAIT_SECONDS) -> str:
+    """Ждёт форму отклика. Возвращает 'ready', статус или причину блокировки."""
+    deadline = time.monotonic() + seconds
+    while True:
+        page.wait_for_timeout(500)
+        if detect_captcha(page):
+            return STATUS_CAPTCHA
+
+        scope = _response_scope(page)
+        blocker = detect_response_blocker(scope)
+        if blocker:
+            return blocker
+        if _has_response_form(page, scope):
+            return "ready"
+        if time.monotonic() >= deadline:
+            return "none"
+
+
+def _wait_for_response_result(page: Page, seconds: int = RESPONSE_RESULT_WAIT_SECONDS) -> str:
+    """Ждёт результат отправки. Возвращает sent / причину блокировки / unknown."""
+    deadline = time.monotonic() + seconds
+    while True:
+        page.wait_for_timeout(1000)
+        if detect_captcha(page):
+            return STATUS_CAPTCHA
+
+        scope = _response_scope(page)
+        # Сначала проверяем явный успех: заголовки описания вакансии не должны
+        # давать ложное срабатывание на словах «тест»/«анкета».
+        if _has_success(page):
+            return STATUS_SENT
+        blocker = detect_response_blocker(scope)
+        if blocker:
+            return blocker
+        if time.monotonic() >= deadline:
+            return STATUS_UNKNOWN
+
+
+def _has_response_form(page: Page, scope: Locator | Page) -> bool:
+    """Появилась ли форма отклика (модалка, страница отклика, textarea)."""
+    if not _modal_hidden(page):
+        return True
+    if "vacancy_response" in page.url.lower():
+        return True
+    if _first_visible(scope, LETTER_TEXTAREA_SELECTORS) is not None:
+        return True
+    return _find_action(scope, LETTER_TOGGLE_SELECTORS, LETTER_TOGGLE_RE) is not None
 
 
 def _fill_letter(page: Page, scope: Locator | Page, letter: str) -> bool:
@@ -220,14 +365,19 @@ def _dismiss(page: Page) -> None:
             pass
 
 
-def _is_already_responded(page: Page) -> bool:
-    for text in ("Отклик отправлен", "Вы откликнулись"):
+def _has_success(page: Page) -> bool:
+    """Есть ли на странице явное подтверждение отправки отклика."""
+    for text in SUCCESS_TEXTS:
         try:
             if _is_visible(page.get_by_text(text, exact=False).first):
                 return True
         except PlaywrightError:
             continue
     return False
+
+
+def _is_already_responded(page: Page) -> bool:
+    return _has_success(page)
 
 
 def _find_action(

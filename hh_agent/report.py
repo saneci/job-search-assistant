@@ -25,6 +25,7 @@ class RunStats:
     queued: list[dict[str, Any]] = field(default_factory=list)
     errors: list[RunError] = field(default_factory=list)
     stop_reason: str = ""
+    last_action: str = ""
 
     @property
     def sent_count(self) -> int:
@@ -34,18 +35,20 @@ class RunStats:
 def build_report(stats: RunStats, details_path: Path, sent_limit: int = 3) -> str:
     """Формирует текст отчёта по разделу 3.6 требований."""
     finished = stats.finished_at or datetime.now()
+    separator = "=" * 33
     lines = [
+        separator,
         f"Отчёт за {stats.started_at.strftime('%Y-%m-%d %H:%M')}",
-        "",
-        f"Отправлено откликов: {len(stats.sent)}",
-        f"Пропущено (не подошло): {len(stats.skipped)}",
-        f"Отложено (тесты/анкеты): {len(stats.queued)}",
+        separator,
+        f"- Отправлено откликов: {len(stats.sent)}",
+        f"- Пропущено (не подошло): {len(stats.skipped)}",
+        f"- Отложено (тесты/анкеты): {len(stats.queued)}",
     ]
     if stats.errors:
-        lines.append(f"Ошибок при обработке: {len(stats.errors)}")
+        lines.append(f"- Ошибок при обработке: {len(stats.errors)}")
     if stats.stop_reason:
-        lines.append(f"Причина остановки: {stats.stop_reason}")
-    lines.append(f"Длительность: {_duration(stats.started_at, finished)}")
+        lines.append(f"- Причина остановки: {stats.stop_reason}")
+    lines.append(f"- Длительность: {_duration(stats.started_at, finished)}")
     lines.append("")
 
     if stats.sent:
@@ -68,6 +71,7 @@ def build_details(stats: RunStats, run_id: str) -> dict[str, Any]:
         "started_at": stats.started_at.isoformat(timespec="seconds"),
         "finished_at": stats.finished_at.isoformat(timespec="seconds") if stats.finished_at else None,
         "stop_reason": stats.stop_reason,
+        "last_action": stats.last_action,
         "summary": {
             "sent": len(stats.sent),
             "skipped": len(stats.skipped),

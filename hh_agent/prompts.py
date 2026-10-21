@@ -2,32 +2,17 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from .models import VacancyDetails
 from .profile import Profile
 
 
-SYSTEM_PROMPT = """Ты — персональный ассистент по поиску работы. Твоя задача — оценить вакансию
-на соответствие профилю пользователя и, если она подходит, написать
-сопроводительное письмо от имени пользователя.
-
-ПРАВИЛА ОЦЕНКИ:
-1. Читай текст вакансии внимательно. Оценивай не по названию, а по сути:
-   требования, обязанности, стек, условия.
-2. Сравнивай с профилем пользователя (он дан ниже). Если совпадение
-   по ключевым требованиям менее 70% — вердикт "не подходит".
-3. Если в вакансии есть красные флаги (неадекватные требования, размытые
-   обязанности, признаки "работы за идею") — вердикт "не подходит" с
-   указанием причины.
-
-ПРАВИЛА НАПИСАНИЯ ПИСЬМА:
-1. Пиши от первого лица, как будто это пользователь.
-2. Стиль — из профиля пользователя (примеры писем и правила стиля ниже).
-3. Не используй шаблонные фразы: "коммуникабельный", "стрессоустойчивый",
-   "командный игрок", "быстро обучаюсь".
-4. Каждое утверждение подкрепляй конкретным примером из опыта пользователя.
-5. Отвечай на конкретные требования вакансии, а не пиши общее письмо.
-6. Длина — не более 1500 символов. Коротко, по делу, без воды.
-7. Не льсти работодателю и не используй восторженные эпитеты.
+# Основной системный промпт хранится в SYSTEM_PROMPT.md (правится без изменения кода).
+# Константа ниже — аварийный минимум на случай, если файл недоступен.
+FALLBACK_SYSTEM_PROMPT = """Ты — персональный ассистент по поиску работы. Оцени вакансию
+на соответствие профилю пользователя и, если она подходит, напиши
+сопроводительное письмо от его имени, используя только факты из профиля.
 
 ФОРМАТ ОТВЕТА (строго JSON):
 {
@@ -58,6 +43,34 @@ RETRY_JSON_INSTRUCTION = (
     "Верни только JSON-объект без markdown-разметки и пояснений."
 )
 
+REJECTION_SYSTEM_PROMPT = """Ты объясняешь кандидату, почему вакансия ему не подходит.
+Одно предложение до 200 символов: чего не хватает или что именно не совпало.
+Только причина — без вступлений, извинений и советов. Пиши по-русски."""
+
+REJECTION_MAX_TOKENS = 120
+REJECTION_MAX_LENGTH = 240
+_REJECTION_DESCRIPTION_LIMIT = 1500
+
+
+def build_rejection_prompt(
+    profile: Profile,
+    vacancy: VacancyDetails,
+    probability: float,
+    threshold: float,
+) -> str:
+    """Короткий user-промпт для объяснения отказа (дешёвый запрос)."""
+    description = vacancy.description or ""
+    if len(description) > _REJECTION_DESCRIPTION_LIMIT:
+        description = description[: _REJECTION_DESCRIPTION_LIMIT] + "…"
+    return (
+        f"ПРОФИЛЬ:\n{profile.text}\n\n"
+        f"ВАКАНСИЯ:\n{vacancy.title} — {vacancy.company or 'компания не указана'}\n"
+        f"{description}\n\n"
+        f"Вероятность соответствия: {probability:.2f} (порог {threshold:.2f})."
+    )
+
+
+
 
 def build_user_prompt(profile: Profile, vacancy: VacancyDetails) -> str:
     """Подставляет данные профиля и вакансии в шаблон user prompt."""
@@ -74,3 +87,19 @@ def build_user_prompt(profile: Profile, vacancy: VacancyDetails) -> str:
     for placeholder, value in values.items():
         prompt = prompt.replace(placeholder, str(value))
     return prompt
+
+
+def load_system_prompt(path: Path | None = None) -> str:
+    """Читает системный промпт из файла (обычно SYSTEM_PROMPT.md).
+
+    Если файл не задан, отсутствует или пуст — возвращает FALLBACK_SYSTEM_PROMPT,
+    чтобы запрос к LLM всё равно содержал формат ответа. В рабочем запуске путь
+    проверяется при загрузке конфигурации, поэтому fallback не используется.
+    """
+    if path is None or not path.exists():
+        return FALLBACK_SYSTEM_PROMPT
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return FALLBACK_SYSTEM_PROMPT
+    return text or FALLBACK_SYSTEM_PROMPT

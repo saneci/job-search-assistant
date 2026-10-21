@@ -10,13 +10,18 @@ from typing import Any, Mapping
 
 import httpx
 
-from .config import LLMConfig
+from .config import FIT_LABEL, LLMConfig, NOT_FIT_LABEL, default_decision_criteria
 from .models import VacancyDetails
 from .profile import Profile
-from .prompts import RETRY_JSON_INSTRUCTION, SYSTEM_PROMPT, build_user_prompt
-
-FIT_LABEL = "подходит"
-NOT_FIT_LABEL = "не подходит"
+from .prompts import (
+    REJECTION_MAX_LENGTH,
+    REJECTION_MAX_TOKENS,
+    REJECTION_SYSTEM_PROMPT,
+    RETRY_JSON_INSTRUCTION,
+    build_rejection_prompt,
+    build_user_prompt,
+    load_system_prompt,
+)
 
 _RETRYABLE_STATUSES = frozenset({429, 500, 502, 503, 504})
 _FENCE_RE = re.compile(r"```(?:json)?\s*(?P<body>.*?)```", re.DOTALL | re.IGNORECASE)
@@ -38,6 +43,7 @@ class DecisionResult:
     probability: float
     threshold: float
     probabilities: dict[str, float]
+    chosen: str
 
 
 @dataclass(frozen=True)
@@ -54,6 +60,7 @@ class LLMClient:
 
     def __init__(self, config: LLMConfig, transport: httpx.BaseTransport | None = None) -> None:
         self.config = config
+        self._system_prompt = load_system_prompt(config.system_prompt_path)
         self._client = httpx.Client(transport=transport, timeout=config.timeout)
 
     def close(self) -> None:
@@ -69,6 +76,7 @@ class LLMClient:
 
     def decide(self, profile: Profile, vacancy: VacancyDetails) -> DecisionResult:
         """Оценивает вакансию и возвращает вероятность варианта «подходит»."""
+        criteria = self.config.decision.criteria or default_decision_criteria()
         payload = {
             "model": self.config.decision.model,
             "state": {
@@ -84,16 +92,7 @@ class LLMClient:
                 "fit": {
                     "type": "choice",
                     "instructions": "Подходит ли вакансия профилю пользователя?",
-                    "criteria": {
-                        FIT_LABEL: (
-                            "Требования, обязанности, стек и условия вакансии совпадают "
-                            "с профилем не менее чем на 70%, красных флагов нет"
-                        ),
-                        NOT_FIT_LABEL: (
-                            "Совпадение по ключевым требованиям менее 70%, "
-                            "другая специализация или есть красные флаги"
-                        ),
-                    },
+                    "criteria": dict(criteria),
                 }
             },
         }
@@ -102,11 +101,13 @@ class LLMClient:
         probabilities = extract_probabilities(data)
         probability = probability_for(probabilities, FIT_LABEL)
         threshold = self.config.decision.threshold
+        chosen = max(probabilities, key=lambda label: probabilities[label])
         return DecisionResult(
             fits=probability > threshold,
             probability=probability,
             threshold=threshold,
             probabilities=probabilities,
+            chosen=chosen,
         )
 
     # --- Generation-вызов -----------------------------------------------
@@ -116,10 +117,11 @@ class LLMClient:
         profile: Profile,
         vacancy: VacancyDetails,
         max_letter_length: int = 1500,
+        signature: str = "",
     ) -> GenerationResult:
         """Генерирует сопроводительное письмо с валидацией JSON."""
         messages: list[dict[str, str]] = [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": self._system_prompt},
             {"role": "user", "content": build_user_prompt(profile, vacancy)},
         ]
         attempts = 2 if self.config.generation.retry_on_invalid_json else 1
@@ -128,7 +130,9 @@ class LLMClient:
         for attempt in range(1, attempts + 1):
             content = self._chat(messages)
             try:
-                return parse_generation(extract_json_object(content), max_letter_length)
+                return parse_generation(
+                    extract_json_object(content), max_letter_length, signature
+                )
             except LLMResponseError as exc:
                 last_error = exc
                 if attempt >= attempts:
@@ -142,14 +146,39 @@ class LLMClient:
         assert last_error is not None
         raise last_error
 
+    def explain_rejection(
+        self,
+        profile: Profile,
+        vacancy: VacancyDetails,
+        probability: float,
+        threshold: float,
+    ) -> str:
+        """Короткое объяснение отказа: один дешёвый Chat-запрос (до 120 токенов)."""
+        messages: list[dict[str, str]] = [
+            {"role": "system", "content": REJECTION_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": build_rejection_prompt(profile, vacancy, probability, threshold),
+            },
+        ]
+        content = self._chat(messages, max_tokens=REJECTION_MAX_TOKENS, temperature=0.0)
+        return _one_line(content, REJECTION_MAX_LENGTH)
+
     # --- HTTP -----------------------------------------------------------
 
-    def _chat(self, messages: list[dict[str, str]]) -> str:
+    def _chat(
+        self,
+        messages: list[dict[str, str]],
+        max_tokens: int | None = None,
+        temperature: float | None = None,
+    ) -> str:
         payload: dict[str, Any] = {
             "model": self.config.generation.model,
             "messages": messages,
-            "max_tokens": self.config.generation.max_tokens,
-            "temperature": self.config.generation.temperature,
+            "max_tokens": max_tokens or self.config.generation.max_tokens,
+            "temperature": (
+                self.config.generation.temperature if temperature is None else temperature
+            ),
         }
         if self.config.generation.json_mode:
             payload["response_format"] = {"type": "json_object"}
@@ -228,10 +257,24 @@ def extract_probabilities(payload: Mapping[str, Any], question: str = "fit") -> 
     answer = _find_answer(payload, question)
 
     if isinstance(answer, Mapping):
+        # Официальный формат AITUNNEL: answers.<name>.probabilities по ключам вариантов.
         probabilities = answer.get("probabilities")
         if isinstance(probabilities, Mapping):
             candidates.append(probabilities)
 
+        # choice-ответ: answers.<name>.choice = выбранный ключ, confidence — его вероятность.
+        choice = answer.get("choice")
+        confidence = answer.get("confidence", answer.get("probability"))
+        if isinstance(choice, str) and _is_number(confidence):
+            candidates.append({choice: float(confidence)})  # type: ignore[arg-type]
+
+        # noul-ответ: answers.<name>.noul — вероятность «да» (0…1).
+        noul = answer.get("noul")
+        if _is_number(noul):
+            probability = float(noul)  # type: ignore[arg-type]
+            candidates.append({FIT_LABEL: probability, NOT_FIT_LABEL: 1.0 - probability})
+
+        # Альтернативный формат: value + probability/confidence.
         value = answer.get("value")
         single = answer.get("probability", answer.get("confidence"))
 
@@ -292,7 +335,11 @@ def extract_json_object(text: str) -> dict[str, Any]:
     raise LLMResponseError(f"LLM вернул не JSON: {_shorten(text)}")
 
 
-def parse_generation(payload: Mapping[str, Any], max_length: int = 1500) -> GenerationResult:
+def parse_generation(
+    payload: Mapping[str, Any],
+    max_length: int = 1500,
+    signature: str = "",
+) -> GenerationResult:
     """Валидирует JSON Generation-вызова."""
     verdict = normalize_verdict(payload.get("verdict"))
     if verdict is None:
@@ -307,9 +354,50 @@ def parse_generation(payload: Mapping[str, Any], max_length: int = 1500) -> Gene
     if verdict == NOT_FIT_LABEL:
         cover_letter = ""
     elif cover_letter:
-        cover_letter = truncate_cover_letter(cover_letter, max_length)
+        cover_letter = add_signature(cover_letter, signature, max_length)
 
     return GenerationResult(verdict=verdict, reason=reason, cover_letter=cover_letter)
+
+
+SIGNATURE_SEPARATOR = "\n\n"
+_EMAIL_RE = re.compile(r"[\w.+-]+@[\w.-]+\.\w+")
+_TELEGRAM_RE = re.compile(r"@[A-Za-z][\w_]{2,}")
+
+
+def add_signature(text: str, signature: str, limit: int = 1500) -> str:
+    """Добавляет подпись с контактами через пустую строку, не превышая limit.
+
+    Подпись задаётся в config.yaml (cover_letter_signature). Если модель уже
+    добавила контакты в письмо, повторно они не дублируются.
+    """
+    text = (text or "").strip()
+    signature = (signature or "").strip()
+    if not text:
+        return ""
+    if not signature:
+        return truncate_cover_letter(text, limit)
+    if _signature_present(text, signature):
+        return truncate_cover_letter(text, limit)
+
+    body_limit = limit - len(signature) - len(SIGNATURE_SEPARATOR)
+    if body_limit <= 0:
+        # Подпись занимает весь лимит — письмо всё равно уходит с контактами.
+        return truncate_cover_letter(signature, limit)
+
+    body = truncate_cover_letter(text, body_limit)
+    if not body:
+        return truncate_cover_letter(signature, limit)
+    return f"{body}{SIGNATURE_SEPARATOR}{signature}"
+
+
+def _signature_present(text: str, signature: str) -> bool:
+    """Проверяет, что подпись (или её контакты) уже есть в тексте письма."""
+    lowered_text = " ".join(text.lower().split())
+    lowered_signature = " ".join(signature.lower().split())
+    if lowered_signature and lowered_signature in lowered_text:
+        return True
+    contacts = _EMAIL_RE.findall(signature) + _TELEGRAM_RE.findall(signature)
+    return bool(contacts) and all(contact.lower() in lowered_text for contact in contacts)
 
 
 def truncate_cover_letter(text: str, limit: int = 1500) -> str:
@@ -339,11 +427,11 @@ def _find_answer(payload: Mapping[str, Any], question: str) -> Any:
     if isinstance(answers, Mapping):
         if question in answers:
             return answers[question]
-        if any(key in answers for key in ("probabilities", "probability", "value")):
+        if any(key in answers for key in ("probabilities", "probability", "choice", "noul", "value")):
             return answers
         for value in answers.values():
             if isinstance(value, Mapping) and (
-                "probabilities" in value or "probability" in value
+                "probabilities" in value or "probability" in value or "choice" in value
             ):
                 return value
     for key in ("result", "output"):
@@ -406,3 +494,11 @@ def _sleep_before_retry(attempt: int, retry_after: str | None) -> None:
 def _shorten(text: str, limit: int = 300) -> str:
     text = (text or "").strip().replace("\n", " ")
     return text if len(text) <= limit else text[:limit] + "…"
+
+
+def _one_line(text: str, limit: int) -> str:
+    """Схлопывает ответ модели в одну строку и ограничивает длину."""
+    line = " ".join((text or "").split())
+    if len(line) <= limit:
+        return line
+    return line[: limit - 1].rstrip(" ,;:-") + "…"

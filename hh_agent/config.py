@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import os
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-import yaml
+from ruamel.yaml import YAML
+from ruamel.yaml.error import YAMLError
 
 try:  # python-dotenv нужен только для чтения .env, для тестов логики не обязателен
     from dotenv import load_dotenv
@@ -19,6 +20,22 @@ except ImportError:  # pragma: no cover - зависимость есть в req
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config.yaml"
+DEFAULT_SYSTEM_PROMPT_PATH = PROJECT_ROOT / "SYSTEM_PROMPT.md"
+
+FIT_LABEL = "подходит"
+NOT_FIT_LABEL = "не подходит"
+
+# Критерии для Decision API. Значения по умолчанию; в config.yaml
+# (llm.decision.criteria) их можно переопределить — это единственный
+# источник числовых порогов и формулировок для модели решений.
+DEFAULT_FIT_CRITERIA = (
+    "Требования, обязанности, стек и условия вакансии совпадают с профилем "
+    "не менее чем на 70%, красных флагов нет"
+)
+DEFAULT_NOT_FIT_CRITERIA = (
+    "Совпадение по ключевым требованиям менее 70%, другая специализация "
+    "или есть красные флаги"
+)
 
 AREA_IDS: dict[str, int] = {
     "москва": 1,
@@ -35,6 +52,11 @@ SCHEDULE_VALUES = frozenset({"fullDay", "shift", "flexible", "remote", "flyInFly
 
 class ConfigError(RuntimeError):
     """Некорректная конфигурация."""
+
+
+def default_decision_criteria() -> dict[str, str]:
+    """Критерии Decision API по умолчанию (переопределяются в config.yaml)."""
+    return {FIT_LABEL: DEFAULT_FIT_CRITERIA, NOT_FIT_LABEL: DEFAULT_NOT_FIT_CRITERIA}
 
 
 @dataclass(frozen=True)
@@ -59,7 +81,8 @@ class SearchConfig:
     experience: str | None
     schedule: str | None
     exclude_keywords: tuple[str, ...]
-    daily_limit: int
+    exclude_companies: tuple[str, ...]
+    limit_per_run: int
     delay: DelayRange
     pages_limit: int
     per_page: int
@@ -73,6 +96,8 @@ class DecisionConfig:
     base_url: str
     model: str
     threshold: float
+    criteria: dict[str, str] = field(default_factory=dict)
+    explain_rejections: bool = False
 
 
 @dataclass(frozen=True)
@@ -95,6 +120,7 @@ class LLMConfig:
     timeout: float
     decision: DecisionConfig
     generation: GenerationConfig
+    system_prompt_path: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -103,6 +129,7 @@ class BrowserConfig:
 
     headless: bool
     slow_mo_ms: int
+    channel: str | None = None
 
 
 @dataclass(frozen=True)
@@ -132,7 +159,10 @@ class AppConfig:
     state_path: Path
     queue_path: Path
     logs_dir: Path
+    processed_dir: Path
     cover_letter_max_length: int = 1500
+    cover_letter_signature: str = ""
+    processed_retention_days: int = 7
 
 
 def resolve_area_id(value: Any) -> int:
@@ -170,8 +200,8 @@ def load_config(config_path: Path | str | None = None) -> AppConfig:
         raise ConfigError(f"Файл конфигурации не найден: {path}")
 
     try:
-        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    except yaml.YAMLError as exc:
+        raw = _load_yaml(path.read_text(encoding="utf-8")) or {}
+    except YAMLError as exc:
         raise ConfigError(f"Не удалось разобрать {path.name}: {exc}") from exc
 
     if not isinstance(raw, Mapping):
@@ -188,10 +218,22 @@ def load_config(config_path: Path | str | None = None) -> AppConfig:
         state_path=_resolve_project_path(paths.get("session_state", "state.json"), "paths.session_state"),
         queue_path=_resolve_project_path(paths.get("queue", "queue.json"), "paths.queue"),
         logs_dir=_resolve_project_path(paths.get("logs_dir", ".logs"), "paths.logs_dir"),
+        processed_dir=_resolve_project_path(
+            paths.get("processed_dir", "data/processed"), "paths.processed_dir"
+        ),
+        processed_retention_days=_positive_int(
+            raw.get("processed_retention_days", 7), "processed_retention_days"
+        ),
         cover_letter_max_length=_positive_int(
             raw.get("cover_letter_max_length", 1500), "cover_letter_max_length"
         ),
+        cover_letter_signature=_optional_str(raw.get("cover_letter_signature")) or "",
     )
+
+
+def _load_yaml(text: str) -> Any:
+    """Разбирает YAML чистым Python-реализацией (без C-расширений и компиляции)."""
+    return YAML(typ="safe", pure=True).load(text)
 
 
 def load_env() -> None:
@@ -227,12 +269,26 @@ def _load_search(raw: Mapping[str, Any]) -> SearchConfig:
         experience=experience,
         schedule=schedule,
         exclude_keywords=_str_list(raw.get("exclude_keywords"), "exclude_keywords"),
-        daily_limit=_positive_int(_require(raw, "daily_limit", ""), "daily_limit"),
+        exclude_companies=_str_list(raw.get("exclude_companies"), "exclude_companies"),
+        limit_per_run=_positive_int(_limit_per_run_value(raw), "limit_per_run"),
         delay=_parse_delay(_require(raw, "delay_between_actions", "")),
         pages_limit=_positive_int(raw.get("pages_limit", 5), "pages_limit"),
         per_page=min(_positive_int(raw.get("per_page", 50), "per_page"), 100),
         max_vacancies=_positive_int(raw.get("max_vacancies", 200), "max_vacancies"),
     )
+
+
+def _limit_per_run_value(raw: Mapping[str, Any]) -> Any:
+    """Значение лимита откликов за запуск.
+
+    Основной ключ — limit_per_run; daily_limit (ключ из ТЗ) поддерживается
+    как устаревший синоним, чтобы старые конфиги продолжали работать.
+    """
+    if raw.get("limit_per_run") is not None:
+        return raw["limit_per_run"]
+    if raw.get("daily_limit") is not None:
+        return raw["daily_limit"]
+    raise ConfigError("Обязательный параметр отсутствует: limit_per_run")
 
 
 def _load_llm(raw: Mapping[str, Any]) -> LLMConfig:
@@ -247,13 +303,30 @@ def _load_llm(raw: Mapping[str, Any]) -> LLMConfig:
     if not 0 < threshold <= 1:
         raise ConfigError("llm.decision.threshold должен быть в диапазоне (0, 1]")
 
+    criteria = _load_decision_criteria(decision_raw.get("criteria"))
+
+    system_prompt_path = (
+        _optional_project_path(section.get("system_prompt_path"), "llm.system_prompt_path")
+        or DEFAULT_SYSTEM_PROMPT_PATH
+    )
+    if not system_prompt_path.is_file():
+        raise ConfigError(
+            "llm.system_prompt_path: файл с системным промптом не найден — "
+            f"{system_prompt_path}. Создайте его или укажите другой путь в config.yaml"
+        )
+
     return LLMConfig(
         api_key=api_key,
         timeout=float(_positive_int(section.get("timeout_seconds", 120), "llm.timeout_seconds")),
+        system_prompt_path=system_prompt_path,
         decision=DecisionConfig(
             base_url=_str(decision_raw.get("base_url", "https://api.aitunnel.ru/v1"), "llm.decision.base_url"),
             model=_str(decision_raw.get("model", "gpt-6-luna-decisions"), "llm.decision.model"),
             threshold=threshold,
+            criteria=criteria,
+            explain_rejections=_bool(
+                decision_raw.get("explain_rejections", False), "llm.decision.explain_rejections"
+            ),
         ),
         generation=GenerationConfig(
             base_url=_str(
@@ -275,6 +348,7 @@ def _load_browser(raw: Mapping[str, Any]) -> BrowserConfig:
     return BrowserConfig(
         headless=bool(section.get("headless", False)),
         slow_mo_ms=slow_mo or 0,
+        channel=_optional_str(section.get("channel")),
     )
 
 
@@ -353,6 +427,27 @@ def _parse_delay(value: Any) -> DelayRange:
     return DelayRange(minimum=minimum, maximum=maximum)
 
 
+def _load_decision_criteria(value: Any) -> dict[str, str]:
+    """Критерии Decision API: значения по умолчанию, переопределённые из конфига."""
+    criteria = default_decision_criteria()
+    if value is None:
+        return criteria
+    if not isinstance(value, Mapping):
+        raise ConfigError(
+            "llm.decision.criteria должен быть словарём вида "
+            f"{{{FIT_LABEL}: '...', {NOT_FIT_LABEL}: '...'}}"
+        )
+    for label, text in value.items():
+        name = str(label).strip()
+        if name not in criteria:
+            raise ConfigError(
+                f"llm.decision.criteria: неизвестный вариант «{name}» "
+                f"(допустимо: {FIT_LABEL}, {NOT_FIT_LABEL})"
+            )
+        criteria[name] = _str(text, f"llm.decision.criteria.{name}")
+    return criteria
+
+
 def _positive_int(value: Any, key: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise ConfigError(f"Параметр {key} должен быть целым числом")
@@ -375,6 +470,12 @@ def _float(value: Any, key: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ConfigError(f"Параметр {key} должен быть числом")
     return float(value)
+
+
+def _bool(value: Any, key: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    raise ConfigError(f"Параметр {key} должен быть true или false")
 
 
 def _str(value: Any, key: str) -> str:
@@ -400,3 +501,9 @@ def _resolve_project_path(value: Any, key: str) -> Path:
     if resolved != PROJECT_ROOT and PROJECT_ROOT not in resolved.parents:
         raise ConfigError(f"{key} должен указывать внутрь каталога проекта: {resolved}")
     return resolved
+
+
+def _optional_project_path(value: Any, key: str) -> Path | None:
+    if value is None or not str(value).strip():
+        return None
+    return _resolve_project_path(value, key)

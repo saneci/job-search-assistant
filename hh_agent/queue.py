@@ -65,6 +65,12 @@ class QueueStore:
         self._save(items)
         return record
 
+    def contains(self, url: str) -> bool:
+        """Есть ли вакансия в очереди (сравнение по URL)."""
+        if not url:
+            return False
+        return any(item.get("url") == url for item in self.load())
+
     def _save(self, items: list[dict[str, Any]]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = self.path.with_suffix(self.path.suffix + ".tmp")

@@ -9,6 +9,7 @@ from playwright.sync_api import (
     Browser,
     BrowserContext,
     Error as PlaywrightError,
+    Locator,
     Page,
     Playwright,
     sync_playwright,
@@ -20,6 +21,9 @@ from .logging_setup import RunLogger
 HH_HOME = "https://hh.ru/"
 HH_RESUMES = "https://hh.ru/applicant/resumes"
 
+# Таймаут загрузки страницы hh.ru: страницы с тяжёлой версткой грузятся дольше обычных.
+NAVIGATION_TIMEOUT_MS = 45000
+
 _PROFILE_MARKERS = "[data-qa='mainmenu_applicantProfile'], [data-qa='mainmenu_avatar']"
 _LOGIN_MARKERS = "a[href*='account/login'], [data-qa='login']"
 
@@ -30,6 +34,10 @@ class BrowserError(RuntimeError):
 
 class CaptchaError(BrowserError):
     """hh.ru показал капчу."""
+
+
+class PageLoadError(RuntimeError):
+    """Страница hh.ru не загрузилась за отведённое время."""
 
 
 class BrowserSession:
@@ -51,6 +59,8 @@ class BrowserSession:
 
     def __enter__(self) -> "BrowserSession":
         self._playwright = sync_playwright().start()
+        if self.config.channel:
+            self.logger.info(f"Используется установленный браузер: {self.config.channel}.")
         # Первый запуск (нет state.json) всегда с видимым браузером: нужен ручной вход.
         self._launch(headless=self.config.headless and self.state_path.exists())
         return self
@@ -60,10 +70,13 @@ class BrowserSession:
 
     def _launch(self, headless: bool) -> None:
         assert self._playwright is not None
-        self._browser = self._playwright.chromium.launch(
-            headless=headless,
-            slow_mo=self.config.slow_mo_ms,
-        )
+        launch_options: dict[str, Any] = {
+            "headless": headless,
+            "slow_mo": self.config.slow_mo_ms,
+        }
+        if self.config.channel:
+            launch_options["channel"] = self.config.channel
+        self._browser = self._playwright.chromium.launch(**launch_options)
         context_options: dict[str, Any] = {
             "locale": "ru-RU",
             "viewport": {"width": 1680, "height": 1000},
@@ -81,12 +94,22 @@ class BrowserSession:
         self._launch(headless=False)
 
     def _close_current(self) -> None:
-        if self._context is not None:
-            self._context.close()
-            self._context = None
-        if self._browser is not None:
-            self._browser.close()
-            self._browser = None
+        """Закрывает контекст и браузер, не падая, если они уже закрыты."""
+        context, browser = self._context, self._browser
+        self._context = None
+        self._browser = None
+        for resource in (context, browser):
+            if resource is None:
+                continue
+            try:
+                resource.close()
+            except Exception:
+                # Окно могли закрыть вручную, браузер уже завершился или
+                # соединение с драйвером оборвалось (например, по Ctrl+C).
+                pass
+
+    def is_alive(self) -> bool:
+        return self._context is not None and self._browser is not None
 
     def new_page(self) -> Page:
         if self._context is None:
@@ -97,12 +120,18 @@ class BrowserSession:
         if self._context is None:
             raise BrowserError("Браузер не запущен")
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
-        self._context.storage_state(path=str(self.state_path))
+        try:
+            self._context.storage_state(path=str(self.state_path))
+        except Exception as exc:
+            self.logger.event("session_save_error", error=str(exc))
+            self.logger.info(f"Не удалось сохранить сессию: {exc}")
+            return
         self.logger.event("session_saved", path=str(self.state_path))
         self.logger.info(f"Сессия сохранена в {self.state_path}")
 
     def ensure_logged_in(self) -> None:
         """Проверяет сессию и при необходимости запускает ручной вход."""
+        self.logger.info("Проверяю сессию hh.ru...")
         page = self.new_page()
         try:
             if self.state_path.exists() and is_authenticated(page):
@@ -120,8 +149,9 @@ class BrowserSession:
         """Открывает hh.ru и ждёт, пока пользователь войдёт в аккаунт вручную."""
         self._ensure_headed()
         page = self.new_page()
+        authenticated = False
         try:
-            page.goto(HH_HOME, wait_until="domcontentloaded")
+            page.goto(HH_HOME, wait_until="domcontentloaded", timeout=NAVIGATION_TIMEOUT_MS)
             self.logger.info(
                 "В открытом окне браузера войдите в аккаунт hh.ru. "
                 "После входа вернитесь в консоль и нажмите Enter."
@@ -134,33 +164,62 @@ class BrowserSession:
                     "Запустите приложение из терминала."
                 ) from exc
 
-            if not is_authenticated(page):
-                raise BrowserError(
-                    "Вход в hh.ru не подтверждён. Запустите приложение снова и войдите в аккаунт."
+            self.logger.info("Проверяю вход в hh.ru...")
+            authenticated = is_authenticated(page)
+            if authenticated:
+                self.logger.info("Вход подтверждён.")
+            else:
+                self.logger.info(
+                    "Не удалось подтвердить вход: похоже, вход в аккаунт не завершён."
                 )
         finally:
             page.close()
+
+        # Сессию сохраняем в любом случае: при повторном запуске она будет перепроверена.
         self.save_state()
+        if not authenticated:
+            raise BrowserError(
+                "Вход в hh.ru не подтверждён. Войдите в аккаунт до нажатия Enter "
+                "и запустите приложение снова."
+            )
 
     def close(self) -> None:
         try:
             self._close_current()
         finally:
             if self._playwright is not None:
-                self._playwright.stop()
+                try:
+                    self._playwright.stop()
+                except Exception:
+                    pass
                 self._playwright = None
 
 
 def is_authenticated(page: Page) -> bool:
-    """Проверяет, что браузер авторизован на hh.ru."""
+    """Проверяет авторизацию hh.ru, не уводя пользователя с текущей страницы."""
     try:
-        page.goto(HH_RESUMES, wait_until="domcontentloaded")
-        page.wait_for_timeout(2000)
-        if "login" in page.url.lower():
+        if "hh.ru" not in page.url:
+            page.goto(HH_RESUMES, wait_until="domcontentloaded", timeout=NAVIGATION_TIMEOUT_MS)
+            page.wait_for_timeout(1500)
+
+        url = page.url.lower()
+        if "login" in url:
             return False
-        if page.locator(_PROFILE_MARKERS).count() > 0:
+        # Разделы /applicant/ доступны только авторизованным пользователям:
+        # без сессии hh.ru перенаправляет на /account/login.
+        if "/applicant/" in url:
             return True
-        return page.locator(_LOGIN_MARKERS).count() == 0 and "резюме" in (page.title() or "").lower()
+        if _is_visible(page.locator(_PROFILE_MARKERS).first):
+            return True
+        # Признак неавторизованного состояния — видимая ссылка «Войти».
+        return not _is_visible(page.locator(_LOGIN_MARKERS).first)
+    except PlaywrightError:
+        return False
+
+
+def _is_visible(locator: Locator) -> bool:
+    try:
+        return locator.count() > 0 and locator.is_visible()
     except PlaywrightError:
         return False
 

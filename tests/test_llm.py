@@ -4,17 +4,19 @@ from __future__ import annotations
 
 import dataclasses
 import json
+from pathlib import Path
 from typing import Any
 
 import httpx
 import pytest
 
-from hh_agent.config import DecisionConfig, GenerationConfig, LLMConfig
+from hh_agent.config import PROJECT_ROOT, DecisionConfig, GenerationConfig, LLMConfig
 from hh_agent.llm import (
     FIT_LABEL,
     LLMClient,
     LLMError,
     LLMResponseError,
+    add_signature,
     extract_json_object,
     extract_probabilities,
     normalize_verdict,
@@ -24,6 +26,12 @@ from hh_agent.llm import (
 )
 from hh_agent.models import VacancyDetails
 from hh_agent.profile import Profile
+from hh_agent.prompts import (
+    FALLBACK_SYSTEM_PROMPT,
+    REJECTION_MAX_LENGTH,
+    REJECTION_MAX_TOKENS,
+    load_system_prompt,
+)
 
 PROFILE = Profile(text="Java-разработчик", examples="- пример письма", style_rules="Коротко и по делу")
 VACANCY = VacancyDetails(
@@ -35,7 +43,12 @@ VACANCY = VacancyDetails(
 )
 
 
-def make_config(*, threshold: float = 0.8, retry: bool = True) -> LLMConfig:
+def make_config(
+    *,
+    threshold: float = 0.8,
+    retry: bool = True,
+    system_prompt_path: Path | None = None,
+) -> LLMConfig:
     return LLMConfig(
         api_key="sk-aitunnel-test",
         timeout=5.0,
@@ -52,6 +65,7 @@ def make_config(*, threshold: float = 0.8, retry: bool = True) -> LLMConfig:
             json_mode=False,
             retry_on_invalid_json=retry,
         ),
+        system_prompt_path=system_prompt_path,
     )
 
 
@@ -238,6 +252,64 @@ def test_normalize_verdict() -> None:
     assert normalize_verdict(None) is None
 
 
+SIGNATURE = "С уважением,\nАлександр Гладской\nТелеграм: @saneci\nПочта: a.gladskoy@gmail.com"
+
+
+def test_add_signature_appends_contacts_after_blank_line() -> None:
+    letter = add_signature("Здравствуйте! Готов обсудить вакансию.", SIGNATURE, 1500)
+
+    assert letter == "Здравствуйте! Готов обсудить вакансию.\n\n" + SIGNATURE
+
+
+def test_add_signature_does_not_duplicate_signature() -> None:
+    text = "Текст письма.\n\n" + SIGNATURE
+
+    assert add_signature(text, SIGNATURE, 1500) == text
+
+
+def test_add_signature_skips_when_contacts_already_present() -> None:
+    text = "Текст письма. Пишите: @saneci или a.gladskoy@gmail.com"
+
+    assert add_signature(text, SIGNATURE, 1500) == text
+
+
+def test_add_signature_without_signature_keeps_letter() -> None:
+    assert add_signature("Текст.", "", 1500) == "Текст."
+
+
+def test_add_signature_respects_total_length_limit() -> None:
+    letter = add_signature("Предложение номер один. " * 200, SIGNATURE, 400)
+
+    assert len(letter) <= 400
+    assert letter.endswith(SIGNATURE)
+
+
+def test_add_signature_for_empty_letter_returns_empty() -> None:
+    assert add_signature("   ", SIGNATURE, 1500) == ""
+
+
+def test_parse_generation_adds_signature() -> None:
+    result = parse_generation(
+        {"verdict": "подходит", "reason": "ok", "cover_letter": "Текст."},
+        1500,
+        SIGNATURE,
+    )
+
+    assert result.cover_letter == "Текст.\n\n" + SIGNATURE
+
+
+def test_generate_adds_signature_from_argument() -> None:
+    content = json.dumps(
+        {"verdict": "подходит", "reason": "ok", "cover_letter": "Текст."},
+        ensure_ascii=False,
+    )
+
+    with make_client(lambda request: chat_response(content)) as client:
+        result = client.generate(PROFILE, VACANCY, signature=SIGNATURE)
+
+    assert result.cover_letter == "Текст.\n\n" + SIGNATURE
+
+
 def test_truncate_cover_letter_by_sentence() -> None:
     text = "Первое предложение. Второе предложение. " + "х" * 2000
 
@@ -253,3 +325,175 @@ def test_truncate_cover_letter_short_text_unchanged() -> None:
 def test_parse_generation_requires_verdict() -> None:
     with pytest.raises(LLMResponseError):
         parse_generation({"reason": "нет вердикта"})
+
+
+def test_decide_parses_official_choice_answer() -> None:
+    """Формат AITUNNEL: answers.fit.{type,choice,confidence,probabilities}."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "id": "gen-dec-1",
+                "model": "gpt-6-luna-decisions",
+                "answers": {
+                    "fit": {
+                        "type": "choice",
+                        "choice": "подходит",
+                        "confidence": 0.67,
+                        "probabilities": {"подходит": 0.78, "не подходит": 0.22},
+                    }
+                },
+                "usage": {"input_tokens": 500, "cost_rub": 0.004},
+            },
+        )
+
+    with make_client(handler) as client:
+        result = client.decide(PROFILE, VACANCY)
+
+    assert result.probability == pytest.approx(0.78)
+    assert result.chosen == "подходит"
+    assert result.probabilities == {"подходит": 0.78, "не подходит": 0.22}
+    assert result.fits is False  # 0.78 < порога 0.8
+
+
+def test_decide_parses_official_noul_answer() -> None:
+    """Формат AITUNNEL: answers.fit.noul — вероятность «да»."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"answers": {"fit": {"type": "noul", "noul": 0.91}}},
+        )
+
+    with make_client(handler) as client:
+        result = client.decide(PROFILE, VACANCY)
+
+    assert result.probability == pytest.approx(0.91)
+    assert result.probabilities["не подходит"] == pytest.approx(0.09)
+    assert result.fits is True
+
+
+def test_load_system_prompt_falls_back_to_minimal_prompt(tmp_path: Path) -> None:
+    assert load_system_prompt(None) == FALLBACK_SYSTEM_PROMPT
+    assert load_system_prompt(tmp_path / "missing.md") == FALLBACK_SYSTEM_PROMPT
+
+    empty = tmp_path / "empty.md"
+    empty.write_text("   ", encoding="utf-8")
+    assert load_system_prompt(empty) == FALLBACK_SYSTEM_PROMPT
+
+
+def test_load_system_prompt_reads_file(tmp_path: Path) -> None:
+    path = tmp_path / "SYSTEM_PROMPT.md"
+    path.write_text("Только факты из профиля.", encoding="utf-8")
+
+    assert load_system_prompt(path) == "Только факты из профиля."
+
+
+def test_generate_uses_system_prompt_file(tmp_path: Path) -> None:
+    prompt_path = tmp_path / "SYSTEM_PROMPT.md"
+    prompt_path.write_text("МОЙ СИСТЕМНЫЙ ПРОМПТ", encoding="utf-8")
+    captured: dict[str, Any] = {}
+    content = json.dumps(
+        {"verdict": "подходит", "reason": "ok", "cover_letter": "Текст письма."},
+        ensure_ascii=False,
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        captured["system"] = payload["messages"][0]["content"]
+        return chat_response(content)
+
+    with make_client(handler, system_prompt_path=prompt_path) as client:
+        client.generate(PROFILE, VACANCY)
+
+    assert captured["system"] == "МОЙ СИСТЕМНЫЙ ПРОМПТ"
+
+
+def test_system_prompt_keeps_simple_typography() -> None:
+    """В письме не должно быть точек с запятой и длинных тире."""
+    prompt = load_system_prompt(PROJECT_ROOT / "SYSTEM_PROMPT.md")
+
+    assert "—" not in prompt
+    assert ";" not in prompt
+
+
+def test_decide_sends_criteria_from_config() -> None:
+    """Критерии (включая порог соответствия) задаются только конфигом."""
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["payload"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "answers": {
+                    "fit": {
+                        "type": "choice",
+                        "choice": "подходит",
+                        "confidence": 0.9,
+                        "probabilities": {"подходит": 0.9, "не подходит": 0.1},
+                    }
+                }
+            },
+        )
+
+    config = make_config()
+    config = dataclasses.replace(
+        config,
+        decision=dataclasses.replace(
+            config.decision,
+            criteria={"подходит": "МОЙ КРИТЕРИЙ", "не подходит": "МОЙ АНТИКРИТЕРИЙ"},
+        ),
+    )
+
+    with LLMClient(config, transport=httpx.MockTransport(handler)) as client:
+        client.decide(PROFILE, VACANCY)
+
+    assert captured["payload"]["questions"]["fit"]["criteria"] == {
+        "подходит": "МОЙ КРИТЕРИЙ",
+        "не подходит": "МОЙ АНТИКРИТЕРИЙ",
+    }
+
+
+def test_explain_rejection_is_cheap_and_single_line() -> None:
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        captured["max_tokens"] = payload["max_tokens"]
+        captured["temperature"] = payload["temperature"]
+        captured["prompt"] = payload["messages"][-1]["content"]
+        return chat_response("Не хватает\nопыта Kafka и Ignite.")
+
+    with make_client(handler) as client:
+        reason = client.explain_rejection(PROFILE, VACANCY, 0.04, 0.8)
+
+    assert reason == "Не хватает опыта Kafka и Ignite."
+    assert captured["max_tokens"] == REJECTION_MAX_TOKENS
+    assert captured["temperature"] == 0.0
+    assert "Spring Boot, Kafka, PostgreSQL." in captured["prompt"]
+
+
+def test_explain_rejection_truncates_long_answer() -> None:
+    with make_client(lambda request: chat_response("слово " * 200)) as client:
+        reason = client.explain_rejection(PROFILE, VACANCY, 0.1, 0.8)
+
+    assert len(reason) <= REJECTION_MAX_LENGTH
+    assert reason.endswith("…")
+
+
+def test_system_prompt_fits_budget() -> None:
+    """Промпт держим компактным: запросы к LLM должны быть дешёвыми."""
+    prompt = load_system_prompt(PROJECT_ROOT / "SYSTEM_PROMPT.md")
+
+    assert prompt
+    assert len(prompt) <= 3500
+
+
+def test_system_prompt_has_no_threshold_numbers() -> None:
+    """Порог соответствия и лимит длины живут только в конфиге."""
+    prompt = load_system_prompt(PROJECT_ROOT / "SYSTEM_PROMPT.md")
+
+    assert "70%" not in prompt
+    assert "1500" not in prompt

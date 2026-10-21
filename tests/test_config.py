@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
 import pytest
-import yaml
 
 from hh_agent.config import ConfigError, load_config, resolve_area_id
 
@@ -15,12 +15,13 @@ def write_config(tmp_path: Path, **overrides: Any) -> Path:
     data: dict[str, Any] = {
         "search_query": "Java backend engineer",
         "area": "Москва",
-        "daily_limit": 5,
+        "limit_per_run": 5,
         "delay_between_actions": {"from": 0, "to": 0},
     }
     data.update(overrides)
     path = tmp_path / "config.yaml"
-    path.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+    # JSON — допустимое подмножество YAML, поэтому конфиг читается тем же парсером.
+    path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
     return path
 
 
@@ -29,7 +30,7 @@ def test_minimal_config(tmp_path: Path) -> None:
 
     assert config.search.queries == ("Java backend engineer",)
     assert config.search.area_id == 1
-    assert config.search.daily_limit == 5
+    assert config.search.limit_per_run == 5
     assert config.search.delay.minimum == 0
     assert config.search.delay.maximum == 0
     assert config.search.salary_from is None
@@ -68,6 +69,69 @@ def test_full_search_config(tmp_path: Path) -> None:
     assert config.search.delay.next() >= 3
 
 
+def test_browser_channel_default_is_playwright_chromium(tmp_path: Path) -> None:
+    assert load_config(write_config(tmp_path)).browser.channel is None
+
+
+def test_exclude_companies(tmp_path: Path) -> None:
+    config = load_config(write_config(tmp_path, exclude_companies=["Сбер", "Тинькофф"]))
+
+    assert config.search.exclude_companies == ("Сбер", "Тинькофф")
+
+
+def test_exclude_companies_default_empty(tmp_path: Path) -> None:
+    assert load_config(write_config(tmp_path)).search.exclude_companies == ()
+
+
+def test_cover_letter_signature(tmp_path: Path) -> None:
+    signature = "С уважением,\nАлександр Гладской\nПочта: a.gladskoy@gmail.com"
+    config = load_config(write_config(tmp_path, cover_letter_signature=signature))
+
+    assert config.cover_letter_signature == signature
+
+
+def test_cover_letter_signature_default_empty(tmp_path: Path) -> None:
+    assert load_config(write_config(tmp_path)).cover_letter_signature == ""
+
+
+def test_system_prompt_path_from_config(tmp_path: Path) -> None:
+    config = load_config(write_config(tmp_path, llm={"system_prompt_path": "SYSTEM_PROMPT.md"}))
+
+    assert config.llm.system_prompt_path is not None
+    assert config.llm.system_prompt_path.name == "SYSTEM_PROMPT.md"
+
+
+def test_system_prompt_path_outside_project(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError):
+        load_config(write_config(tmp_path, llm={"system_prompt_path": "/outside/prompt.md"}))
+
+
+def test_system_prompt_path_default_is_project_file(tmp_path: Path) -> None:
+    config = load_config(write_config(tmp_path))
+
+    assert config.llm.system_prompt_path is not None
+    assert config.llm.system_prompt_path.name == "SYSTEM_PROMPT.md"
+    assert config.llm.system_prompt_path.is_file()
+
+
+def test_system_prompt_path_missing_file_raises(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="файл с системным промптом не найден"):
+        load_config(write_config(tmp_path, llm={"system_prompt_path": "no_such_prompt.md"}))
+
+
+def test_browser_channel_from_config(tmp_path: Path) -> None:
+    config = load_config(write_config(tmp_path, browser={"channel": "chrome", "headless": True}))
+
+    assert config.browser.channel == "chrome"
+    assert config.browser.headless is True
+
+
+def test_empty_browser_channel_means_bundled_chromium(tmp_path: Path) -> None:
+    config = load_config(write_config(tmp_path, browser={"channel": ""}))
+
+    assert config.browser.channel is None
+
+
 @pytest.mark.parametrize(
     ("value", "expected"),
     [
@@ -88,19 +152,41 @@ def test_unknown_area() -> None:
         resolve_area_id("Марс")
 
 
-@pytest.mark.parametrize("key", ["search_query", "area", "daily_limit", "delay_between_actions"])
+@pytest.mark.parametrize("key", ["search_query", "area", "limit_per_run", "delay_between_actions"])
 def test_missing_required(tmp_path: Path, key: str) -> None:
     data: dict[str, Any] = {
         "search_query": "Java",
         "area": "Москва",
-        "daily_limit": 5,
+        "limit_per_run": 5,
         "delay_between_actions": {"from": 0, "to": 0},
     }
     data.pop(key)
     path = tmp_path / "config.yaml"
-    path.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+    path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
 
     with pytest.raises(ConfigError):
+        load_config(path)
+
+
+def test_legacy_daily_limit_key_is_supported(tmp_path: Path) -> None:
+    # Старые конфиги с ключом из ТЗ (daily_limit) продолжают работать.
+    data = {
+        "search_query": "Java",
+        "area": "Москва",
+        "daily_limit": 7,
+        "delay_between_actions": {"from": 0, "to": 0},
+    }
+    path = tmp_path / "config.yaml"
+    path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+    assert load_config(path).search.limit_per_run == 7
+
+
+def test_invalid_yaml_raises_config_error(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text("search_query: [не закрытый список\n", encoding="utf-8")
+
+    with pytest.raises(ConfigError, match="Не удалось разобрать"):
         load_config(path)
 
 
@@ -129,3 +215,57 @@ def test_api_key_from_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
 def test_missing_config_file(tmp_path: Path) -> None:
     with pytest.raises(ConfigError):
         load_config(tmp_path / "missing.yaml")
+
+
+def test_decision_criteria_defaults(tmp_path: Path) -> None:
+    criteria = load_config(write_config(tmp_path)).llm.decision.criteria
+
+    assert set(criteria) == {"подходит", "не подходит"}
+    assert "70%" in criteria["подходит"]
+
+
+def test_decision_criteria_from_config(tmp_path: Path) -> None:
+    criteria = {"подходит": "Мой критерий", "не подходит": "Мой антикритерий"}
+
+    config = load_config(write_config(tmp_path, llm={"decision": {"criteria": criteria}}))
+
+    assert config.llm.decision.criteria == criteria
+
+
+def test_decision_criteria_unknown_label(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="неизвестный вариант"):
+        load_config(write_config(tmp_path, llm={"decision": {"criteria": {"может быть": "x"}}}))
+
+
+def test_decision_criteria_must_be_mapping(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="должен быть словарём"):
+        load_config(write_config(tmp_path, llm={"decision": {"criteria": ["подходит"]}}))
+
+
+def test_explain_rejections_default_false(tmp_path: Path) -> None:
+    assert load_config(write_config(tmp_path)).llm.decision.explain_rejections is False
+
+
+def test_explain_rejections_enabled(tmp_path: Path) -> None:
+    config = load_config(write_config(tmp_path, llm={"decision": {"explain_rejections": True}}))
+
+    assert config.llm.decision.explain_rejections is True
+
+
+def test_explain_rejections_must_be_bool(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="true или false"):
+        load_config(write_config(tmp_path, llm={"decision": {"explain_rejections": "да"}}))
+
+
+def test_processed_dir_default(tmp_path: Path) -> None:
+    config = load_config(write_config(tmp_path))
+
+    assert config.processed_dir.name == "processed"
+    assert config.processed_dir.parent.name == "data"
+
+
+def test_processed_dir_from_config(tmp_path: Path) -> None:
+    config = load_config(write_config(tmp_path, paths={"processed_dir": "data/my-processed"}))
+
+    assert config.processed_dir.name == "my-processed"
+

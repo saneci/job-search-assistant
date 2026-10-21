@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import subprocess
 import sys
 
 from .browser import BrowserError, BrowserSession
-from .config import DEFAULT_CONFIG_PATH, ConfigError, load_config
+from .config import DEFAULT_CONFIG_PATH, AppConfig, ConfigError, load_config
 from .logging_setup import RunLogger
 from .pipeline import run
 from .profile import ProfileError
@@ -28,6 +29,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=str(DEFAULT_CONFIG_PATH),
         help="путь к YAML-конфигурации (по умолчанию config.yaml в корне проекта)",
     )
+    parser.add_argument(
+        "--install-browser",
+        action="store_true",
+        help="установить Chromium для Playwright (не нужен при browser.channel)",
+    )
     return parser
 
 
@@ -41,6 +47,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     with RunLogger(config.logs_dir) as logger:
+        if args.install_browser:
+            return _install_browser(config)
+
         if args.login:
             try:
                 with BrowserSession(config.browser, config.state_path, logger) as session:
@@ -70,3 +79,16 @@ def main(argv: list[str] | None = None) -> int:
             return 130
 
     return 0
+
+
+def _install_browser(config: AppConfig) -> int:
+    """Ставит Chromium для Playwright, если не выбран установленный браузер."""
+    if config.browser.channel:
+        print(
+            f"Используется установленный браузер ({config.browser.channel}), "
+            "загрузка Chromium не требуется."
+        )
+        return 0
+
+    print("Устанавливаю Chromium для Playwright (может занять пару минут)...")
+    return subprocess.call([sys.executable, "-m", "playwright", "install", "chromium"])

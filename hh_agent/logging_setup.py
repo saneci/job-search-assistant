@@ -29,7 +29,8 @@ class RunLogger:
         self._file.flush()
 
     def info(self, message: str) -> None:
-        """Печатает сообщение пользователю."""
+        """Печатает сообщение пользователю и дублирует его в лог."""
+        self.event("info", message=message)
         print(message, flush=True)
 
     def close(self) -> None:

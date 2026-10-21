@@ -3,30 +3,33 @@
 
 # Поисковой запрос: строка или список строк (по каждому запросу поиск выполняется отдельно).
 search_query:
-  - "Java backend engineer"
-  - "Java разработчик"
+  - "Java backend developer"
+#  - "Java разработчик"
 
 # Регион: название (Москва, Санкт-Петербург, Россия, Екатеринбург, Новосибирск, Казань)
 # или числовой id региона hh.ru (Москва — 1, Россия — 113).
 area: Москва
 
 # Минимальная зарплата (необязательно).
-salary_from: 150000
+#salary_from: 150000
 
 # Опыт работы (необязательно): noExperience, between1And3, between3And6, moreThan6.
 experience: between1And3
 
 # График (необязательно): fullDay, shift, flexible, remote, flyInFlyOut.
-schedule: remote
+#schedule: remote
 
 # Стоп-слова в названии вакансии — фильтруются без обращения к LLM.
 exclude_keywords:
-  - senior
   - lead
-  - "1С"
+  - 1С
+
+# Компании, на вакансии которых не откликаемся (подстрока, без учёта регистра).
+exclude_companies:
+  - "Сбер. IT"
 
 # Максимум отправленных откликов за один запуск.
-daily_limit: 20
+limit_per_run: 1
 
 # Случайная пауза между действиями, секунды.
 delay_between_actions:
@@ -45,18 +48,36 @@ max_vacancies: 200
 # Максимальная длина сопроводительного письма (символы).
 cover_letter_max_length: 1500
 
-# Профиль пользователя: описание, примеры писем и правила стиля.
+# Сколько дней хранить память об обработанных вакансиях.
+# При старте файлы data/processed старше этого срока удаляются.
+processed_retention_days: 7
+
+# Подпись с контактами: дописывается в конец письма через пустую строку.
+# Считается внутри cover_letter_max_length. Пустое значение — без подписи.
+cover_letter_signature: |
+  С уважением,
+  Александр Гладской
+  Телеграм: @saneci
+  Почта: a.gladskoy@gmail.com
+
+# Локальные данные: профиль, сессия, очередь, память обработанных вакансий.
 paths:
-  profile: PROFILE.md
-  session_state: state.json
-  queue: queue.json
-  logs_dir: .logs
+  profile: data/profile.md
+  session_state: data/state.json
+  queue: data/queue.json
+  # Память об обработанных вакансиях: по файлу на дату, повторно их не проходим.
+  processed_dir: data/processed
+  logs_dir: logs
 
 # LLM: два независимых вызова (решение и генерация письма).
 llm:
   # Имя переменной окружения с ключом. Сам ключ в репозитории не хранится.
   api_key_env: AITUNNEL_API_KEY
-  timeout_seconds: 120
+  timeout_seconds: 30
+
+  # Системный промпт: единственный источник правил оценки и написания письма.
+  # Правится без изменения кода; если файла нет — запуск остановится с ошибкой.
+  system_prompt_path: SYSTEM_PROMPT.md
 
   # Decision-вызов: модель решений, ответ — вероятности вариантов.
   decision:
@@ -64,13 +85,22 @@ llm:
     model: gpt-6-luna-decisions
     # Порог: отклик отправляется, если P("подходит") > threshold.
     threshold: 0.8
+    # Критерии, которые уходят в модель решений. Здесь единственное место,
+    # где описан порог соответствия — в SYSTEM_PROMPT.md этих чисел нет.
+    criteria:
+      подходит: "Требования, обязанности, стек и условия вакансии совпадают с профилем не менее чем на 70%, красных флагов нет"
+      не подходит: "Совпадение по ключевым требованиям менее 70%, другая специализация или есть красные флаги"
+    # Объяснять отказы отдельным дешёвым Chat-запросом (1 предложение, до 120 токенов).
+    # false — в логе будет причина, посчитанная из вероятностей (бесплатно).
+    explain_rejections: false
 
   # Generation-вызов: чат-модель, ответ — JSON с вердиктом и письмом.
   generation:
     base_url: https://api.aitunnel.ru/v1
     model: gpt-6-luna-pro
     max_tokens: 2000
-    temperature: 0.7
+    # Чуть выше 0 — письма живее; достоверность держат правила в SYSTEM_PROMPT.md.
+    temperature: 0.4
     # Запрашивать у провайдера JSON-режим ответа (response_format).
     json_mode: false
     # Повторная попытка при невалидном JSON (по ТЗ — ровно один повтор).
@@ -80,6 +110,10 @@ browser:
   # false — браузер виден (рекомендуется: проще пройти капчу/проверить работу).
   headless: false
   slow_mo_ms: 0
+  # Использовать установленный браузер вместо Chromium из Playwright:
+  # chrome, msedge, chrome-beta и т.п. Пустое значение ("") — Chromium,
+  # который ставится командой: python run.py --install-browser
+  channel: chrome
 
 # Отчёт на email. При enabled: false отчёт печатается в консоль и сохраняется в .logs.
 notifications:

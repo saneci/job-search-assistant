@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import re
 from typing import Sequence
 from urllib.parse import urlencode, urljoin
 
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import Locator, Page, TimeoutError as PlaywrightTimeoutError
 
-from .browser import CaptchaError, detect_captcha
+from .browser import NAVIGATION_TIMEOUT_MS, CaptchaError, PageLoadError, detect_captcha
 from .config import SearchConfig
 from .models import VacancyCard
 
@@ -16,6 +17,8 @@ SEARCH_URL = "https://hh.ru/search/vacancy"
 HH_BASE_URL = "https://hh.ru"
 
 TITLE_SELECTOR = "a[data-qa='serp-item__title'], a[data-qa='vacancy-serp__vacancy-title']"
+
+_VACANCY_ID_RE = re.compile(r"/vacancy/(\d+)")
 
 EMPLOYER_SELECTORS = (
     "[data-qa='vacancy-serp__vacancy-employer']",
@@ -54,13 +57,48 @@ def build_search_url(search: SearchConfig, query: str, page_index: int = 0) -> s
 
 
 def is_excluded(title: str, keywords: Sequence[str]) -> str | None:
-    """Возвращает сработавшее стоп-слово или None."""
-    lowered = title.lower().replace("ё", "е")
+    """Возвращает сработавшее стоп-слово в названии вакансии или None."""
+    return match_keyword(title, keywords)
+
+
+def is_company_excluded(company: str, keywords: Sequence[str]) -> str | None:
+    """Возвращает сработавшее стоп-слово в названии компании или None."""
+    return match_keyword(company, keywords)
+
+
+def match_keyword(text: str, keywords: Sequence[str]) -> str | None:
+    """Ищет ключевое слово без учёта регистра («ё» приравнивается к «е»)."""
+    if not text:
+        return None
+    lowered = text.lower().replace("ё", "е")
     for keyword in keywords:
         normalized = keyword.strip().lower().replace("ё", "е")
         if normalized and normalized in lowered:
             return keyword
     return None
+
+
+def vacancy_keys(title: str, company: str, url: str) -> tuple[str, ...]:
+    """Ключи вакансии для дедупликации между запросами и страницами выдачи.
+
+    Первый ключ — id вакансии из URL, второй — «название + компания». Второй
+    нужен потому, что работодатели публикуют одну и ту же вакансию несколько раз
+    (разные id, одинаковые название и компания).
+    """
+    keys: list[str] = []
+    vid = vacancy_id(url)
+    if vid:
+        keys.append(f"id:{vid}")
+    text = " ".join(f"{title} {company}".lower().replace("ё", "е").split())
+    if text:
+        keys.append(f"text:{text}")
+    return tuple(keys)
+
+
+def vacancy_id(url: str) -> str | None:
+    """id вакансии из URL hh.ru вида /vacancy/123456."""
+    match = _VACANCY_ID_RE.search(url or "")
+    return match.group(1) if match else None
 
 
 def open_search_page(
@@ -71,7 +109,12 @@ def open_search_page(
 ) -> list[VacancyCard]:
     """Открывает страницу выдачи и собирает карточки вакансий."""
     url = build_search_url(search, query, page_index)
-    page.goto(url, wait_until="domcontentloaded")
+    try:
+        page.goto(url, wait_until="domcontentloaded", timeout=NAVIGATION_TIMEOUT_MS)
+    except PlaywrightTimeoutError as exc:
+        raise PageLoadError(
+            f"страница поиска не загрузилась за {NAVIGATION_TIMEOUT_MS // 1000} с: {url}"
+        ) from exc
     page.wait_for_timeout(2000)
     if detect_captcha(page):
         raise CaptchaError("hh.ru показал капчу на странице поиска")

@@ -47,13 +47,17 @@ def test_build_report(tmp_path: Path) -> None:
     details_path = tmp_path / ".logs" / "2026-10-21-094456.json"
 
     report = build_report(make_stats(), details_path)
+    lines = report.splitlines()
 
-    assert "Отчёт за 2026-10-21 09:44" in report
-    assert "Отправлено откликов: 2" in report
-    assert "Пропущено (не подошло): 1" in report
-    assert "Отложено (тесты/анкеты): 1" in report
-    assert "Ошибок при обработке: 1" in report
-    assert "Причина остановки: достигнут дневной лимит откликов (20)" in report
+    assert lines[0] == "=" * 33
+    assert lines[1] == "Отчёт за 2026-10-21 09:44"
+    assert lines[2] == "=" * 33
+    assert "- Отправлено откликов: 2" in lines
+    assert "- Пропущено (не подошло): 1" in lines
+    assert "- Отложено (тесты/анкеты): 1" in lines
+    assert "- Ошибок при обработке: 1" in lines
+    assert "- Причина остановки: достигнут дневной лимит откликов (20)" in lines
+    assert any(line.startswith("- Длительность: ") for line in lines)
     assert "1. Python разработчик — Ozon" in report
     assert "https://hh.ru/vacancy/1" in report
     assert str(details_path) in report

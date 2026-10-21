@@ -56,3 +56,13 @@ def test_load_invalid_json_raises(tmp_path: Path) -> None:
 
     with pytest.raises(QueueError):
         QueueStore(path).load()
+
+
+def test_contains(tmp_path: Path) -> None:
+    store = QueueStore(tmp_path / "queue.json")
+    store.add(url="https://hh.ru/vacancy/1", title="A", company="B", reason="test")
+
+    assert store.contains("https://hh.ru/vacancy/1")
+    assert not store.contains("https://hh.ru/vacancy/2")
+    assert not store.contains("")
+

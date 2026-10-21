@@ -8,9 +8,15 @@ from pathlib import Path
 
 from playwright.sync_api import Error as PlaywrightError, Page
 
-from .browser import BrowserSession, CaptchaError, save_screenshot
+from .browser import BrowserError, BrowserSession, CaptchaError, PageLoadError, save_screenshot
 from .config import AppConfig
-from .hh_search import is_excluded, open_search_page
+from .hh_search import (
+    is_company_excluded,
+    is_excluded,
+    open_search_page,
+    vacancy_id,
+    vacancy_keys,
+)
 from .hh_vacancy import (
     STATUS_ALREADY_RESPONDED,
     STATUS_CAPTCHA,
@@ -25,12 +31,44 @@ from .llm import LLMClient, LLMError
 from .logging_setup import RunLogger
 from .models import RunError, SentVacancy, SkippedVacancy, VacancyCard, VacancyDetails
 from .profile import Profile, load_profile
+from .processed import ProcessedError, ProcessedStore
 from .queue import REASON_TITLES, QueueError, QueueStore
 from .report import RunStats, build_details, build_report, send_email, write_details
 
 
 class SessionLostError(RuntimeError):
     """Сессия hh.ru перестала быть действительной во время работы."""
+
+
+OUTCOME_SENT = "sent"
+OUTCOME_SKIPPED = "skipped"
+OUTCOME_QUEUED = "queued"
+OUTCOME_ERROR = "error"
+
+
+class _VacancyLog:
+    """Строки журнала по вакансии: «Название — Компания (id=123): событие»."""
+
+    def __init__(
+        self,
+        logger: RunLogger,
+        title: str,
+        company: str = "",
+        url: str = "",
+    ) -> None:
+        self._logger = logger
+        self.title = title
+        self.company = company
+        self.label = f"{title} — {company}" if company else title
+        vid = vacancy_id(url)
+        if vid:
+            self.label += f" (id={vid})"
+
+    def info(self, message: str) -> None:
+        self._logger.info(f"{self.label}: {message}")
+
+    def event(self, name: str, **fields: object) -> None:
+        self._logger.event(name, vacancy=self.label, **fields)
 
 
 def run(config: AppConfig, logger: RunLogger) -> tuple[RunStats, Path]:
@@ -47,11 +85,25 @@ def run(config: AppConfig, logger: RunLogger) -> tuple[RunStats, Path]:
         try:
             with LLMClient(config.llm) as llm:
                 _process_vacancies(page, config, profile, llm, queue, stats, logger)
+        except KeyboardInterrupt:
+            stats.stop_reason = "остановлено пользователем (Ctrl+C)"
+            logger.event("interrupted")
+            logger.info("Получена команда остановки, аккуратно завершаю работу...")
         except SessionLostError as exc:
             stats.stop_reason = str(exc)
             logger.event("session_lost", error=str(exc))
+        except PlaywrightError as exc:
+            stats.stop_reason = f"ошибка браузера: {exc}"
+            logger.event("browser_error", error=str(exc))
         finally:
-            page.close()
+            try:
+                page.close()
+            except Exception:
+                pass
+            try:
+                session.save_state()
+            except BrowserError:
+                pass
 
     stats.finished_at = datetime.now()
     write_details(details_path, build_details(stats, logger.run_id))
@@ -69,6 +121,9 @@ def run(config: AppConfig, logger: RunLogger) -> tuple[RunStats, Path]:
     if not email_sent:
         logger.info(f"Email-отчёт не отправлен: {email_message}")
 
+    logger.info("")
+    logger.info(_final_message(stats, config))
+
     return stats, details_path
 
 
@@ -84,21 +139,37 @@ def _process_vacancies(
     search = config.search
     seen: set[str] = set()
     reviewed = 0
+    processed = ProcessedStore(config.processed_dir)
+    removed = processed.prune(config.processed_retention_days)
+    if removed:
+        logger.event(
+            "processed_pruned",
+            count=len(removed),
+            days=config.processed_retention_days,
+            files=removed,
+        )
+    known = processed.load()
+    logger.event("processed_loaded", count=known, path=str(processed.directory))
 
     for query in search.queries:
-        if _should_stop(search.daily_limit, stats, logger):
+        if _should_stop(search.limit_per_run, stats, logger):
             break
 
         for page_index in range(search.pages_limit):
-            if _should_stop(search.daily_limit, stats, logger):
+            if _should_stop(search.limit_per_run, stats, logger):
                 break
 
+            logger.info(f"Поиск «{query}», страница {page_index + 1}: открываю страницу...")
             try:
                 cards = open_search_page(page, search, query, page_index)
             except CaptchaError as exc:
                 stats.stop_reason = f"капча на странице поиска ({query}, стр. {page_index + 1})"
                 logger.event("captcha", query=query, page=page_index, url=page.url, error=str(exc))
                 logger.info("hh.ru показал капчу на странице поиска, запуск остановлен.")
+                break
+            except PageLoadError as exc:
+                logger.event("search_page_error", query=query, page=page_index, error=str(exc))
+                logger.info(f"Не удалось открыть поиск ({query}): {exc}")
                 break
 
             if not cards:
@@ -108,11 +179,34 @@ def _process_vacancies(
             logger.info(f"Запрос «{query}», страница {page_index + 1}: найдено {len(cards)} вакансий.")
 
             for card in cards:
-                if _should_stop(search.daily_limit, stats, logger):
+                if _should_stop(search.limit_per_run, stats, logger):
                     break
-                if card.url in seen:
+                keys = vacancy_keys(card.title, card.company, card.url)
+                if any(key in seen for key in keys):
+                    logger.event(
+                        "skipped_duplicate",
+                        url=card.url,
+                        title=card.title,
+                        company=card.company,
+                    )
+                    _VacancyLog(logger, card.title, card.company, card.url).info(
+                        "дубликат в выдаче, пропускаю"
+                    )
                     continue
-                seen.add(card.url)
+                seen.update(keys)
+
+                previous = processed.find(card.title, card.company, card.url)
+                if previous:
+                    logger.event(
+                        "skipped_processed",
+                        url=card.url,
+                        title=card.title,
+                        processed_at=previous,
+                    )
+                    _VacancyLog(logger, card.title, card.company, card.url).info(
+                        f"уже обрабатывалась {previous}, пропускаю"
+                    )
+                    continue
 
                 reviewed += 1
                 if reviewed > search.max_vacancies:
@@ -122,8 +216,16 @@ def _process_vacancies(
                     logger.info(stats.stop_reason)
                     break
 
-                _process_vacancy(page, config, profile, llm, queue, stats, logger, card)
+                counters = _counters(stats)
+                _process_vacancy(
+                    page, config, profile, llm, queue, processed, stats, logger, card
+                )
+                outcome = _outcome(counters, _counters(stats))
+                if outcome:
+                    _remember_processing(processed, logger, card, outcome)
 
+                if _page_closed(page):
+                    raise SessionLostError("окно браузера закрыто — запуск остановлен")
                 if _is_login_page(page):
                     raise SessionLostError(
                         "hh.ru требует повторный вход: сессия больше не действительна"
@@ -138,10 +240,12 @@ def _process_vacancy(
     profile: Profile,
     llm: LLMClient,
     queue: QueueStore,
+    processed: ProcessedStore,
     stats: RunStats,
     logger: RunLogger,
     card: VacancyCard,
 ) -> None:
+    log = _VacancyLog(logger, card.title, card.company, card.url)
     excluded = is_excluded(card.title, config.search.exclude_keywords)
     if excluded:
         logger.event(
@@ -158,8 +262,32 @@ def _process_vacancy(
                 reason=f"стоп-слово в названии: {excluded}",
             )
         )
+        log.info(f"пропуск: стоп-слово «{excluded}» в названии")
+        _remember(stats, f"вакансия «{card.title}» пропущена (стоп-слово «{excluded}»)")
         return
 
+    excluded_company = is_company_excluded(card.company, config.search.exclude_companies)
+    if excluded_company:
+        logger.event(
+            "skipped_exclude_company",
+            url=card.url,
+            title=card.title,
+            company=card.company,
+            keyword=excluded_company,
+        )
+        stats.skipped.append(
+            SkippedVacancy(
+                title=card.title,
+                company=card.company,
+                url=card.url,
+                reason=f"исключённая компания: {excluded_company}",
+            )
+        )
+        log.info(f"пропуск: компания «{card.company}» в списке исключений")
+        _remember(stats, f"вакансия «{card.title}» пропущена (компания «{card.company}»)")
+        return
+
+    log.info("открываю вакансию")
     try:
         details = open_vacancy(page, card)
     except CaptchaError as exc:
@@ -167,11 +295,37 @@ def _process_vacancy(
         stats.stop_reason = "капча на странице вакансии"
         logger.info("hh.ru показал капчу на странице вакансии, запуск остановлен.")
         return
-    except (VacancyParseError, PlaywrightError) as exc:
+    except (VacancyParseError, PageLoadError, PlaywrightError) as exc:
         _record_error(stats, logger, page, config, card, exc)
         return
 
     _pause(config, logger, "после открытия вакансии")
+
+    if queue.contains(details.url):
+        log.info("уже в очереди, пропускаю")
+        _remember_processing(processed, logger, card, OUTCOME_QUEUED)
+        return
+
+    excluded_company = is_company_excluded(details.company, config.search.exclude_companies)
+    if excluded_company:
+        logger.event(
+            "skipped_exclude_company",
+            url=details.url,
+            title=details.title,
+            company=details.company,
+            keyword=excluded_company,
+        )
+        stats.skipped.append(
+            SkippedVacancy(
+                title=details.title,
+                company=details.company,
+                url=details.url,
+                reason=f"исключённая компания: {excluded_company}",
+            )
+        )
+        log.info(f"пропуск: компания «{details.company}» в списке исключений")
+        _remember(stats, f"вакансия «{details.title}» пропущена (компания «{details.company}»)")
+        return
 
     if details.already_responded:
         logger.event("skipped_already_responded", url=details.url, title=details.title)
@@ -183,10 +337,18 @@ def _process_vacancy(
                 reason="отклик уже отправлен",
             )
         )
+        log.info("пропуск: отклик уже отправлен")
+        _remember(stats, f"вакансия «{details.title}» пропущена (отклик уже отправлен)")
         return
 
     if details.blocker:
         _enqueue(queue, stats, logger, details, details.blocker, "признак на странице вакансии")
+        return
+
+    if stats.sent_count >= config.search.limit_per_run:
+        stats.stop_reason = f"достигнут лимит откликов за запуск ({config.search.limit_per_run})"
+        log.info(f"лимит откликов достигнут ({stats.sent_count}), вакансия не обрабатывается")
+        _remember(stats, f"вакансия «{details.title}» пропущена (лимит откликов)")
         return
 
     try:
@@ -195,31 +357,66 @@ def _process_vacancy(
         _record_error(stats, logger, page, config, details, exc)
         return
 
-    logger.event(
+    llm_reason = ""
+    llm_reason_source = ""
+    if not decision.fits:
+        llm_reason = (
+            f"вероятность {decision.probability:.2f} не выше порога {decision.threshold:.2f}"
+        )
+        llm_reason_source = "threshold"
+        if config.llm.decision.explain_rejections:
+            try:
+                explanation = llm.explain_rejection(
+                    profile, details, decision.probability, decision.threshold
+                )
+            except LLMError as exc:
+                logger.event("rejection_explanation_error", url=details.url, error=str(exc))
+            else:
+                if explanation:
+                    llm_reason = explanation
+                    llm_reason_source = "model"
+
+    log.event(
         "decision",
         url=details.url,
         title=details.title,
         probability=decision.probability,
         threshold=decision.threshold,
         fits=decision.fits,
+        llm_verdict=decision.chosen,
+        llm_reason=llm_reason,
+        llm_reason_source=llm_reason_source,
+        probabilities=decision.probabilities,
     )
+    probabilities = ", ".join(
+        f"{label}={value:.2f}" for label, value in decision.probabilities.items()
+    )
+    log.info(
+        f"LLM-решение: «{decision.chosen}» (порог {decision.threshold:.2f}, {probabilities})"
+    )
+    if llm_reason and config.llm.decision.explain_rejections:
+        log.info(f"LLM-вердикт: {llm_reason}")
 
     if not decision.fits:
-        reason = f"P(подходит)={decision.probability:.2f} <= {decision.threshold:.2f}"
         stats.skipped.append(
             SkippedVacancy(
                 title=details.title,
                 company=details.company,
                 url=details.url,
-                reason=reason,
+                reason=llm_reason,
                 probability=decision.probability,
             )
         )
-        logger.info(f"Не подходит ({reason}): {details.title} — {details.company}")
+        _remember(stats, f"вакансия «{details.title}» не подходит ({llm_reason})")
         return
 
     try:
-        generation = llm.generate(profile, details, config.cover_letter_max_length)
+        generation = llm.generate(
+            profile,
+            details,
+            config.cover_letter_max_length,
+            signature=config.cover_letter_signature,
+        )
     except LLMError as exc:
         _record_error(stats, logger, page, config, details, exc)
         return
@@ -238,13 +435,16 @@ def _process_vacancy(
         _enqueue(queue, stats, logger, details, "empty_cover_letter", generation.reason)
         return
 
-    logger.event(
-        "cover_letter",
+    log.event(
+        "generation",
         url=details.url,
-        verdict=generation.verdict,
-        reason=generation.reason,
+        llm_verdict=generation.verdict,
+        llm_reason=generation.reason,
+        llm_reason_source="model",
+        letter=generation.cover_letter,
         letter_length=len(generation.cover_letter),
     )
+    log.info(f"LLM-вердикт: {generation.reason or '—'}")
 
     try:
         status = respond(page, generation.cover_letter)
@@ -252,7 +452,7 @@ def _process_vacancy(
         _record_error(stats, logger, page, config, details, exc)
         return
 
-    logger.event("respond", url=details.url, status=status)
+    log.event("respond", url=details.url, status=status)
 
     if status == STATUS_SENT:
         stats.sent.append(
@@ -263,7 +463,8 @@ def _process_vacancy(
                 probability=decision.probability,
             )
         )
-        logger.info(f"Отклик отправлен: {details.title} — {details.company}")
+        log.info(f"отклик отправлен (всего {stats.sent_count} из {config.search.limit_per_run})")
+        _remember(stats, f"отклик на «{details.title}» отправлен")
         _pause(config, logger, "после отправки отклика")
         return
 
@@ -305,6 +506,7 @@ def _enqueue(
     note: str = "",
 ) -> bool:
     """Добавляет вакансию в очередь ручных действий."""
+    log = _VacancyLog(logger, card.title, card.company, card.url)
     try:
         record = queue.add(
             url=card.url,
@@ -313,17 +515,19 @@ def _enqueue(
             reason=reason,
         )
     except QueueError as exc:
-        logger.event("queue_error", url=card.url, error=str(exc))
-        logger.info(f"Не удалось записать вакансию в очередь: {exc}")
+        log.event("queue_error", url=card.url, error=str(exc))
+        log.info(f"не удалось записать в очередь: {exc}")
         return False
 
     if record is None:
         logger.event("queued_duplicate", url=card.url, reason=reason)
+        log.info("уже есть в очереди на дальшейшую обработку")
         return False
 
     stats.queued.append(record)
-    logger.event("queued", url=card.url, title=card.title, reason=reason, note=note)
-    logger.info(f"Отложено ({REASON_TITLES.get(reason, reason)}): {card.title} — {card.company}")
+    log.event("queued", url=card.url, title=card.title, reason=reason, note=note)
+    log.info(f"отложено в очередь ({REASON_TITLES.get(reason, reason)})")
+    _remember(stats, f"вакансия «{card.title}» отложена ({REASON_TITLES.get(reason, reason)})")
     return True
 
 
@@ -336,20 +540,83 @@ def _record_error(
     exc: BaseException,
 ) -> None:
     message = f"{type(exc).__name__}: {exc}"
+    log = _VacancyLog(logger, card.title, card.company, card.url)
     stats.errors.append(RunError(url=card.url, title=card.title, message=message))
-    logger.event("vacancy_error", url=card.url, title=card.title, error=message)
-    logger.info(f"Ошибка при обработке «{card.title}»: {message}")
+    log.event("vacancy_error", url=card.url, title=card.title, error=message)
+    log.info(f"ошибка: {message}")
+    _remember(stats, f"ошибка при обработке «{card.title}»")
 
     screenshot = config.logs_dir / f"{logger.run_id}-error-{len(stats.errors)}.png"
     if save_screenshot(page, screenshot):
         logger.event("screenshot", url=card.url, path=str(screenshot))
 
 
-def _should_stop(daily_limit: int, stats: RunStats, logger: RunLogger) -> bool:
+def _remember(stats: RunStats, text: str) -> None:
+    """Запоминает последнее действие — попадает в детали отчёта (logs/<run_id>.json)."""
+    stats.last_action = text
+
+
+def _final_message(stats: RunStats, config: AppConfig) -> str:
+    """Итоговое сообщение о завершении работы."""
+    message = (
+        f"Работа приложения завершена, отправлено откликов: "
+        f"{len(stats.sent)} из {config.search.limit_per_run}."
+    )
+    if stats.stop_reason:
+        message += f" Причина остановки: {stats.stop_reason}."
+    message += f" Сессия сохранена в {config.state_path}."
+    return message
+
+
+def _counters(stats: RunStats) -> tuple[int, int, int, int]:
+    """Счётчики результата: отправлено, пропущено, в очередь, ошибки."""
+    return (stats.sent_count, len(stats.skipped), len(stats.queued), len(stats.errors))
+
+
+def _outcome(
+    before: tuple[int, int, int, int],
+    after: tuple[int, int, int, int],
+) -> str | None:
+    """Результат обработки вакансии по изменению счётчиков.
+
+    None — вакансия не обрабатывалась (например, сработал лимит откликов),
+    такие вакансии не запоминаем, чтобы пройти их в следующем запуске.
+    """
+    if after[0] > before[0]:
+        return OUTCOME_SENT
+    if after[3] > before[3]:
+        return OUTCOME_ERROR
+    if after[2] > before[2]:
+        return OUTCOME_QUEUED
+    if after[1] > before[1]:
+        return OUTCOME_SKIPPED
+    return None
+
+
+def _remember_processing(
+    processed: ProcessedStore,
+    logger: RunLogger,
+    card: VacancyCard,
+    outcome: str,
+) -> None:
+    """Запоминает вакансию, чтобы не проходить её в следующих запусках."""
+    try:
+        processed.add(
+            url=card.url,
+            title=card.title,
+            company=card.company,
+            status=outcome,
+        )
+    except ProcessedError as exc:
+        logger.event("processed_error", url=card.url, error=str(exc))
+        logger.info(f"Не удалось сохранить память об обработанной вакансии: {exc}")
+
+
+def _should_stop(limit_per_run: int, stats: RunStats, logger: RunLogger) -> bool:
     if stats.stop_reason:
         return True
-    if stats.sent_count >= daily_limit:
-        stats.stop_reason = f"достигнут дневной лимит откликов ({daily_limit})"
+    if stats.sent_count >= limit_per_run:
+        stats.stop_reason = f"достигнут лимит откликов за запуск ({limit_per_run})"
         logger.info(stats.stop_reason)
         return True
     return False
@@ -369,3 +636,10 @@ def _is_login_page(page: Page) -> bool:
     except PlaywrightError:
         return False
     return "account/login" in url or url.rstrip("/").endswith("/login")
+
+
+def _page_closed(page: Page) -> bool:
+    try:
+        return page.is_closed()
+    except PlaywrightError:
+        return True
