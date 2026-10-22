@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import smtplib
 from datetime import datetime, timedelta
+from email.message import EmailMessage
 from pathlib import Path
 
 from agent.config import EmailConfig
@@ -133,3 +135,69 @@ def test_send_email_missing_credentials() -> None:
 
     assert sent is False
     assert "SMTP" in message
+
+
+def test_send_email_explains_dropped_connection(monkeypatch) -> None:
+    """Провайдер рвёт соединение на AUTH — подсказываем сменить smtp_host."""
+
+    class BrokenServer:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            raise smtplib.SMTPServerDisconnected("Connection unexpectedly closed")
+
+    monkeypatch.setattr("agent.report.smtplib.SMTP_SSL", BrokenServer)
+    config = EmailConfig(
+        enabled=True,
+        smtp_host="smtp.example.com",
+        smtp_port=465,
+        use_ssl=True,
+        sender="from@example.com",
+        recipient="to@example.com",
+        username="from@example.com",
+        password="secret",
+    )
+
+    sent, message = send_email(config, "subject", "body")
+
+    assert sent is False
+    assert "smtp.yandex.ru" in message
+    assert "закрыл соединение" in message
+
+
+def test_send_email_uses_kind_recipient(monkeypatch) -> None:
+    """Адрес вида писем перекрывает общий notifications.email.recipient."""
+    delivered: list[str] = []
+
+    class FakeSMTP:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> FakeSMTP:
+            return self
+
+        def __exit__(self, *exc: object) -> bool:
+            return False
+
+        def login(self, username: str, password: str) -> None:
+            pass
+
+        def send_message(self, message: EmailMessage) -> None:
+            delivered.append(str(message["To"]))
+
+    monkeypatch.setattr("agent.report.smtplib.SMTP_SSL", FakeSMTP)
+    config = EmailConfig(
+        enabled=True,
+        smtp_host="smtp.example.com",
+        smtp_port=465,
+        use_ssl=True,
+        sender="from@example.com",
+        recipient="common@example.com",
+        username="from@example.com",
+        password="secret",
+    )
+
+    sent, message = send_email(config, "subject", "body", recipient="captcha@example.com")
+
+    assert sent is True
+    assert delivered == ["captcha@example.com"]
+    # Адрес — контакт, в логи и сообщения он не попадает.
+    assert "captcha@example.com" not in message

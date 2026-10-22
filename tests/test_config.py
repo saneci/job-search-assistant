@@ -356,3 +356,37 @@ def test_report_dir_accepts_legacy_key(tmp_path: Path) -> None:
 
     assert config.report_dir.name == "legacy"
 
+
+def test_notifications_default_to_every_kind_on(tmp_path: Path) -> None:
+    """Старые конфиги без разделов report/captcha работают как раньше."""
+    config = load_config(write_config(tmp_path))
+
+    assert config.report_notify.enabled is True
+    assert config.captcha_notify.enabled is True
+    assert config.report_notify.target(config.email) == config.email.recipient
+    assert config.captcha_notify.target(config.email) == config.email.recipient
+
+
+def test_notifications_kinds_have_own_switch_and_recipient(tmp_path: Path) -> None:
+    """Отчёт и капча настраиваются раздельно: каждый вид — свой выключатель и адрес."""
+    config = load_config(
+        write_config(
+            tmp_path,
+            notifications={
+                "email": {"recipient": "common@example.com"},
+                "report": {"enabled": False},
+                "captcha": {"recipient": "captcha@example.com"},
+            },
+        )
+    )
+
+    assert config.report_notify.enabled is False
+    assert config.report_notify.target(config.email) == "common@example.com"
+    assert config.captcha_notify.enabled is True
+    assert config.captcha_notify.target(config.email) == "captcha@example.com"
+
+
+def test_notifications_kind_enabled_must_be_bool(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="notifications.captcha.enabled"):
+        load_config(write_config(tmp_path, notifications={"captcha": {"enabled": "да"}}))
+

@@ -9,6 +9,8 @@ import sys
 from .browser import BrowserError, BrowserSession
 from .config import DEFAULT_CONFIG_PATH, AppConfig, ConfigError, load_config
 from .logging_setup import RunLogger
+from .notify import notify_test as send_test_notification
+from .notify import notify_test_targets
 from .pipeline import run
 from .profile import ProfileError
 
@@ -33,6 +35,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="установить Chromium для Playwright (не нужен при browser.channel)",
     )
+    parser.add_argument(
+        "--notify-test",
+        action="store_true",
+        help="отправить тестовое письмо-уведомление и выйти (проверка SMTP-канала)",
+    )
     return parser
 
 
@@ -48,6 +55,9 @@ def main(argv: list[str] | None = None) -> int:
     with RunLogger(config.logs_dir) as logger:
         if args.install_browser:
             return _install_browser(config)
+
+        if args.notify_test:
+            return _notify_test(config, logger)
 
         if args.login:
             try:
@@ -77,6 +87,32 @@ def main(argv: list[str] | None = None) -> int:
             print("Запуск прерван пользователем.", file=sys.stderr)
             return 130
 
+    return 0
+
+
+def _notify_test(config: AppConfig, logger: RunLogger) -> int:
+    """Проверяет канал уведомлений: письмо на каждый включённый вид писем."""
+    targets = notify_test_targets(config.email, config.report_notify, config.captcha_notify)
+    if not targets:
+        message = (
+            "уведомления отключены: notifications.report.enabled и "
+            "notifications.captcha.enabled в false"
+        )
+        logger.event("notify_test", sent=False, message=message)
+        print(f"Письмо не отправлено: {message}", file=sys.stderr)
+        return 1
+
+    failures: list[str] = []
+    for address in targets:
+        sent, message = send_test_notification(config.email, address)
+        logger.event("notify_test", sent=sent, message=message)
+        if not sent and message not in failures:
+            failures.append(message)
+
+    if failures:
+        print("Письмо не отправлено: " + "; ".join(failures), file=sys.stderr)
+        return 1
+    print(f"Тестовые письма отправлены: {len(targets)}.")
     return 0
 
 

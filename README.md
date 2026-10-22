@@ -95,9 +95,31 @@ py -m venv .venv
    системного промпта: правки применяются при следующем запуске, код менять не нужно; если файл удалить,
    запуск остановится с понятной ошибкой (в коде остаётся лишь аварийный мини-промпт на случай сбоя чтения).
 
-Для отчёта на email включите `notifications.email.enabled: true`, заполните `smtp_host`,
-`smtp_port`, `use_ssl`, `sender`, `recipient` и задайте `SMTP_PASSWORD` (и при необходимости
-`SMTP_USERNAME`) в `.env`.
+Для писем на email сначала включите канал: `notifications.email.enabled: true`, заполните
+`smtp_host`, `smtp_port`, `use_ssl`, `sender`, `recipient` и задайте `SMTP_PASSWORD`
+(и при необходимости `SMTP_USERNAME`) в `.env`.
+
+Виды писем настраиваются раздельно:
+- `notifications.report.enabled` — письмо с отчётом после запуска;
+- `notifications.captcha.enabled` — письма о капче;
+- у каждого вида может быть свой `recipient` — если он не указан, письмо уходит на общий
+  `notifications.email.recipient`.
+
+Gmail: включите двухэтапную аутентификацию и создайте «пароль приложения» (аккаунт Google →
+Безопасность → Пароли приложений), его и положите в `SMTP_PASSWORD`. Нужны `smtp_host: smtp.gmail.com`,
+`smtp_port: 465`, `use_ssl: true`; `sender` и `recipient` могут быть одним и тем же адресом.
+Проверка канала без запуска агента: `python run.py --notify-test` (по письму на каждый включённый вид).
+
+Когда hh.ru показывает капчу (на странице поиска, вакансии или в форме отклика), приложение
+присылает **одно** короткое письмо с темой `[hh-agent] Капча на hh.ru…`: вакансия, ссылка и что
+сделать. Если капча в форме отклика и человек не успел за `browser.captcha_wait_seconds`,
+второго письма нет — об остановке скажет отчёт (если включён `notifications.report`).
+Капча не обходится: её решает человек.
+
+Если `--notify-test` пишет «SMTP-сервер закрыл соединение», провайдер блокирует SMTP-вход
+(так бывает у Gmail из некоторых сетей). Отправляйте через другой SMTP: `smtp_host: smtp.yandex.ru`
+(или `smtp.mail.ru`), `sender` — адрес этого ящика, `SMTP_USERNAME` и `SMTP_PASSWORD` — логин и
+пароль приложения от него. `recipient` может остаться Gmail: ограничение касается только отправки.
 
 ## Запуск
 
@@ -106,6 +128,7 @@ python run.py                     # обычный цикл; без state.json �
 python run.py --login             # только вход и сохранение сессии
 python run.py --config config.yaml
 python run.py --install-browser   # поставить Chromium, если не используется установленный браузер
+python run.py --notify-test       # проверить канал уведомлений: одно письмо, без браузера и LLM
 ```
 
 Или без ручной подготовки окружения:
@@ -314,7 +337,16 @@ python -m pytest
 `HTTP 429`/`5xx` — временные лимиты, приложение делает пару повторов и продолжает работу.
 Ответ не в формате JSON повторяется один раз, затем вакансия пропускается с ошибкой в отчёте.
 
-**Отчёт не пришёл на email.** Нужны `notifications.email.enabled: true`, заполненные `smtp_host`,
+**Письмо о капче не пришло.** Нужен тот же настроенный SMTP-канал, что и для отчёта
+(`notifications.email.enabled: true` и `SMTP_PASSWORD` в `.env`), и включённый вид писем —
+`notifications.captcha.enabled: true`. Проверьте канал командой `python run.py --notify-test`;
+в JSONL событие `email_notify` с `sent: false` и причиной.
+Сообщение «SMTP-сервер закрыл соединение» означает блокировку SMTP-входа у провайдера —
+смените `smtp_host`/`sender` (см. раздел «Настройка»). Сбой отправки запуск не останавливает:
+капча всё равно ждёт решения в окне браузера.
+
+**Отчёт не пришёл на email.** Нужны `notifications.email.enabled: true` и
+`notifications.report.enabled: true`, заполненные `smtp_host`,
 `smtp_port`, `use_ssl`, `sender`, `recipient` и `SMTP_PASSWORD` в `.env`. Если отправка выключена или не
 настроена, отчёт печатается в консоль и сохраняется в `logs/<run_id>.json` — данные не теряются.
 

@@ -5,7 +5,6 @@ from __future__ import annotations
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Callable
 
 from playwright.sync_api import Error as PlaywrightError, Page
 
@@ -39,6 +38,7 @@ from .hh_vacancy import (
 from .llm import LLMClient, LLMError
 from .logging_setup import RunLogger
 from .models import RunError, SentVacancy, SkippedVacancy, VacancyCard, VacancyDetails
+from .notify import notify_captcha
 from .profile import Profile, load_profile
 from .processed import ProcessedError, ProcessedStore
 from .report import RunStats, build_details, build_report, send_email, write_details
@@ -136,11 +136,7 @@ def run(config: AppConfig, logger: RunLogger) -> tuple[RunStats, Path]:
     logger.info_plain(build_report(stats, None))
     logger.info(f"Отчёт сохранён в файле: {details_path}")
 
-    email_sent, email_message = send_email(
-        config.email,
-        f"hh-agent: отчёт за {stats.started_at:%Y-%m-%d %H:%M}",
-        report,
-    )
+    email_sent, email_message = _send_report_email(config, report, stats)
     logger.event("report_email", sent=email_sent, message=email_message)
     if not email_sent:
         logger.info(f"Email-отчёт не отправлен: {email_message}")
@@ -188,6 +184,15 @@ def _process_vacancies(
                 stats.stop_reason = f"капча на странице поиска ({query}, стр. {page_index + 1})"
                 logger.event("captcha", query=query, page=page_index, url=page.url, error=str(exc))
                 logger.info("hh.ru показал капчу на странице поиска, запуск остановлен.")
+                _notify_captcha(
+                    config,
+                    logger,
+                    note=(
+                        f"Капча на странице поиска ({query}, стр. {page_index + 1}). "
+                        "Запуск остановлен — пройдите капчу вручную."
+                    ),
+                    url=page.url,
+                )
                 break
             except PageLoadError as exc:
                 logger.event("search_page_error", query=query, page=page_index, error=str(exc))
@@ -329,6 +334,12 @@ def _process_vacancy(
         _save_problem_screenshot(page, config, logger, "captcha")
         _queue(stats, logger, card, "captcha", f"капча: {exc}")
         stats.stop_reason = "капча на странице вакансии"
+        _notify_captcha(
+            config,
+            logger,
+            card,
+            "Капча на странице вакансии. Запуск остановлен — откликнитесь вручную.",
+        )
         logger.info("hh.ru показал капчу на странице вакансии, запуск остановлен.")
         return
     except (VacancyParseError, PageLoadError, PlaywrightError) as exc:
@@ -482,8 +493,9 @@ def _process_vacancy(
     if generation.greeting_added:
         log.info("в письме не было приветствия, добавил «Здравствуйте!»")
 
+    captcha_waiter = _captcha_waiter(page, config, logger, details)
     try:
-        status = respond(page, generation.cover_letter, captcha_waiter=_captcha_waiter(page, config, logger))
+        status = respond(page, generation.cover_letter, captcha_waiter=captcha_waiter)
     except PlaywrightError as exc:
         _record_error(stats, logger, page, config, details, exc)
         return
@@ -520,6 +532,7 @@ def _process_vacancy(
         _save_problem_screenshot(page, config, logger, "captcha")
         _queue(stats, logger, details, "captcha", "капча в форме отклика")
         stats.stop_reason = "Капча при отправке отклика — откликнитесь вручную"
+        _notify_captcha_stop(config, logger, details, captcha_waiter)
         logger.info("hh.ru показал капчу при отправке отклика, запуск остановлен.")
         return
 
@@ -564,31 +577,116 @@ def _queue(
     _remember(stats, f"Вакансия «{card.title}» отложена ({reason})")
 
 
-def _captcha_waiter(page: Page, config: AppConfig, logger: RunLogger) -> Callable[[], bool] | None:
+class _CaptchaWaiter:
+    """Ожидание капчи в форме отклика; письмо о капче уходит один раз.
+
+    Человеку достаточно одного сигнала: если он не успел, об остановке запуска
+    скажет отчёт, а таймаут фиксируется в JSONL (`captcha_timeout`).
+    """
+
+    def __init__(
+        self,
+        page: Page,
+        config: AppConfig,
+        logger: RunLogger,
+        card: VacancyCard | VacancyDetails | None = None,
+    ) -> None:
+        self._page = page
+        self._config = config
+        self._logger = logger
+        self._card = card
+        self.seconds = config.browser.captcha_wait_seconds
+        self.notified = False
+
+    def __call__(self) -> bool:
+        seconds = self.seconds
+        self._logger.event("captcha_wait", seconds=seconds, url=self._page.url)
+        self._logger.info(
+            "hh.ru просит пройти капчу: введите текст с картинки в открытом окне браузера "
+            f"и нажмите «Отправить», жду до {seconds} с."
+        )
+        if not self.notified:
+            _notify_captcha(
+                self._config,
+                self._logger,
+                self._card,
+                f"Капча в форме отклика: жду решения до {seconds} с. "
+                "Введите текст с картинки в открытом окне браузера и нажмите «Отправить».",
+                url=self._page.url,
+            )
+            self.notified = True
+        solved = wait_for_captcha_solved(self._page, seconds)
+        self._logger.event("captcha_solved" if solved else "captcha_timeout", seconds=seconds)
+        if solved:
+            self._logger.info("Капча пройдена, продолжаю отклик.")
+        else:
+            self._logger.info("Капча не пройдена за отведённое время, отклик отложен.")
+        return solved
+
+
+def _captcha_waiter(
+    page: Page,
+    config: AppConfig,
+    logger: RunLogger,
+    card: VacancyCard | VacancyDetails | None = None,
+) -> _CaptchaWaiter | None:
     """Ждёт, пока человек решит капчу в открытом окне браузера.
 
     В headless-режиме окна нет и ждать некому — возвращаем None, чтобы ответ
     ушёл в отложенные с понятной причиной.
     """
-    seconds = config.browser.captcha_wait_seconds
-    if seconds <= 0 or config.browser.headless:
+    if config.browser.captcha_wait_seconds <= 0 or config.browser.headless:
         return None
+    return _CaptchaWaiter(page, config, logger, card)
 
-    def wait() -> bool:
-        logger.event("captcha_wait", seconds=seconds, url=page.url)
-        logger.info(
-            "hh.ru просит пройти капчу: введите текст с картинки в открытом окне браузера "
-            f"и нажмите «Отправить», жду до {seconds} с."
+
+def _notify_captcha_stop(
+    config: AppConfig,
+    logger: RunLogger,
+    card: VacancyCard | VacancyDetails | None,
+    waiter: _CaptchaWaiter | None,
+) -> None:
+    """Письмо «капча остановила запуск» — только если о ней ещё не писали."""
+    if waiter is not None and waiter.notified:
+        return
+    _notify_captcha(
+        config,
+        logger,
+        card,
+        "Капча в форме отклика. Запуск остановлен — откликнитесь вручную.",
+    )
+
+
+def _notify_captcha(
+    config: AppConfig,
+    logger: RunLogger,
+    card: VacancyCard | VacancyDetails | None = None,
+    note: str = "",
+    url: str = "",
+) -> None:
+    """Письмо о капче: best-effort, сбой отправки не останавливает запуск.
+
+    В письме только вакансия и ссылка — ни профиля, ни текста письма, ни контактов.
+    """
+    if card is not None:
+        title, company = card.title, card.company
+        url = url or card.url
+    else:
+        title, company = "", ""
+    try:
+        sent, message = notify_captcha(
+            config.email,
+            config.captcha_notify,
+            title=title,
+            company=company,
+            url=url,
+            note=note,
         )
-        solved = wait_for_captcha_solved(page, seconds)
-        logger.event("captcha_solved" if solved else "captcha_timeout", seconds=seconds)
-        if solved:
-            logger.info("Капча пройдена, продолжаю отклик.")
-        else:
-            logger.info("Капча не пройдена за отведённое время, отклик отложен.")
-        return solved
-
-    return wait
+    except Exception as exc:  # noqa: BLE001 - уведомление не должно ронять запуск
+        sent, message = False, f"{type(exc).__name__}: {exc}"
+    logger.event("email_notify", kind="captcha", sent=sent, message=message)
+    if not sent:
+        logger.info(f"Письмо о капче не отправлено: {message}")
 
 
 def _save_problem_screenshot(
@@ -635,6 +733,19 @@ def _record_error(
 def _remember(stats: RunStats, text: str) -> None:
     """Запоминает последнее действие — попадает в детали отчёта (logs/<run_id>.json)."""
     stats.last_action = text
+
+
+def _send_report_email(config: AppConfig, report: str, stats: RunStats) -> tuple[bool, str]:
+    """Письмо с отчётом: свой раздел notifications.report (вкл/адрес)."""
+    settings = config.report_notify
+    if not settings.enabled:
+        return False, "письма с отчётом отключены (notifications.report.enabled: false)"
+    return send_email(
+        config.email,
+        f"hh-agent: отчёт за {stats.started_at:%Y-%m-%d %H:%M}",
+        report,
+        recipient=settings.target(config.email),
+    )
 
 
 def _final_message(stats: RunStats, config: AppConfig) -> str:

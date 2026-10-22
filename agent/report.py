@@ -9,6 +9,7 @@ from datetime import datetime
 from email.message import EmailMessage
 from pathlib import Path
 from typing import Any
+from email.utils import formataddr
 
 from .config import EmailConfig
 from .models import RunError, SentVacancy, SkippedVacancy
@@ -104,15 +105,21 @@ def send_email(
     subject: str,
     body: str,
     timeout: float = 30.0,
+    recipient: str = "",
 ) -> tuple[bool, str]:
-    """Отправляет отчёт на email через SMTP. Возвращает (успех, пояснение)."""
-    if not config.enabled:
-        return False, "отправка отчёта на email отключена (notifications.email.enabled: false)"
+    """Отправляет письмо через SMTP. Возвращает (успех, пояснение).
 
+    `recipient` — адрес конкретного вида писем (отчёт, капча); пусто — общий
+    из `notifications.email.recipient`.
+    """
+    if not config.enabled:
+        return False, "отправка email отключена (notifications.email.enabled: false)"
+
+    target = recipient or config.recipient
     required = {
         "notifications.email.smtp_host": config.smtp_host,
         "notifications.email.sender": config.sender,
-        "notifications.email.recipient": config.recipient,
+        "notifications.email.recipient": target,
         "SMTP_PASSWORD": config.password,
     }
     missing = [name for name, value in required.items() if not value]
@@ -121,8 +128,8 @@ def send_email(
 
     message = EmailMessage()
     message["Subject"] = subject
-    message["From"] = config.sender
-    message["To"] = config.recipient
+    message["From"] = formataddr(("HH Agent", config.sender))
+    message["To"] = target
     message.set_content(body)
 
     try:
@@ -138,10 +145,17 @@ def send_email(
             if config.username:
                 server.login(config.username, config.password)
             server.send_message(message)
+    except smtplib.SMTPServerDisconnected as exc:
+        # Частый случай: провайдер принимает соединение, но рвёт его на AUTH.
+        return False, (
+            f"SMTP-сервер закрыл соединение ({exc}). Обычно это блокировка входа "
+            "по SMTP у провайдера: попробуйте другой smtp_host (например, smtp.yandex.ru) "
+            "и пароль приложения для него."
+        )
     except (OSError, smtplib.SMTPException) as exc:
         return False, f"не удалось отправить email: {exc}"
 
-    return True, f"отчёт отправлен на {config.recipient}"
+    return True, "письмо отправлено"
 
 
 def _duration(started_at: datetime, finished_at: datetime) -> str:

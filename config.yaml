@@ -132,14 +132,27 @@ browser:
   # Сколько секунд ждать, пока вы вручную решите капчу в открытом окне браузера.
   # Капча не обходится: приложение только ждёт (0 — не ждать, отложить вакансию).
   # В headless-режиме окна нет, поэтому ожидание не включается.
-  captcha_wait_seconds: 300
+  captcha_wait_seconds: 900
 
-# Отчёт на email. При enabled: false отчёт печатается в консоль и сохраняется в logs.
+# Письма на email: общий SMTP-канал и раздельные переключатели видов писем.
+# SMTP_PASSWORD — пароль приложения (не пароль аккаунта) в .env;
+# SMTP_USERNAME по умолчанию совпадает с sender.
+# Проверка канала: python run.py --notify-test (письмо на каждый включённый вид).
 notifications:
+  # Общий транспорт для всех писем.
   email:
-    enabled: false
-    smtp_host: smtp.yandex.ru
+    enabled: true
+    smtp_host: smtp.gmail.com
     smtp_port: 465
     use_ssl: true
-    sender: ""
-    recipient: ""
+    sender: "hh.agent.noreply@gmail.com"
+    recipient: "a.gladskoy@gmail.com"
+
+  # Письмо с отчётом после запуска.
+  report:
+    enabled: false
+
+  # Письма о капче: одно письмо на капчу, чтобы успеть вмешаться.
+  captcha:
+    enabled: true
+    # recipient: "другой@адрес"  # пусто — общий notifications.email.recipient

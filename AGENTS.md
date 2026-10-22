@@ -41,7 +41,14 @@
 - **Капча не обходится.** Она бывает страницей и модалкой «Пройдите капчу» внутри формы отклика
   (видна только по тексту). Приложение пишет в консоль просьбу решить её вручную и ждёт
   `browser.captcha_wait_seconds`; в headless-режиме не ждёт. Скриншот — `logs/<run_id>-captcha.png`,
-  причина `captcha` в отчёте.
+  причина `captcha` в отчёте. О капче приходит **одно** письмо (`agent/notify.py`, тема
+  `[hh-agent] …`): вакансия и ссылка, без профиля, письма и контактов; дублей нет — повторная
+  капча в той же попытке и остановка запуска второго письма не шлют. Сбой SMTP запуск
+  не останавливает. Канал проверяется командой `python run.py --notify-test`, статус письма —
+  событие `email_notify` (`sent`, `message`) в JSONL.
+- **Виды писем** настраиваются раздельно: `notifications.report` и `notifications.captcha`
+  (`enabled`, опциональный `recipient`; пусто — общий `notifications.email.recipient`).
+  `notifications.email` — только транспорт (SMTP).
 - **Подъём резюме** (`agent/resume.py`) выполняется сразу после входа: `resume.name` из конфига,
   не чаще `resume.boost_interval_hours`. Отметка — `data/cache.json` (`{название: время}`).
   Любая проблема со страницей логируется и не останавливает запуск.
@@ -72,7 +79,7 @@
 - Русские докстринги и сообщения; `from __future__ import annotations`; frozen dataclass для конфигурации и моделей.
 - Ошибки браузера — `PlaywrightError`; потеря сессии hh.ru — `SessionLostError`; сбои LLM — `LLMError`.
 - Внутренние модули: `config`, `browser`, `hh_search`, `hh_vacancy`, `llm`, `prompts`, `pipeline`,
-  `processed`, `resume`, `report`, `logging_setup`, `profile`, `cli`.
+  `processed`, `resume`, `report`, `notify`, `logging_setup`, `profile`, `cli`.
 
 ## Тесты и проверки
 

@@ -136,7 +136,7 @@ class BrowserConfig:
 
 @dataclass(frozen=True)
 class EmailConfig:
-    """Настройки отправки отчёта на email."""
+    """SMTP-канал: общий транспорт для отчёта и уведомлений."""
 
     enabled: bool
     smtp_host: str
@@ -146,6 +146,22 @@ class EmailConfig:
     recipient: str
     username: str
     password: str
+
+
+@dataclass(frozen=True)
+class NotificationConfig:
+    """Один вид писем: нужен ли он и на какой адрес.
+
+    Пустой `recipient` означает «общий адрес из notifications.email.recipient»,
+    поэтому старые конфиги продолжают работать без правок.
+    """
+
+    enabled: bool = True
+    recipient: str = ""
+
+    def target(self, channel: EmailConfig) -> str:
+        """Адрес получателя: свой у этого вида писем или общий из канала."""
+        return self.recipient or channel.recipient
 
 
 @dataclass(frozen=True)
@@ -174,6 +190,8 @@ class AppConfig:
     cover_letter_signature: str = ""
     processed_retention_days: int = 7
     resume: ResumeConfig = field(default_factory=ResumeConfig)
+    report_notify: NotificationConfig = field(default_factory=NotificationConfig)
+    captcha_notify: NotificationConfig = field(default_factory=NotificationConfig)
 
 
 def resolve_area_id(value: Any) -> int:
@@ -219,12 +237,15 @@ def load_config(config_path: Path | str | None = None) -> AppConfig:
         raise ConfigError("Корневой элемент config.yaml должен быть словарём")
 
     paths = _section(raw, "paths")
+    email = _load_email(raw)
     return AppConfig(
         source_path=path,
         search=_load_search(raw),
         llm=_load_llm(raw),
         browser=_load_browser(raw),
-        email=_load_email(raw),
+        email=email,
+        report_notify=_load_notification(raw, "report"),
+        captcha_notify=_load_notification(raw, "captcha"),
         profile_path=_resolve_project_path(paths.get("profile", "PROFILE.md"), "paths.profile"),
         state_path=_resolve_project_path(paths.get("session_state", "state.json"), "paths.session_state"),
         cache_path=_resolve_project_path(paths.get("cache", "data/cache.json"), "paths.cache"),
@@ -390,6 +411,20 @@ def _load_email(raw: Mapping[str, Any]) -> EmailConfig:
         recipient=_optional_str(section.get("recipient")) or "",
         username=username,
         password=os.environ.get("SMTP_PASSWORD", ""),
+    )
+
+
+def _load_notification(raw: Mapping[str, Any], key: str) -> NotificationConfig:
+    """Раздел notifications.<вид>: включён ли вид писем и на какой адрес.
+
+    Раздела нет — вид включён и пишет на общий notifications.email.recipient
+    (обратная совместимость со старыми конфигами).
+    """
+    notifications = _section(raw, "notifications")
+    section = _section(notifications, key)
+    return NotificationConfig(
+        enabled=_bool(section.get("enabled", True), f"notifications.{key}.enabled"),
+        recipient=_optional_str(section.get("recipient")) or "",
     )
 
 

@@ -7,7 +7,7 @@ from dataclasses import replace
 from datetime import date, datetime
 from pathlib import Path
 
-from agent.config import AppConfig, load_config
+from agent.config import AppConfig, NotificationConfig, load_config
 from agent.logging_setup import RunLogger
 from agent.models import SentVacancy, SkippedVacancy, VacancyCard
 from agent.pipeline import (
@@ -19,11 +19,14 @@ from agent.pipeline import (
     _captcha_waiter,
     _counters,
     _final_message,
+    _notify_captcha,
+    _notify_captcha_stop,
     _outcome,
     _outcome_reason,
     _queue,
     _remember_processing,
     _save_problem_screenshot,
+    _send_report_email,
     _VacancyLog,
 )
 from agent.processed import ProcessedStore
@@ -153,6 +156,162 @@ def test_captcha_waiter_logs_and_returns_result(tmp_path: Path, monkeypatch) -> 
     names = [item["event"] for item in events]
     assert "captcha_wait" in names
     assert "captcha_solved" in names
+
+
+def test_captcha_waiter_notifies_when_captcha_appears(tmp_path: Path, monkeypatch) -> None:
+    """Капча в форме: одно письмо при появлении, без дубля на таймауте."""
+    config = make_config(tmp_path)
+    logger = RunLogger(tmp_path / "logs", run_id="captcha-email")
+    page = _FakePage("https://hh.ru/vacancy/1")
+    calls: list[dict[str, str]] = []
+
+    def fake_notify(channel, settings, **kwargs):
+        calls.append(kwargs)
+        return True, "ok"
+
+    monkeypatch.setattr("agent.pipeline.notify_captcha", fake_notify)
+    monkeypatch.setattr("agent.pipeline.wait_for_captcha_solved", lambda page, seconds: False)
+
+    waiter = _captcha_waiter(page, config, logger)  # type: ignore[arg-type]
+    assert waiter is not None
+    assert waiter() is False
+    assert waiter.notified is True
+    logger.close()
+
+    assert len(calls) == 1
+    assert calls[0]["url"] == "https://hh.ru/vacancy/1"
+    assert "жду" in calls[0]["note"].lower()
+
+    events = [
+        json.loads(line)
+        for line in logger.events_path.read_text(encoding="utf-8").splitlines()
+    ]
+    notifications = [item for item in events if item["event"] == "email_notify"]
+    assert [item["sent"] for item in notifications] == [True]
+    assert notifications[0]["kind"] == "captcha"
+
+
+def test_captcha_waiter_notifies_only_once(tmp_path: Path, monkeypatch) -> None:
+    """Повторная капча в той же попытке отклика письма не дублирует."""
+    config = make_config(tmp_path)
+    logger = RunLogger(tmp_path / "logs", run_id="captcha-once")
+    page = _FakePage("https://hh.ru/vacancy/1")
+    calls: list[dict[str, str]] = []
+
+    monkeypatch.setattr(
+        "agent.pipeline.notify_captcha",
+        lambda channel, settings, **kwargs: (calls.append(kwargs), (True, "ok"))[1],
+    )
+    monkeypatch.setattr("agent.pipeline.wait_for_captcha_solved", lambda page, seconds: True)
+
+    waiter = _captcha_waiter(page, config, logger)  # type: ignore[arg-type]
+    assert waiter is not None
+    assert waiter() is True
+    assert waiter() is True
+    logger.close()
+
+    assert len(calls) == 1
+
+
+def test_captcha_stop_does_not_repeat_notification(tmp_path: Path, monkeypatch) -> None:
+    """Остановку из-за капчи не сообщаем вторым письмом."""
+    config = make_config(tmp_path)
+    logger = RunLogger(tmp_path / "logs", run_id="captcha-stop")
+    calls: list[dict[str, str]] = []
+    monkeypatch.setattr(
+        "agent.pipeline.notify_captcha",
+        lambda channel, settings, **kwargs: (calls.append(kwargs), (True, "ok"))[1],
+    )
+    monkeypatch.setattr("agent.pipeline.wait_for_captcha_solved", lambda page, seconds: False)
+
+    waiter = _captcha_waiter(_FakePage("https://hh.ru/vacancy/1"), config, logger)  # type: ignore[arg-type]
+    assert waiter is not None
+    assert waiter() is False
+    _notify_captcha_stop(config, logger, None, waiter)
+    logger.close()
+
+    assert len(calls) == 1
+
+
+def test_captcha_stop_notifies_when_waiter_silent(tmp_path: Path, monkeypatch) -> None:
+    """Без ожидания (headless / 0 секунд) об остановке сообщаем одним письмом."""
+    config = make_config(tmp_path)
+    logger = RunLogger(tmp_path / "logs", run_id="captcha-headless")
+    calls: list[dict[str, str]] = []
+    monkeypatch.setattr(
+        "agent.pipeline.notify_captcha",
+        lambda channel, settings, **kwargs: (calls.append(kwargs), (True, "ok"))[1],
+    )
+
+    _notify_captcha_stop(config, logger, None, None)
+    logger.close()
+
+    assert len(calls) == 1
+    assert "остановлен" in calls[0]["note"].lower()
+
+
+def test_report_email_can_be_switched_off(tmp_path: Path) -> None:
+    """Отчёт и капча настраиваются раздельно: письмо с отчётом можно выключить."""
+    config = replace(make_config(tmp_path), report_notify=NotificationConfig(enabled=False))
+
+    sent, message = _send_report_email(config, "отчёт", make_stats())
+
+    assert sent is False
+    assert "notifications.report.enabled" in message
+
+
+def test_report_email_uses_own_recipient(tmp_path: Path, monkeypatch) -> None:
+    config = replace(
+        make_config(tmp_path),
+        report_notify=NotificationConfig(recipient="report@example.com"),
+    )
+    captured: dict[str, str] = {}
+
+    def fake_send_email(channel, subject, text, recipient="", **kwargs):
+        captured["subject"] = subject
+        captured["recipient"] = recipient
+        return True, "письмо отправлено"
+
+    monkeypatch.setattr("agent.pipeline.send_email", fake_send_email)
+
+    sent, _ = _send_report_email(config, "отчёт", make_stats())
+
+    assert sent is True
+    assert captured["recipient"] == "report@example.com"
+    assert captured["subject"] == "hh-agent: отчёт за 2026-10-21 09:00"
+
+
+def test_notify_captcha_uses_vacancy_and_swallows_errors(tmp_path: Path, monkeypatch) -> None:
+    """В письмо уходят вакансия и ссылка, а сбой SMTP не роняет запуск."""
+    config = make_config(tmp_path)
+    logger = RunLogger(tmp_path / "logs", run_id="notify-fail")
+    card = VacancyCard(
+        title="Java-разработчик",
+        company="Ozon",
+        url="https://hh.ru/vacancy/777",
+    )
+    captured: dict[str, str] = {}
+
+    def broken_notify(channel, settings, **kwargs):
+        captured.update(kwargs)
+        raise OSError("SMTP недоступен")
+
+    monkeypatch.setattr("agent.pipeline.notify_captcha", broken_notify)
+
+    _notify_captcha(config, logger, card, "Капча в форме отклика.")
+    logger.close()
+
+    assert captured["title"] == "Java-разработчик"
+    assert captured["company"] == "Ozon"
+    assert captured["url"] == "https://hh.ru/vacancy/777"
+
+    events = [
+        json.loads(line)
+        for line in logger.events_path.read_text(encoding="utf-8").splitlines()
+    ]
+    notification = [item for item in events if item["event"] == "email_notify"][-1]
+    assert notification["sent"] is False
+    assert "OSError" in notification["message"]
 
 
 class _FakePage:
