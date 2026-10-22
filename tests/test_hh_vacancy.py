@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from agent.hh_vacancy import detect_response_blocker
+from agent.hh_vacancy import _has_success, detect_response_blocker, response_state
 
 
 class FakeElement:
@@ -100,3 +100,77 @@ def test_normal_form_has_no_blockers() -> None:
     )
 
     assert detect_response_blocker(scope) is None  # type: ignore[arg-type]
+
+
+class _Hidden:
+    """Невидимый элемент: count = 0."""
+
+    def count(self) -> int:
+        return 0
+
+    def is_visible(self) -> bool:
+        return False
+
+    def inner_text(self) -> str:
+        return ""
+
+    def evaluate(self, script: str) -> Any:
+        return False
+
+    def get_attribute(self, name: str) -> str:
+        return ""
+
+
+class FakeTextList:
+    def __init__(self, items: list[FakeElement]) -> None:
+        self._items = items
+
+    @property
+    def first(self) -> Any:
+        return self._items[0] if self._items else _Hidden()
+
+    def count(self) -> int:
+        return len(self._items)
+
+    def nth(self, index: int) -> FakeElement:
+        return self._items[index]
+
+
+class FakeTextPage:
+    """Страница-заглушка: поиск по тексту и пустые локаторы."""
+
+    def __init__(self, mapping: dict[str, list[FakeElement]] | None = None) -> None:
+        self.url = "https://hh.ru/vacancy/1"
+        self._mapping = mapping or {}
+
+    def get_by_text(self, text: str, exact: bool = False) -> FakeTextList:
+        return FakeTextList(self._mapping.get(text, []))
+
+    def locator(self, selector: str) -> FakeTextList:
+        return FakeTextList([])
+
+
+def test_success_found_when_first_match_is_hidden() -> None:
+    """Отклик отправлен: hh.ru держит невидимую заготовку раньше видимого сообщения."""
+    page = FakeTextPage(
+        {
+            "Отклик отправлен": [
+                FakeElement("Отклик отправлен", visible=False),
+                FakeElement("Отклик отправлен", visible=True),
+            ]
+        }
+    )
+
+    assert _has_success(page)  # type: ignore[arg-type]
+
+
+def test_success_not_found_when_all_matches_hidden() -> None:
+    page = FakeTextPage({"Вы откликнулись": [FakeElement("Вы откликнулись", visible=False)]})
+
+    assert not _has_success(page)  # type: ignore[arg-type]
+
+
+def test_response_state_has_page_url_and_no_letter() -> None:
+    state = response_state(FakeTextPage())  # type: ignore[arg-type]
+
+    assert state == {"page_url": "https://hh.ru/vacancy/1"}

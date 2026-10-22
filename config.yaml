@@ -3,18 +3,25 @@
 
 # Поисковой запрос: строка или список строк (по каждому запросу поиск выполняется отдельно).
 search_query:
+  - "Java developer"
   - "Java backend developer"
-  - "Java Software Engineer"
+  - "Java software developer"
+  - "Java software engineer"
 
 # Регион: название (Москва, Санкт-Петербург, Россия, Екатеринбург, Новосибирск, Казань)
 # или числовой id региона hh.ru (Москва — 1, Россия — 113).
 area: Москва
 
-# Минимальная зарплата (необязательно).в
+# Минимальная зарплата (необязательно).
 #salary_from: 150000
 
-# Опыт работы (необязательно): noExperience, between1And3, between3And6, moreThan6.
-experience: between1And3
+# Опыт работы (необязательно): одно значение или список значений —
+# noExperience, between1And3, between3And6, moreThan6.
+# Список = несколько отмеченных чекбоксов в фильтре «Опыт» на hh.ru:
+# значения уходят в URL повторяющимся параметром experience.
+experience:
+#  - between1And3
+  - between3And6
 
 # График (необязательно): fullDay, shift, flexible, remote, flyInFlyOut.
 #schedule: remote
@@ -29,12 +36,12 @@ exclude_companies:
   - "Сбер. IT"
 
 # Максимум отправленных откликов за один запуск.
-limit_per_run: 5
+limit_per_run: 20
 
 # Случайная пауза между действиями, секунды.
 delay_between_actions:
-  from: 30
-  to: 60
+  from: 60
+  to: 120
 
 # Сколько страниц выдачи просматривать по каждому запросу.
 pages_limit: 5
@@ -51,7 +58,7 @@ max_vacancies: 200
 cover_letter_max_length: 1500
 
 # Сколько дней хранить память об обработанных вакансиях.
-# При старте файлы data/processed старше этого срока удаляются.
+# При старте файлы data/report старше этого срока удаляются.
 processed_retention_days: 7
 
 # Подпись с контактами: дописывается в конец письма через пустую строку.
@@ -122,8 +129,12 @@ browser:
   # chrome, msedge, chrome-beta и т.п. Пустое значение ("") — Chromium,
   # который ставится командой: python run.py --install-browser
   channel: chrome
+  # Сколько секунд ждать, пока вы вручную решите капчу в открытом окне браузера.
+  # Капча не обходится: приложение только ждёт (0 — не ждать, отложить вакансию).
+  # В headless-режиме окна нет, поэтому ожидание не включается.
+  captcha_wait_seconds: 300
 
-# Отчёт на email. При enabled: false отчёт печатается в консоль и сохраняется в .logs.
+# Отчёт на email. При enabled: false отчёт печатается в консоль и сохраняется в logs.
 notifications:
   email:
     enabled: false

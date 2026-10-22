@@ -78,7 +78,7 @@ class SearchConfig:
     area: str
     area_id: int
     salary_from: int | None
-    experience: str | None
+    experience: tuple[str, ...]
     schedule: str | None
     exclude_keywords: tuple[str, ...]
     exclude_companies: tuple[str, ...]
@@ -130,6 +130,8 @@ class BrowserConfig:
     headless: bool
     slow_mo_ms: int
     channel: str | None = None
+    # Сколько секунд ждать, пока человек решит капчу в открытом окне (0 — не ждать).
+    captcha_wait_seconds: int = 120
 
 
 @dataclass(frozen=True)
@@ -272,11 +274,7 @@ def _load_search(raw: Mapping[str, Any]) -> SearchConfig:
     area = _require(raw, "area", "")
     area_id = resolve_area_id(area)
 
-    experience = _optional_str(raw.get("experience"))
-    if experience is not None and experience not in EXPERIENCE_VALUES:
-        raise ConfigError(
-            "experience должен быть одним из: " + ", ".join(sorted(EXPERIENCE_VALUES))
-        )
+    experience = _filter_values(raw.get("experience"), "experience", EXPERIENCE_VALUES)
     schedule = _optional_str(raw.get("schedule"))
     if schedule is not None and schedule not in SCHEDULE_VALUES:
         raise ConfigError(
@@ -367,10 +365,14 @@ def _load_llm(raw: Mapping[str, Any]) -> LLMConfig:
 def _load_browser(raw: Mapping[str, Any]) -> BrowserConfig:
     section = _section(raw, "browser")
     slow_mo = _optional_non_negative_int(section.get("slow_mo_ms"), "browser.slow_mo_ms")
+    captcha_wait = _optional_non_negative_int(
+        section.get("captcha_wait_seconds"), "browser.captcha_wait_seconds"
+    )
     return BrowserConfig(
         headless=bool(section.get("headless", False)),
         slow_mo_ms=slow_mo or 0,
         channel=_optional_str(section.get("channel")),
+        captcha_wait_seconds=captcha_wait if captcha_wait is not None else 120,
     )
 
 
@@ -505,6 +507,37 @@ def _str(value: Any, key: str) -> str:
     if not text:
         raise ConfigError(f"Параметр {key} не может быть пустым")
     return text
+
+
+def _filter_values(value: Any, key: str, allowed: frozenset[str]) -> tuple[str, ...]:
+    """Значения фильтра hh.ru: одна строка или список строк, без повторов.
+
+    Несколько значений означают несколько отмеченных чекбоксов в фильтре
+    на hh.ru (например, опыт «от 1 года до 3 лет» и «от 3 до 6 лет»).
+    """
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        items: list[Any] = [value]
+    elif isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
+        items = list(value)
+    else:
+        raise ConfigError(f"{key} должен быть строкой или списком строк")
+
+    values: list[str] = []
+    for item in items:
+        text = _optional_str(item)
+        if not text:
+            continue
+        if text not in allowed:
+            raise ConfigError(
+                f"{key}: неизвестное значение «{text}» (допустимо: "
+                + ", ".join(sorted(allowed))
+                + ")"
+            )
+        if text not in values:
+            values.append(text)
+    return tuple(values)
 
 
 def _optional_str(value: Any) -> str | None:

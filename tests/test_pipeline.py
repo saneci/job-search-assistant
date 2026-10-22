@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import date, datetime
 from pathlib import Path
 
@@ -15,12 +16,14 @@ from agent.pipeline import (
     OUTCOME_SENT,
     OUTCOME_SKIPPED,
     QUEUE_REASON_TEXTS,
+    _captcha_waiter,
     _counters,
     _final_message,
     _outcome,
     _outcome_reason,
     _queue,
     _remember_processing,
+    _save_problem_screenshot,
     _VacancyLog,
 )
 from agent.processed import ProcessedStore
@@ -124,6 +127,41 @@ def test_outcome_detects_queue_and_error() -> None:
     assert _outcome((0, 0, 0, 0), (0, 1, 0, 0)) == OUTCOME_SKIPPED
 
 
+def test_captcha_waiter_disabled_in_headless(tmp_path: Path) -> None:
+    """В headless окна нет — ждать ручного решения капчи некому."""
+    config = replace(make_config(tmp_path), browser=replace(make_config(tmp_path).browser, headless=True))
+    page = _FakePage("https://hh.ru/vacancy/1")
+
+    assert _captcha_waiter(page, config, RunLogger(tmp_path / "logs", run_id="h")) is None  # type: ignore[arg-type]
+
+
+def test_captcha_waiter_logs_and_returns_result(tmp_path: Path, monkeypatch) -> None:
+    config = make_config(tmp_path)
+    logger = RunLogger(tmp_path / "logs", run_id="captcha")
+    page = _FakePage("https://hh.ru/vacancy/1")
+    monkeypatch.setattr("agent.pipeline.wait_for_captcha_solved", lambda page, seconds: True)
+
+    waiter = _captcha_waiter(page, config, logger)  # type: ignore[arg-type]
+    assert waiter is not None
+    assert waiter() is True
+    logger.close()
+
+    events = [
+        json.loads(line)
+        for line in logger.events_path.read_text(encoding="utf-8").splitlines()
+    ]
+    names = [item["event"] for item in events]
+    assert "captcha_wait" in names
+    assert "captcha_solved" in names
+
+
+class _FakePage:
+    """Страница-заглушка: для ожидания капчи нужен только url."""
+
+    def __init__(self, url: str) -> None:
+        self.url = url
+
+
 def test_outcome_is_none_when_nothing_happened() -> None:
     """Сработал лимит откликов — вакансию не запоминаем, пройдём в следующий раз."""
     assert _outcome((1, 0, 0, 0), (1, 0, 0, 0)) is None
@@ -173,8 +211,48 @@ def test_queue_reason_texts_match_requirements() -> None:
         "Для отклика на вакансию необходимо пройти тестирование"
     )
     assert QUEUE_REASON_TEXTS["unknown"] == (
-        "Непредвиденная ошибка, детальная информация в логе"
+        "hh.ru не подтвердил отправку отклика — проверьте вакансию вручную"
     )
+    assert QUEUE_REASON_TEXTS["captcha"] == "hh.ru просит пройти капчу: откликнитесь вручную"
+
+
+def test_problem_screenshot_is_saved_and_logged(tmp_path: Path) -> None:
+    """Скриншот капчи/ошибки сохраняется и попадает в JSONL без конфликта полей."""
+    config = replace(make_config(tmp_path), logs_dir=tmp_path / "logs")
+    logger = RunLogger(config.logs_dir, run_id="shot")
+
+    _save_problem_screenshot(_ShotPage(), config, logger, "captcha")
+    logger.close()
+
+    assert (config.logs_dir / "shot-captcha.png").exists()
+    events = [
+        json.loads(line)
+        for line in logger.events_path.read_text(encoding="utf-8").splitlines()
+    ]
+    screenshot = [item for item in events if item["event"] == "screenshot"][0]
+    assert screenshot["kind"] == "captcha"
+
+
+class _ShotPage:
+    """Заглушка страницы: пишет файл вместо реального скриншота."""
+
+    def screenshot(self, path: str, timeout: int | None = None) -> None:
+        Path(path).write_bytes(b"png")
+
+
+class _BrokenShotPage:
+    """Страница, у которой скриншот падает: диагностика не должна ронять запуск."""
+
+    def screenshot(self, path: str, timeout: int | None = None) -> None:
+        raise RuntimeError("скриншот недоступен")
+
+
+def test_problem_screenshot_failure_does_not_raise(tmp_path: Path) -> None:
+    config = replace(make_config(tmp_path), logs_dir=tmp_path / "logs")
+    logger = RunLogger(config.logs_dir, run_id="broken")
+
+    _save_problem_screenshot(_BrokenShotPage(), config, logger, "captcha")
+    logger.close()
 
 
 def test_queue_records_human_reason(tmp_path: Path) -> None:
@@ -198,7 +276,9 @@ def test_queue_unknown_code_gets_generic_reason(tmp_path: Path) -> None:
     _queue(stats, logger, card, "no_form")
     logger.close()
 
-    assert stats.queued[0]["reason"] == "Непредвиденная ошибка, детальная информация в логе"
+    assert stats.queued[0]["reason"] == (
+        "hh.ru не подтвердил отправку отклика — проверьте вакансию вручную"
+    )
 
 
 def test_remember_processing_writes_reason_to_day_report(tmp_path: Path) -> None:

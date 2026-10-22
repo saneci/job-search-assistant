@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 import time
-from typing import Sequence
+from typing import Callable, Sequence
 from urllib.parse import urlparse
 
 from playwright.sync_api import Error as PlaywrightError
@@ -105,6 +105,10 @@ SUCCESS_TEXTS = (
 
 RESPONSE_UI_WAIT_SECONDS = 10
 RESPONSE_RESULT_WAIT_SECONDS = 15
+
+# После вставки письма hh.ru перерисовывает форму: если кликнуть «Откликнуться»
+# сразу, React ещё не применил текст, и нажатие уходит в пустоту.
+LETTER_SETTLE_MS = 1000
 
 
 class VacancyParseError(RuntimeError):
@@ -216,9 +220,17 @@ def _inside_description(locator: Locator) -> bool:
         return False
 
 
-def respond(page: Page, letter: str) -> str:
-    """Отправляет отклик с сопроводительным письмом. Возвращает статус."""
-    if detect_captcha(page):
+def respond(
+    page: Page,
+    letter: str,
+    captcha_waiter: Callable[[], bool] | None = None,
+) -> str:
+    """Отправляет отклик с сопроводительным письмом. Возвращает статус.
+
+    `captcha_waiter` вызывается, когда hh.ru просит капчу: приложение только ждёт
+    ручного решения и продолжает, если человек её прошёл.
+    """
+    if detect_captcha(page) and not _solve_captcha(captcha_waiter):
         return STATUS_CAPTCHA
 
     button = _find_action(page, RESPOND_BUTTON_SELECTORS, RESPOND_RE)
@@ -230,7 +242,7 @@ def respond(page: Page, letter: str) -> str:
     except PlaywrightError:
         return STATUS_UNKNOWN
 
-    ui = _wait_for_response_ui(page)
+    ui = _wait_for_response_ui(page, captcha_waiter)
     if ui == STATUS_CAPTCHA:
         return STATUS_CAPTCHA
     if ui in ("test", "questionnaire", "external_form"):
@@ -247,10 +259,16 @@ def respond(page: Page, letter: str) -> str:
         return blocker
 
     # Письмо вставляем, если форма позволяет (по ТЗ).
-    _fill_letter(page, scope, letter)
+    if _fill_letter(page, scope, letter):
+        page.wait_for_timeout(LETTER_SETTLE_MS)
 
     submit = _find_action(scope, SUBMIT_SELECTORS, RESPOND_RE)
     if submit is None:
+        blocker = detect_response_blocker(scope)
+        _dismiss(page)
+        return blocker or STATUS_NO_FORM
+    if not _is_enabled(submit):
+        # Кнопка заблокирована (например, резюме скрыто): жать её бессмысленно.
         blocker = detect_response_blocker(scope)
         _dismiss(page)
         return blocker or STATUS_NO_FORM
@@ -260,19 +278,51 @@ def respond(page: Page, letter: str) -> str:
     except PlaywrightError:
         return STATUS_UNKNOWN
 
-    result = _wait_for_response_result(page)
+    result = _wait_for_response_result(page, captcha_waiter)
+
+    if result == STATUS_UNKNOWN and not _modal_hidden(page):
+        # Форма осталась открытой — клик не сработал, пробуем ещё раз.
+        retry = _find_action(scope, SUBMIT_SELECTORS, RESPOND_RE)
+        if retry is not None and _is_enabled(retry):
+            try:
+                retry.click()
+            except PlaywrightError:
+                pass
+            else:
+                result = _wait_for_response_result(page, captcha_waiter)
+
     if result in ("test", "questionnaire", "external_form"):
         _dismiss(page)
     return result
 
 
-def _wait_for_response_ui(page: Page, seconds: int = RESPONSE_UI_WAIT_SECONDS) -> str:
+def _solve_captcha(captcha_waiter: Callable[[], bool] | None) -> bool:
+    """Ждёт ручного решения капчи; без обработчика ждать некому."""
+    return bool(captcha_waiter and captcha_waiter())
+
+
+def _is_enabled(locator: Locator) -> bool:
+    try:
+        return locator.is_enabled()
+    except PlaywrightError:
+        return False
+
+
+def _wait_for_response_ui(
+    page: Page,
+    captcha_waiter: Callable[[], bool] | None = None,
+    seconds: int = RESPONSE_UI_WAIT_SECONDS,
+) -> str:
     """Ждёт форму отклика. Возвращает 'ready', статус или причину блокировки."""
     deadline = time.monotonic() + seconds
     while True:
         page.wait_for_timeout(500)
         if detect_captcha(page):
-            return STATUS_CAPTCHA
+            if not _solve_captcha(captcha_waiter):
+                return STATUS_CAPTCHA
+            # После ручного шага отсчитываем время ожидания заново.
+            deadline = time.monotonic() + seconds
+            continue
 
         scope = _response_scope(page)
         blocker = detect_response_blocker(scope)
@@ -284,13 +334,20 @@ def _wait_for_response_ui(page: Page, seconds: int = RESPONSE_UI_WAIT_SECONDS) -
             return "none"
 
 
-def _wait_for_response_result(page: Page, seconds: int = RESPONSE_RESULT_WAIT_SECONDS) -> str:
+def _wait_for_response_result(
+    page: Page,
+    captcha_waiter: Callable[[], bool] | None = None,
+    seconds: int = RESPONSE_RESULT_WAIT_SECONDS,
+) -> str:
     """Ждёт результат отправки. Возвращает sent / причину блокировки / unknown."""
     deadline = time.monotonic() + seconds
     while True:
         page.wait_for_timeout(1000)
         if detect_captcha(page):
-            return STATUS_CAPTCHA
+            if not _solve_captcha(captcha_waiter):
+                return STATUS_CAPTCHA
+            deadline = time.monotonic() + seconds
+            continue
 
         scope = _response_scope(page)
         # Сначала проверяем явный успех: заголовки описания вакансии не должны
@@ -366,14 +423,45 @@ def _dismiss(page: Page) -> None:
 
 
 def _has_success(page: Page) -> bool:
-    """Есть ли на странице явное подтверждение отправки отклика."""
+    """Есть ли на странице явное подтверждение отправки отклика.
+
+    Проверяем все совпадения, а не только первое: hh.ru держит в DOM скрытые
+    заготовки с тем же текстом, и первый узел может быть невидимым — именно
+    из-за этого отправленный отклик раньше считался «неизвестным».
+    """
     for text in SUCCESS_TEXTS:
         try:
-            if _is_visible(page.get_by_text(text, exact=False).first):
-                return True
+            matches = page.get_by_text(text, exact=False)
+            total = min(matches.count(), 10)
         except PlaywrightError:
             continue
+        for index in range(total):
+            if _is_visible(matches.nth(index)):
+                return True
     return False
+
+
+def response_state(page: Page) -> dict[str, object]:
+    """Состояние формы отклика для лога: адрес, текст формы, длина письма.
+
+    Сопроводительное письмо в лог не пишется — только его длина. Если модалки
+    нет, текст страницы не собираем: это шум, а не диагностика.
+    """
+    state: dict[str, object] = {"page_url": page.url}
+    if _modal_hidden(page):
+        return state
+
+    scope = _response_scope(page)
+    form_text = _response_text(scope)
+    if form_text:
+        state["form_text"] = form_text[:400]
+    textarea = _first_visible(scope, LETTER_TEXTAREA_SELECTORS)
+    if textarea is not None:
+        try:
+            state["letter_length"] = len(textarea.input_value() or "")
+        except PlaywrightError:
+            pass
+    return state
 
 
 def _is_already_responded(page: Page) -> bool:

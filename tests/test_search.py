@@ -21,7 +21,7 @@ def make_search(**overrides: object) -> SearchConfig:
         "area": "Москва",
         "area_id": 1,
         "salary_from": None,
-        "experience": None,
+        "experience": (),
         "schedule": None,
         "exclude_keywords": (),
         "exclude_companies": (),
@@ -55,7 +55,7 @@ def test_build_search_url_with_filters() -> None:
     search = make_search(
         area_id=113,
         salary_from=150000,
-        experience="between1And3",
+        experience=("between1And3",),
         schedule="remote",
     )
 
@@ -67,6 +67,17 @@ def test_build_search_url_with_filters() -> None:
     assert params["only_with_salary"] == ["true"]
     assert params["experience"] == ["between1And3"]
     assert params["schedule"] == ["remote"]
+
+
+def test_build_search_url_with_multiple_experience() -> None:
+    """Несколько значений опыта уходят повторяющимся параметром — hh отмечает несколько чекбоксов."""
+    search = make_search(experience=("noExperience", "between1And3", "between3And6"))
+
+    url = build_search_url(search, "Java", 0)
+    params = parse_qs(urlparse(url).query)
+
+    assert params["experience"] == ["noExperience", "between1And3", "between3And6"]
+    assert url.count("experience=") == 3
 
 
 def test_is_excluded_matches_case_insensitive() -> None:

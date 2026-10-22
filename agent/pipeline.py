@@ -5,10 +5,18 @@ from __future__ import annotations
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
 
 from playwright.sync_api import Error as PlaywrightError, Page
 
-from .browser import BrowserError, BrowserSession, CaptchaError, PageLoadError, save_screenshot
+from .browser import (
+    BrowserError,
+    BrowserSession,
+    CaptchaError,
+    PageLoadError,
+    save_screenshot,
+    wait_for_captcha_solved,
+)
 from .config import FIT_LABEL, NOT_FIT_LABEL, AppConfig
 from .hh_search import (
     is_company_excluded,
@@ -26,6 +34,7 @@ from .hh_vacancy import (
     VacancyParseError,
     open_vacancy,
     respond,
+    response_state,
 )
 from .llm import LLMClient, LLMError
 from .logging_setup import RunLogger
@@ -51,7 +60,8 @@ QUEUE_REASON_TEXTS: dict[str, str] = {
     "test": "Для отклика на вакансию необходимо пройти тестирование",
     "questionnaire": "Для отклика на вакансию необходимо заполнить анкету",
     "external_form": "Отклик нужно отправить на сайте работодателя",
-    "unknown": "Непредвиденная ошибка, детальная информация в логе",
+    "captcha": "hh.ru просит пройти капчу: откликнитесь вручную",
+    "unknown": "hh.ru не подтвердил отправку отклика — проверьте вакансию вручную",
 }
 
 
@@ -104,6 +114,10 @@ def run(config: AppConfig, logger: RunLogger) -> tuple[RunStats, Path]:
         except PlaywrightError as exc:
             stats.stop_reason = f"ошибка браузера: {exc}"
             logger.event("browser_error", error=str(exc))
+        except Exception as exc:  # noqa: BLE001 - отчёт и сессию сохраняем в любом случае
+            stats.stop_reason = f"непредвиденная ошибка: {type(exc).__name__}: {exc}"
+            logger.event("unexpected_error", error=f"{type(exc).__name__}: {exc}")
+            logger.info(f"Непредвиденная ошибка: {type(exc).__name__}: {exc}")
         finally:
             try:
                 page.close()
@@ -120,7 +134,7 @@ def run(config: AppConfig, logger: RunLogger) -> tuple[RunStats, Path]:
     report = build_report(stats, details_path)
     logger.info("")
     logger.info_plain(build_report(stats, None))
-    logger.info(f"Файл с деталями: {details_path}")
+    logger.info(f"Отчёт сохранён в файле: {details_path}")
 
     email_sent, email_message = send_email(
         config.email,
@@ -312,7 +326,8 @@ def _process_vacancy(
     try:
         details = open_vacancy(page, card)
     except CaptchaError as exc:
-        _queue(stats, logger, card, "unknown", f"капча: {exc}")
+        _save_problem_screenshot(page, config, logger, "captcha")
+        _queue(stats, logger, card, "captcha", f"капча: {exc}")
         stats.stop_reason = "капча на странице вакансии"
         logger.info("hh.ru показал капчу на странице вакансии, запуск остановлен.")
         return
@@ -460,7 +475,6 @@ def _process_vacancy(
         llm_verdict=generation.verdict,
         llm_reason=generation.reason,
         llm_reason_source="model",
-        letter=generation.cover_letter,
         letter_length=len(generation.cover_letter),
         greeting_added=generation.greeting_added,
     )
@@ -469,7 +483,7 @@ def _process_vacancy(
         log.info("в письме не было приветствия, добавил «Здравствуйте!»")
 
     try:
-        status = respond(page, generation.cover_letter)
+        status = respond(page, generation.cover_letter, captcha_waiter=_captcha_waiter(page, config, logger))
     except PlaywrightError as exc:
         _record_error(stats, logger, page, config, details, exc)
         return
@@ -503,8 +517,9 @@ def _process_vacancy(
         return
 
     if status == STATUS_CAPTCHA:
-        _queue(stats, logger, details, "unknown", "капча при отправке отклика")
-        stats.stop_reason = "капча при отправке отклика"
+        _save_problem_screenshot(page, config, logger, "captcha")
+        _queue(stats, logger, details, "captcha", "капча в форме отклика")
+        stats.stop_reason = "Капча при отправке отклика — откликнитесь вручную"
         logger.info("hh.ru показал капчу при отправке отклика, запуск остановлен.")
         return
 
@@ -513,9 +528,15 @@ def _process_vacancy(
         return
 
     if status == STATUS_NO_FORM:
+        _save_problem_screenshot(page, config, logger, "respond-no-form")
+        logger.event("respond_state", url=details.url, status=status, **response_state(page))
         _queue(stats, logger, details, "unknown", "не найдена форма отклика")
         return
 
+    if status == STATUS_UNKNOWN:
+        _save_problem_screenshot(page, config, logger, "respond-unknown")
+        # Что именно показал hh.ru — без письма и персональных данных.
+        logger.event("respond_state", url=details.url, status=status, **response_state(page))
     _queue(stats, logger, details, "unknown", f"статус отклика: {status or STATUS_UNKNOWN}")
 
 
@@ -540,7 +561,55 @@ def _queue(
     )
     log.event("queued", url=card.url, title=card.title, code=code, reason=reason, note=note)
     log.info(f"отложено, нужен ручной отклик: {reason.lower()}")
-    _remember(stats, f"вакансия «{card.title}» отложена ({reason})")
+    _remember(stats, f"Вакансия «{card.title}» отложена ({reason})")
+
+
+def _captcha_waiter(page: Page, config: AppConfig, logger: RunLogger) -> Callable[[], bool] | None:
+    """Ждёт, пока человек решит капчу в открытом окне браузера.
+
+    В headless-режиме окна нет и ждать некому — возвращаем None, чтобы ответ
+    ушёл в отложенные с понятной причиной.
+    """
+    seconds = config.browser.captcha_wait_seconds
+    if seconds <= 0 or config.browser.headless:
+        return None
+
+    def wait() -> bool:
+        logger.event("captcha_wait", seconds=seconds, url=page.url)
+        logger.info(
+            "hh.ru просит пройти капчу: введите текст с картинки в открытом окне браузера "
+            f"и нажмите «Отправить», жду до {seconds} с."
+        )
+        solved = wait_for_captcha_solved(page, seconds)
+        logger.event("captcha_solved" if solved else "captcha_timeout", seconds=seconds)
+        if solved:
+            logger.info("Капча пройдена, продолжаю отклик.")
+        else:
+            logger.info("Капча не пройдена за отведённое время, отклик отложен.")
+        return solved
+
+    return wait
+
+
+def _save_problem_screenshot(
+    page: Page,
+    config: AppConfig,
+    logger: RunLogger,
+    kind: str,
+) -> None:
+    """Сохраняет скриншот проблемного состояния — по нему видно, что показал hh.ru.
+
+    Диагностика не должна ронять запуск: любые сбои здесь только логируются.
+    """
+    path = config.logs_dir / f"{logger.run_id}-{kind}.png"
+    try:
+        saved = save_screenshot(page, path)
+        if saved:
+            logger.event("screenshot", path=str(saved), kind=kind)
+        else:
+            logger.event("screenshot_error", kind=kind)
+    except Exception as exc:  # noqa: BLE001 - отчёт важнее скриншота
+        logger.info(f"Не удалось сохранить скриншот ({kind}): {exc}")
 
 
 def _record_error(

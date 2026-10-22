@@ -65,7 +65,7 @@ def test_full_search_config(tmp_path: Path) -> None:
     )
 
     assert config.search.salary_from == 150000
-    assert config.search.experience == "between1And3"
+    assert config.search.experience == ("between1And3",)
     assert config.search.schedule == "remote"
     assert config.search.exclude_keywords == ("senior", "lead")
     assert config.search.delay.next() >= 3
@@ -197,6 +197,37 @@ def test_invalid_experience(tmp_path: Path) -> None:
         load_config(write_config(tmp_path, experience="twenty years"))
 
 
+def test_experience_list(tmp_path: Path) -> None:
+    """Несколько значений опыта = несколько чекбоксов в фильтре «Опыт»."""
+    config = load_config(
+        write_config(tmp_path, experience=["noExperience", "between1And3", "between3And6"])
+    )
+
+    assert config.search.experience == ("noExperience", "between1And3", "between3And6")
+
+
+def test_experience_list_without_duplicates(tmp_path: Path) -> None:
+    config = load_config(write_config(tmp_path, experience=["between3And6", "between3And6"]))
+
+    assert config.search.experience == ("between3And6",)
+
+
+def test_experience_empty_list_means_no_filter(tmp_path: Path) -> None:
+    config = load_config(write_config(tmp_path, experience=[]))
+
+    assert config.search.experience == ()
+
+
+def test_experience_list_rejects_unknown_value(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="between1And3"):
+        load_config(write_config(tmp_path, experience=["between1And3", "twenty years"]))
+
+
+def test_experience_must_be_string_or_list(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="строкой или списком строк"):
+        load_config(write_config(tmp_path, experience={"value": "between1And3"}))
+
+
 def test_invalid_delay(tmp_path: Path) -> None:
     with pytest.raises(ConfigError):
         load_config(write_config(tmp_path, delay_between_actions={"from": 9, "to": 3}))
@@ -270,6 +301,22 @@ def test_cache_path_from_config(tmp_path: Path) -> None:
     config = load_config(write_config(tmp_path, paths={"cache": "data/my-cache.json"}))
 
     assert config.cache_path.name == "my-cache.json"
+
+
+def test_captcha_wait_seconds_default(tmp_path: Path) -> None:
+    assert load_config(write_config(tmp_path)).browser.captcha_wait_seconds == 120
+
+
+def test_captcha_wait_seconds_from_config(tmp_path: Path) -> None:
+    """Сколько ждать ручного решения капчи — задаётся в конфиге."""
+    config = load_config(write_config(tmp_path, browser={"captcha_wait_seconds": 30}))
+
+    assert config.browser.captcha_wait_seconds == 30
+
+
+def test_captcha_wait_seconds_cannot_be_negative(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="captcha_wait_seconds"):
+        load_config(write_config(tmp_path, browser={"captcha_wait_seconds": -5}))
 
 
 def test_legacy_queue_path_is_ignored(tmp_path: Path) -> None:

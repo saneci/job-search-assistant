@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import re
+import time
 from pathlib import Path
 from typing import Any
 
@@ -25,8 +27,20 @@ HH_RESUMES = "https://hh.ru/applicant/resumes"
 # Таймаут загрузки страницы hh.ru: страницы с тяжёлой версткой грузятся дольше обычных.
 NAVIGATION_TIMEOUT_MS = 45000
 
+# Скриншот не должен подвешивать запуск: hh.ru иногда не даёт стабильный кадр.
+SCREENSHOT_TIMEOUT_MS = 15000
+
 _PROFILE_MARKERS = "[data-qa='mainmenu_applicantProfile'], [data-qa='mainmenu_avatar']"
 _LOGIN_MARKERS = "a[href*='account/login'], [data-qa='login']"
+
+# Черновики сопроводительных писем hh.ru в localStorage: в файле сессии не нужны.
+LETTER_DRAFT_PREFIX = "vacancy_response_letter_"
+
+# Текст капчи hh.ru: отдельная страница и модалка «Пройдите капчу» в форме отклика.
+CAPTCHA_TEXT_RE = re.compile(
+    r"пройдите капчу|введите текст с картинки|подтвердите, что вы не робот",
+    re.IGNORECASE,
+)
 
 
 class BrowserError(RuntimeError):
@@ -202,12 +216,14 @@ class BrowserSession:
 
 
 def trim_storage_state(state: dict[str, Any]) -> dict[str, Any]:
-    """Убирает из storage_state кэш шрифтов hh.ru.
+    """Убирает из storage_state кэш шрифтов и черновики писем hh.ru.
 
     hh.ru складывает в localStorage шрифты страниц (``magritteFontsNewFont``,
     ``xhhFontsFont``, ``chatikFontsFont``) — это больше мегабайта payload,
     который для входа не нужен: при загрузке страницы браузер скачивает шрифты
-    заново. Cookies и остальные ключи остаются без изменений.
+    заново. Ещё выкидываем черновики сопроводительных писем
+    (``vacancy_response_letter_<id>``) — текст письма в файле сессии не храним.
+    Cookies и остальные ключи остаются без изменений.
     """
     trimmed = dict(state)
     origins: list[dict[str, Any]] = []
@@ -216,7 +232,9 @@ def trim_storage_state(state: dict[str, Any]) -> dict[str, Any]:
             continue
         copy = dict(origin)
         copy["localStorage"] = [
-            item for item in origin.get("localStorage", []) if not _is_font_entry(item)
+            item
+            for item in origin.get("localStorage", [])
+            if not _is_font_entry(item) and not _is_letter_draft(item)
         ]
         origins.append(copy)
     trimmed["origins"] = origins
@@ -227,6 +245,12 @@ def _is_font_entry(item: object) -> bool:
     if not isinstance(item, dict):
         return False
     return str(item.get("name", "")).endswith("Font")
+
+
+def _is_letter_draft(item: object) -> bool:
+    if not isinstance(item, dict):
+        return False
+    return str(item.get("name", "")).startswith(LETTER_DRAFT_PREFIX)
 
 
 def is_authenticated(page: Page) -> bool:
@@ -259,24 +283,56 @@ def _is_visible(locator: Locator) -> bool:
 
 
 def detect_captcha(page: Page) -> bool:
-    """Определяет страницу с капчей."""
+    """Определяет капчу: отдельную страницу или диалог поверх формы отклика.
+
+    hh.ru показывает капчу двумя способами: страница с `captcha` в адресе и
+    модалка «Пройдите капчу» внутри формы отклика (её видно только по тексту).
+    """
     try:
         if "captcha" in page.url.lower():
             return True
-        for selector in ("[data-qa='captcha']", "#captcha", "iframe[src*='captcha']"):
+        for selector in (
+            "[data-qa='captcha']",
+            "#captcha",
+            "iframe[src*='captcha']",
+            "[data-qa*='captcha']",
+            "input[name*='captcha']",
+            "img[alt*='капч']",
+        ):
             locator = page.locator(selector).first
             if locator.count() > 0 and locator.is_visible():
                 return True
+        for selector in ("[role='dialog']", "[data-qa='modal-content']"):
+            dialog = page.locator(selector).first
+            if dialog.count() > 0 and dialog.is_visible():
+                if CAPTCHA_TEXT_RE.search(dialog.inner_text() or ""):
+                    return True
     except PlaywrightError:
         return False
     return False
 
 
-def save_screenshot(page: Page, path: Path) -> Path | None:
+def wait_for_captcha_solved(page: Page, seconds: int) -> bool:
+    """Ждёт, пока человек решит капчу в открытом окне браузера.
+
+    Возвращает True, если капча исчезла (человек ввёл текст и отправил форму).
+    Обход капчи не выполняется: приложение только ждёт ручного действия.
+    """
+    if seconds <= 0:
+        return False
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        page.wait_for_timeout(1000)
+        if not detect_captcha(page):
+            return True
+    return False
+
+
+def save_screenshot(page: Page, path: Path, timeout: int = SCREENSHOT_TIMEOUT_MS) -> Path | None:
     """Сохраняет скриншот страницы для разбора ошибок."""
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        page.screenshot(path=str(path))
+        page.screenshot(path=str(path), timeout=timeout)
         return path
     except (PlaywrightError, OSError):
         return None

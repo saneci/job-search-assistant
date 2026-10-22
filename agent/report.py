@@ -67,7 +67,7 @@ def build_report(stats: RunStats, details_path: Path | None, sent_limit: int = 3
 
     if details_path is not None:
         lines.append("")
-        lines.append(f"Файл с деталями: {details_path}")
+        lines.append(f"Отчёт сохранён в файле: {details_path}")
     return "\n".join(lines)
 
 

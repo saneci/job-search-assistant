@@ -45,20 +45,24 @@ CARD_XPATHS = (
 
 
 def build_search_url(search: SearchConfig, query: str, page_index: int = 0) -> str:
-    """Собирает URL поиска hh.ru с фильтрами из конфигурации."""
-    params: dict[str, str] = {
-        "text": query,
-        "area": str(search.area_id),
-        "page": str(page_index),
-        "items_on_page": str(min(search.per_page, HH_PAGE_SIZE)),
-    }
+    """Собирает URL поиска hh.ru с фильтрами из конфигурации.
+
+    Множественные значения фильтра уходят повторяющимися параметрами
+    (``experience=a&experience=b``): hh.ru отмечает по ним несколько чекбоксов.
+    """
+    params: list[tuple[str, str]] = [
+        ("text", query),
+        ("area", str(search.area_id)),
+        ("page", str(page_index)),
+        ("items_on_page", str(min(search.per_page, HH_PAGE_SIZE))),
+    ]
     if search.salary_from is not None:
-        params["salary"] = str(search.salary_from)
-        params["only_with_salary"] = "true"
-    if search.experience:
-        params["experience"] = search.experience
+        params.append(("salary", str(search.salary_from)))
+        params.append(("only_with_salary", "true"))
+    for value in search.experience:
+        params.append(("experience", value))
     if search.schedule:
-        params["schedule"] = search.schedule
+        params.append(("schedule", search.schedule))
     return f"{SEARCH_URL}?{urlencode(params)}"
 
 
