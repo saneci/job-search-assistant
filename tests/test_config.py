@@ -41,7 +41,9 @@ def test_minimal_config(tmp_path: Path) -> None:
     assert config.browser.headless is False
     assert config.email.enabled is False
     assert config.state_path.name == "state.json"
-    assert config.queue_path.name == "queue.json"
+    assert config.cache_path.name == "cache.json"
+    assert config.resume.name == ""
+    assert config.resume.boost_interval_hours == 4
 
 
 def test_query_list(tmp_path: Path) -> None:
@@ -244,6 +246,37 @@ def test_decision_criteria_must_be_mapping(tmp_path: Path) -> None:
 
 def test_explain_rejections_default_false(tmp_path: Path) -> None:
     assert load_config(write_config(tmp_path)).llm.decision.explain_rejections is False
+
+
+def test_resume_section(tmp_path: Path) -> None:
+    """Название резюме и интервал подъёма берутся из конфига."""
+    config = load_config(
+        write_config(
+            tmp_path,
+            resume={"name": "Java-разработчик", "boost_interval_hours": 6},
+        )
+    )
+
+    assert config.resume.name == "Java-разработчик"
+    assert config.resume.boost_interval_hours == 6
+
+
+def test_resume_interval_must_be_positive(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="resume.boost_interval_hours"):
+        load_config(write_config(tmp_path, resume={"boost_interval_hours": 0}))
+
+
+def test_cache_path_from_config(tmp_path: Path) -> None:
+    config = load_config(write_config(tmp_path, paths={"cache": "data/my-cache.json"}))
+
+    assert config.cache_path.name == "my-cache.json"
+
+
+def test_legacy_queue_path_is_ignored(tmp_path: Path) -> None:
+    """Старый ключ paths.queue не ломает загрузку: очередь больше не используется."""
+    config = load_config(write_config(tmp_path, paths={"queue": "data/report/queue.json"}))
+
+    assert config.cache_path.name == "cache.json"
 
 
 def test_explain_rejections_enabled(tmp_path: Path) -> None:

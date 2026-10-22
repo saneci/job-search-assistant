@@ -11,7 +11,6 @@ from .config import DEFAULT_CONFIG_PATH, AppConfig, ConfigError, load_config
 from .logging_setup import RunLogger
 from .pipeline import run
 from .profile import ProfileError
-from .queue import QueueError
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -69,7 +68,7 @@ def main(argv: list[str] | None = None) -> int:
 
         try:
             run(config, logger)
-        except (BrowserError, ProfileError, QueueError) as exc:
+        except (BrowserError, ProfileError) as exc:
             logger.event("fatal_error", error=f"{type(exc).__name__}: {exc}")
             print(f"Запуск прерван: {exc}", file=sys.stderr)
             return 1

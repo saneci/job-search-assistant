@@ -147,6 +147,14 @@ class EmailConfig:
 
 
 @dataclass(frozen=True)
+class ResumeConfig:
+    """Подъём резюме в поиске: название резюме и минимальный интервал между подъёмами."""
+
+    name: str = ""
+    boost_interval_hours: int = 4
+
+
+@dataclass(frozen=True)
 class AppConfig:
     """Полная конфигурация запуска."""
 
@@ -157,12 +165,13 @@ class AppConfig:
     email: EmailConfig
     profile_path: Path
     state_path: Path
-    queue_path: Path
+    cache_path: Path
     logs_dir: Path
     report_dir: Path
     cover_letter_max_length: int = 1500
     cover_letter_signature: str = ""
     processed_retention_days: int = 7
+    resume: ResumeConfig = field(default_factory=ResumeConfig)
 
 
 def resolve_area_id(value: Any) -> int:
@@ -216,7 +225,7 @@ def load_config(config_path: Path | str | None = None) -> AppConfig:
         email=_load_email(raw),
         profile_path=_resolve_project_path(paths.get("profile", "PROFILE.md"), "paths.profile"),
         state_path=_resolve_project_path(paths.get("session_state", "state.json"), "paths.session_state"),
-        queue_path=_resolve_project_path(paths.get("queue", "queue.json"), "paths.queue"),
+        cache_path=_resolve_project_path(paths.get("cache", "data/cache.json"), "paths.cache"),
         logs_dir=_resolve_project_path(paths.get("logs_dir", ".logs"), "paths.logs_dir"),
         report_dir=_resolve_project_path(
             paths.get("report_dir") or paths.get("processed_dir") or "data/report",
@@ -229,6 +238,18 @@ def load_config(config_path: Path | str | None = None) -> AppConfig:
             raw.get("cover_letter_max_length", 1500), "cover_letter_max_length"
         ),
         cover_letter_signature=_optional_str(raw.get("cover_letter_signature")) or "",
+        resume=_load_resume(raw),
+    )
+
+
+def _load_resume(raw: Mapping[str, Any]) -> ResumeConfig:
+    """Параметры подъёма резюме в поиске; пустое имя — подъём отключён."""
+    section = _section(raw, "resume")
+    return ResumeConfig(
+        name=_optional_str(section.get("name")) or "",
+        boost_interval_hours=_positive_int(
+            section.get("boost_interval_hours", 4), "resume.boost_interval_hours"
+        ),
     )
 
 

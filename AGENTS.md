@@ -29,10 +29,17 @@
   (или текст модели при `explain_rejections: true`).
 - **Дневные отчёты**: `data/report/<дата>.json` — пройденные вакансии, повторно не обрабатываются;
   файлы старше `processed_retention_days` удаляются при старте. Запись: `url`, `title`, `company`,
-  `status` (`sent`/`skipped`/`queued`/`error`), `reason` (только для `skipped`), `processed_at`;
+  `status` (`sent`/`skipped`/`queued`/`error`), `reason` (для `skipped` и `queued`), `processed_at`;
   поиск идёт по `id` из URL, затем по «название + компания». Вакансия, не обработанная
   из-за лимита откликов, в отчёт не пишется — её пройдём в следующий раз.
-- **Очередь** (`data/report/queue.json`) проверяется до вызова LLM: вакансия из очереди модель не дёргает.
+- **Отложенные вакансии** живут в том же дневном отчёте (`status: "queued"`) с человеческой причиной
+  из `QUEUE_REASON_TEXTS` (`test`, `questionnaire`, `external_form`, `empty_cover_letter`, `unknown`);
+  отдельного `queue.json` нет. Код причины — только в JSONL (поле `code`).
+- **Подъём резюме** (`agent/resume.py`) выполняется сразу после входа: `resume.name` из конфига,
+  не чаще `resume.boost_interval_hours`. Отметка — `data/cache.json` (`{название: время}`).
+  Любая проблема со страницей логируется и не останавливает запуск.
+- **Сессия**: `data/state.json` — `storage_state` Playwright. При сохранении выбрасываем кэш шрифтов
+  hh.ru (ключи, оканчивающиеся на `Font`): это ~1 МБ, для входа не нужен.
 - **Выдача hh.ru**: 20 карточек на страницу (больше не рисует, даже с `items_on_page=50`),
   глубина = `pages_limit × 20`. `items_on_page` больше 20 ломает пагинацию: страницы сдвигаются,
   а карточек приходит 20 — часть вакансий теряется.
@@ -43,7 +50,8 @@
   `LLM-решение`, `LLM-вердикт`, `отклик отправлен`). Одна строка — одно событие, без повторов факта.
 - `llm_verdict` — вердикт приложения (после порога), `model_choice` — вариант модели с максимальной
   вероятностью. Одно и то же число дважды в консоль не печатаем.
-- JSONL `logs/<run_id>.jsonl`: имя события + `vacancy` + `llm_reason` + детали (URL, вероятности, письмо).
+- JSONL `logs/<дата>.jsonl`: один файл на дату, перезапуски дописывают в конец; `run_id` в каждой
+  записи отделяет запуски. В событии — имя события + `vacancy` + `llm_reason` + детали (URL, вероятности, письмо).
 - Отчёт: шапка из `=`, ниже пункты `- Ключ: значение`, печатается без меток времени (`info_plain`).
 - Пользователю печатаем понятный текст, технические детали уходят в JSONL.
 
@@ -54,7 +62,7 @@
 - Русские докстринги и сообщения; `from __future__ import annotations`; frozen dataclass для конфигурации и моделей.
 - Ошибки браузера — `PlaywrightError`; потеря сессии hh.ru — `SessionLostError`; сбои LLM — `LLMError`.
 - Внутренние модули: `config`, `browser`, `hh_search`, `hh_vacancy`, `llm`, `prompts`, `pipeline`,
-  `processed`, `queue`, `report`, `logging_setup`, `profile`, `cli`.
+  `processed`, `resume`, `report`, `logging_setup`, `profile`, `cli`.
 
 ## Тесты и проверки
 

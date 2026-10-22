@@ -154,6 +154,23 @@ def test_skipped_record_has_reason(tmp_path: Path) -> None:
     assert records[0]["reason"] == "вероятность 0.57 не выше порога 0.80"
 
 
+def test_queued_record_has_reason(tmp_path: Path) -> None:
+    """Отложенная вакансия тоже объясняет, почему её не взяли в работу."""
+    store = ProcessedStore(tmp_path, today=date(2026, 10, 21))
+    store.add(
+        url="https://hh.ru/vacancy/1",
+        title="Java",
+        company="Ozon",
+        status="queued",
+        reason="Для отклика на вакансию необходимо пройти тестирование",
+    )
+
+    records = json.loads((tmp_path / "2026-10-21.json").read_text(encoding="utf-8"))
+
+    assert records[0]["status"] == "queued"
+    assert records[0]["reason"] == "Для отклика на вакансию необходимо пройти тестирование"
+
+
 def test_sent_record_has_no_reason(tmp_path: Path) -> None:
     store = ProcessedStore(tmp_path, today=date(2026, 10, 21))
     store.add(url="https://hh.ru/vacancy/1", title="Java", company="Ozon", status="sent")
@@ -163,12 +180,12 @@ def test_sent_record_has_no_reason(tmp_path: Path) -> None:
     assert "reason" not in records[0]
 
 
-def test_queue_file_in_report_dir_is_ignored(tmp_path: Path) -> None:
-    """queue.json лежит в том же каталоге, но историей вакансий не считается."""
-    queue = [
+def test_foreign_file_in_report_dir_is_ignored(tmp_path: Path) -> None:
+    """Посторонний файл в каталоге отчётов историей вакансий не считается."""
+    foreign = [
         {"url": "https://hh.ru/vacancy/9", "title": "Java", "company": "Ozon", "reason": "test"}
     ]
-    (tmp_path / "queue.json").write_text(json.dumps(queue, ensure_ascii=False), encoding="utf-8")
+    (tmp_path / "queue.json").write_text(json.dumps(foreign, ensure_ascii=False), encoding="utf-8")
     ProcessedStore(tmp_path, today=date(2026, 10, 21)).add(
         url="https://hh.ru/vacancy/1",
         title="Java",

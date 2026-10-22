@@ -32,8 +32,8 @@ from .logging_setup import RunLogger
 from .models import RunError, SentVacancy, SkippedVacancy, VacancyCard, VacancyDetails
 from .profile import Profile, load_profile
 from .processed import ProcessedError, ProcessedStore
-from .queue import REASON_TITLES, QueueError, QueueStore
 from .report import RunStats, build_details, build_report, send_email, write_details
+from .resume import boost_resume
 
 
 class SessionLostError(RuntimeError):
@@ -44,6 +44,15 @@ OUTCOME_SENT = "sent"
 OUTCOME_SKIPPED = "skipped"
 OUTCOME_QUEUED = "queued"
 OUTCOME_ERROR = "error"
+
+# Вакансии, на которые нельзя откликнуться автоматически: что писать в отчёте за день.
+QUEUE_REASON_TEXTS: dict[str, str] = {
+    "empty_cover_letter": "Нужно заполнить сопроводительное письмо вручную",
+    "test": "Для отклика на вакансию необходимо пройти тестирование",
+    "questionnaire": "Для отклика на вакансию необходимо заполнить анкету",
+    "external_form": "Отклик нужно отправить на сайте работодателя",
+    "unknown": "Непредвиденная ошибка, детальная информация в логе",
+}
 
 
 class _VacancyLog:
@@ -77,14 +86,14 @@ def run(config: AppConfig, logger: RunLogger) -> tuple[RunStats, Path]:
     details_path = config.logs_dir / f"{logger.run_id}.json"
 
     profile = load_profile(config.profile_path)
-    queue = QueueStore(config.queue_path)
 
     with BrowserSession(config.browser, config.state_path, logger) as session:
         session.ensure_logged_in()
         page = session.new_page()
         try:
+            boost_resume(page, config, logger)
             with LLMClient(config.llm) as llm:
-                _process_vacancies(page, config, profile, llm, queue, stats, logger)
+                _process_vacancies(page, config, profile, llm, stats, logger)
         except KeyboardInterrupt:
             stats.stop_reason = "остановлено пользователем (Ctrl+C)"
             logger.event("interrupted")
@@ -132,7 +141,6 @@ def _process_vacancies(
     config: AppConfig,
     profile: Profile,
     llm: LLMClient,
-    queue: QueueStore,
     stats: RunStats,
     logger: RunLogger,
 ) -> None:
@@ -228,9 +236,7 @@ def _process_vacancies(
                     break
 
                 counters = _counters(stats)
-                _process_vacancy(
-                    page, config, profile, llm, queue, processed, stats, logger, card
-                )
+                _process_vacancy(page, config, profile, llm, stats, logger, card)
                 outcome = _outcome(counters, _counters(stats))
                 if outcome:
                     _remember_processing(
@@ -238,7 +244,7 @@ def _process_vacancies(
                         logger,
                         card,
                         outcome,
-                        _outcome_reason(stats, counters[1], outcome),
+                        _outcome_reason(stats, counters, outcome),
                     )
 
                 if _page_closed(page):
@@ -256,8 +262,6 @@ def _process_vacancy(
     config: AppConfig,
     profile: Profile,
     llm: LLMClient,
-    queue: QueueStore,
-    processed: ProcessedStore,
     stats: RunStats,
     logger: RunLogger,
     card: VacancyCard,
@@ -308,7 +312,7 @@ def _process_vacancy(
     try:
         details = open_vacancy(page, card)
     except CaptchaError as exc:
-        _enqueue(queue, stats, logger, card, "unknown", f"капча: {exc}")
+        _queue(stats, logger, card, "unknown", f"капча: {exc}")
         stats.stop_reason = "капча на странице вакансии"
         logger.info("hh.ru показал капчу на странице вакансии, запуск остановлен.")
         return
@@ -317,11 +321,6 @@ def _process_vacancy(
         return
 
     _pause(config, logger, "после открытия вакансии")
-
-    if queue.contains(details.url):
-        log.info("уже в очереди, пропускаю")
-        _remember_processing(processed, logger, card, OUTCOME_QUEUED)
-        return
 
     excluded_company = is_company_excluded(details.company, config.search.exclude_companies)
     if excluded_company:
@@ -359,7 +358,7 @@ def _process_vacancy(
         return
 
     if details.blocker:
-        _enqueue(queue, stats, logger, details, details.blocker, "признак на странице вакансии")
+        _queue(stats, logger, details, details.blocker, "признак на странице вакансии")
         return
 
     if stats.sent_count >= config.search.limit_per_run:
@@ -452,7 +451,7 @@ def _process_vacancy(
         )
 
     if not generation.cover_letter:
-        _enqueue(queue, stats, logger, details, "empty_cover_letter", generation.reason)
+        _queue(stats, logger, details, "empty_cover_letter", generation.reason)
         return
 
     log.event(
@@ -504,54 +503,44 @@ def _process_vacancy(
         return
 
     if status == STATUS_CAPTCHA:
-        _enqueue(queue, stats, logger, details, "unknown", "капча при отправке отклика")
+        _queue(stats, logger, details, "unknown", "капча при отправке отклика")
         stats.stop_reason = "капча при отправке отклика"
         logger.info("hh.ru показал капчу при отправке отклика, запуск остановлен.")
         return
 
     if status in ("test", "questionnaire", "external_form"):
-        _enqueue(queue, stats, logger, details, status, "в форме отклика")
+        _queue(stats, logger, details, status, "в форме отклика")
         return
 
     if status == STATUS_NO_FORM:
-        _enqueue(queue, stats, logger, details, "unknown", "не найдена форма отклика")
+        _queue(stats, logger, details, "unknown", "не найдена форма отклика")
         return
 
-    _enqueue(queue, stats, logger, details, "unknown", f"статус отклика: {status or STATUS_UNKNOWN}")
+    _queue(stats, logger, details, "unknown", f"статус отклика: {status or STATUS_UNKNOWN}")
 
 
-def _enqueue(
-    queue: QueueStore,
+def _queue(
     stats: RunStats,
     logger: RunLogger,
     card: VacancyCard | VacancyDetails,
-    reason: str,
+    code: str,
     note: str = "",
-) -> bool:
-    """Добавляет вакансию в очередь ручных действий."""
+) -> None:
+    """Отмечает вакансию как отложенную: отклик нужно отправить вручную."""
+    reason = QUEUE_REASON_TEXTS.get(code, QUEUE_REASON_TEXTS["unknown"])
     log = _VacancyLog(logger, card.title, card.company, card.url)
-    try:
-        record = queue.add(
-            url=card.url,
-            title=card.title,
-            company=card.company,
-            reason=reason,
-        )
-    except QueueError as exc:
-        log.event("queue_error", url=card.url, error=str(exc))
-        log.info(f"не удалось записать в очередь: {exc}")
-        return False
-
-    if record is None:
-        logger.event("queued_duplicate", url=card.url, reason=reason)
-        log.info("уже есть в очереди на дальшейшую обработку")
-        return False
-
-    stats.queued.append(record)
-    log.event("queued", url=card.url, title=card.title, reason=reason, note=note)
-    log.info(f"отложено в очередь ({REASON_TITLES.get(reason, reason)})")
-    _remember(stats, f"вакансия «{card.title}» отложена ({REASON_TITLES.get(reason, reason)})")
-    return True
+    stats.queued.append(
+        {
+            "url": card.url,
+            "title": card.title,
+            "company": card.company,
+            "reason": reason,
+            "queued_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        }
+    )
+    log.event("queued", url=card.url, title=card.title, code=code, reason=reason, note=note)
+    log.info(f"отложено, нужен ручной отклик: {reason.lower()}")
+    _remember(stats, f"вакансия «{card.title}» отложена ({reason})")
 
 
 def _record_error(
@@ -616,11 +605,17 @@ def _outcome(
     return None
 
 
-def _outcome_reason(stats: RunStats, skipped_before: int, outcome: str) -> str:
-    """Причина пропуска для файла дня: берётся из последней записи stats.skipped."""
-    if outcome != OUTCOME_SKIPPED or len(stats.skipped) <= skipped_before:
-        return ""
-    return stats.skipped[-1].reason
+def _outcome_reason(
+    stats: RunStats,
+    before: tuple[int, int, int, int],
+    outcome: str,
+) -> str:
+    """Причина результата для файла дня: из последней записи skipped/queued."""
+    if outcome == OUTCOME_SKIPPED and len(stats.skipped) > before[1]:
+        return stats.skipped[-1].reason
+    if outcome == OUTCOME_QUEUED and len(stats.queued) > before[2]:
+        return str(stats.queued[-1].get("reason", ""))
+    return ""
 
 
 def _remember_processing(
@@ -632,11 +627,11 @@ def _remember_processing(
 ) -> None:
     """Запоминает вакансию, чтобы не проходить её в следующих запусках.
 
-    Для пропусков пишется причина — по файлу дня потом видно, почему вакансию
-    не взяли.
+    Для пропусков и отложенных вакансий пишется причина — по файлу дня потом
+    видно, почему вакансию не взяли в работу.
     """
-    if outcome == OUTCOME_SKIPPED and not reason:
-        logger.event("skip_reason_missing", url=card.url, title=card.title)
+    if outcome in (OUTCOME_SKIPPED, OUTCOME_QUEUED) and not reason:
+        logger.event("reason_missing", url=card.url, title=card.title, status=outcome)
     try:
         processed.add(
             url=card.url,

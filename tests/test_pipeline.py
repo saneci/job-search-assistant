@@ -14,10 +14,12 @@ from agent.pipeline import (
     OUTCOME_QUEUED,
     OUTCOME_SENT,
     OUTCOME_SKIPPED,
+    QUEUE_REASON_TEXTS,
     _counters,
     _final_message,
     _outcome,
     _outcome_reason,
+    _queue,
     _remember_processing,
     _VacancyLog,
 )
@@ -87,7 +89,7 @@ def test_vacancy_log_prefixes_lines_and_events(tmp_path: Path) -> None:
 
     events = [
         json.loads(line)
-        for line in (tmp_path / "run.jsonl").read_text(encoding="utf-8").splitlines()
+        for line in logger.events_path.read_text(encoding="utf-8").splitlines()
     ]
 
     assert events[0]["event"] == "info"
@@ -103,7 +105,7 @@ def test_vacancy_log_without_company(tmp_path: Path) -> None:
     log.info("открываю вакансию")
     logger.close()
 
-    event = json.loads((tmp_path / "run2.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    event = json.loads(logger.events_path.read_text(encoding="utf-8").splitlines()[0])
 
     assert event["message"] == "Java-разработчик: открываю вакансию"
 
@@ -138,15 +140,65 @@ def test_outcome_reason_takes_skip_reason() -> None:
         )
     )
 
-    assert _outcome_reason(stats, 0, OUTCOME_SKIPPED) == "вероятность 0.08 не выше порога 0.80"
+    assert _outcome_reason(stats, (0, 0, 0, 0), OUTCOME_SKIPPED) == (
+        "вероятность 0.08 не выше порога 0.80"
+    )
+
+
+def test_outcome_reason_takes_queued_reason() -> None:
+    stats = RunStats(started_at=datetime(2026, 10, 21, 9, 0))
+    stats.queued.append(
+        {"url": "https://hh.ru/vacancy/1", "reason": "Для отклика нужно пройти тестирование"}
+    )
+
+    assert _outcome_reason(stats, (0, 0, 0, 0), OUTCOME_QUEUED) == (
+        "Для отклика нужно пройти тестирование"
+    )
 
 
 def test_outcome_reason_empty_for_other_outcomes() -> None:
     stats = RunStats(started_at=datetime(2026, 10, 21, 9, 0))
 
-    assert _outcome_reason(stats, 0, OUTCOME_SENT) == ""
-    assert _outcome_reason(stats, 0, OUTCOME_QUEUED) == ""
-    assert _outcome_reason(stats, 0, OUTCOME_SKIPPED) == ""
+    assert _outcome_reason(stats, (0, 0, 0, 0), OUTCOME_SENT) == ""
+    assert _outcome_reason(stats, (0, 0, 0, 0), OUTCOME_QUEUED) == ""
+    assert _outcome_reason(stats, (0, 0, 0, 0), OUTCOME_SKIPPED) == ""
+
+
+def test_queue_reason_texts_match_requirements() -> None:
+    """Тексты причин для файла дня — человеческие, а не коды."""
+    assert QUEUE_REASON_TEXTS["empty_cover_letter"] == (
+        "Нужно заполнить сопроводительное письмо вручную"
+    )
+    assert QUEUE_REASON_TEXTS["test"] == (
+        "Для отклика на вакансию необходимо пройти тестирование"
+    )
+    assert QUEUE_REASON_TEXTS["unknown"] == (
+        "Непредвиденная ошибка, детальная информация в логе"
+    )
+
+
+def test_queue_records_human_reason(tmp_path: Path) -> None:
+    logger = RunLogger(tmp_path / "logs", run_id="queued")
+    stats = make_stats()
+    card = VacancyCard(title="Java", company="Ozon", url="https://hh.ru/vacancy/5")
+
+    _queue(stats, logger, card, "empty_cover_letter")
+    logger.close()
+
+    assert stats.queued[0]["url"] == "https://hh.ru/vacancy/5"
+    assert stats.queued[0]["reason"] == "Нужно заполнить сопроводительное письмо вручную"
+    assert stats.queued[0]["queued_at"]
+
+
+def test_queue_unknown_code_gets_generic_reason(tmp_path: Path) -> None:
+    stats = make_stats()
+    card = VacancyCard(title="Java", company="Ozon", url="https://hh.ru/vacancy/6")
+    logger = RunLogger(tmp_path / "logs", run_id="queued-unknown")
+
+    _queue(stats, logger, card, "no_form")
+    logger.close()
+
+    assert stats.queued[0]["reason"] == "Непредвиденная ошибка, детальная информация в логе"
 
 
 def test_remember_processing_writes_reason_to_day_report(tmp_path: Path) -> None:
@@ -181,9 +233,7 @@ def test_loop_chain_records_skip_reason(tmp_path: Path) -> None:
         )
     )
     outcome = _outcome(counters, _counters(stats))
-    _remember_processing(
-        store, logger, card, outcome, _outcome_reason(stats, counters[1], outcome)
-    )
+    _remember_processing(store, logger, card, outcome, _outcome_reason(stats, counters, outcome))
     logger.close()
 
     records = json.loads((tmp_path / "report" / "2026-10-21.json").read_text(encoding="utf-8"))

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -121,12 +122,17 @@ class BrowserSession:
             raise BrowserError("Браузер не запущен")
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            self._context.storage_state(path=str(self.state_path))
+            state = trim_storage_state(self._context.storage_state())
+            self.state_path.write_text(
+                json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
         except Exception as exc:
             self.logger.event("session_save_error", error=str(exc))
             self.logger.info(f"Не удалось сохранить сессию: {exc}")
             return
-        self.logger.event("session_saved", path=str(self.state_path))
+        self.logger.event(
+            "session_saved", path=str(self.state_path), size=self.state_path.stat().st_size
+        )
         self.logger.info(f"Сессия сохранена в {self.state_path}")
 
     def ensure_logged_in(self) -> None:
@@ -193,6 +199,34 @@ class BrowserSession:
                 except Exception:
                     pass
                 self._playwright = None
+
+
+def trim_storage_state(state: dict[str, Any]) -> dict[str, Any]:
+    """Убирает из storage_state кэш шрифтов hh.ru.
+
+    hh.ru складывает в localStorage шрифты страниц (``magritteFontsNewFont``,
+    ``xhhFontsFont``, ``chatikFontsFont``) — это больше мегабайта payload,
+    который для входа не нужен: при загрузке страницы браузер скачивает шрифты
+    заново. Cookies и остальные ключи остаются без изменений.
+    """
+    trimmed = dict(state)
+    origins: list[dict[str, Any]] = []
+    for origin in state.get("origins", []):
+        if not isinstance(origin, dict):
+            continue
+        copy = dict(origin)
+        copy["localStorage"] = [
+            item for item in origin.get("localStorage", []) if not _is_font_entry(item)
+        ]
+        origins.append(copy)
+    trimmed["origins"] = origins
+    return trimmed
+
+
+def _is_font_entry(item: object) -> bool:
+    if not isinstance(item, dict):
+        return False
+    return str(item.get("name", "")).endswith("Font")
 
 
 def is_authenticated(page: Page) -> bool:
