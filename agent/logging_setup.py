@@ -56,6 +56,21 @@ class RunLogger:
         stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         return f"[{stamp}] {message}"
 
+    def switch_day(self, day: str) -> bool:
+        """Переключает журнал на файл другой даты.
+
+        Запуск может идти через полночь, а файл журнала — файл даты: после
+        полуночи события должны попасть в новый файл, а не в сегодняшний.
+        Возвращает True, если файл действительно сменился.
+        """
+        if day == self.day:
+            return False
+        self.close()
+        self.day = day
+        self.events_path = self.logs_dir / f"{self.day}.jsonl"
+        self._file = self.events_path.open("a", encoding="utf-8")
+        return True
+
     def close(self) -> None:
         if not self._file.closed:
             self._file.close()

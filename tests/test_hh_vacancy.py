@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from agent.hh_vacancy import _has_success, detect_response_blocker, response_state
+from agent.hh_vacancy import (
+    _has_success,
+    detect_page_blocker,
+    detect_response_blocker,
+    response_state,
+)
 
 
 class FakeElement:
@@ -146,8 +151,46 @@ class FakeTextPage:
     def get_by_text(self, text: str, exact: bool = False) -> FakeTextList:
         return FakeTextList(self._mapping.get(text, []))
 
+    def get_by_role(self, role: str, name: Any = None) -> FakeTextList:
+        return FakeTextList([])
+
     def locator(self, selector: str) -> FakeTextList:
         return FakeTextList([])
+
+
+def test_detects_blocked_vacancy() -> None:
+    """«У вас нет доступа к этой вакансии» — вакансию пропускаем."""
+    page = FakeTextPage(
+        {"У вас нет доступа к этой вакансии": [FakeElement("У вас нет доступа к этой вакансии")]}
+    )
+
+    assert detect_page_blocker(page) == "blocked"  # type: ignore[arg-type]
+
+
+def test_detects_rejected_vacancy() -> None:
+    """«Вам отказали» — отказ работодателя по отправленному отклику."""
+    page = FakeTextPage({"Вам отказали": [FakeElement("Вам отказали")]})
+
+    assert detect_page_blocker(page) == "rejected"  # type: ignore[arg-type]
+
+
+def test_detects_invited_vacancy() -> None:
+    """Отметка «Вас пригласили» — отклик уже не нужен."""
+    page = FakeTextPage({"Вас пригласили": [FakeElement("Вас пригласили")]})
+
+    assert detect_page_blocker(page) == "invited"  # type: ignore[arg-type]
+
+
+def test_hidden_invited_badge_is_ignored() -> None:
+    page = FakeTextPage({"Вас пригласили": [FakeElement("Вас пригласили", visible=False)]})
+
+    assert detect_page_blocker(page) is None  # type: ignore[arg-type]
+
+
+def test_open_vacancy_has_no_page_blocker() -> None:
+    page = FakeTextPage({"Java-разработчик": [FakeElement("Java-разработчик")]})
+
+    assert detect_page_blocker(page) is None  # type: ignore[arg-type]
 
 
 def test_success_found_when_first_match_is_hidden() -> None:

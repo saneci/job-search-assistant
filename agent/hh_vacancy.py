@@ -53,6 +53,15 @@ STATUS_CAPTCHA = "captcha"
 STATUS_NO_FORM = "no_form"
 STATUS_UNKNOWN = "unknown"
 
+# Состояния самой страницы вакансии. Это не «блокеры» теста/анкеты: такие
+# вакансии не откладываем, а помечаем пройденными (skipped или rejected).
+PAGE_BLOCKED = "blocked"
+PAGE_INVITED = "invited"
+PAGE_REJECTED = "rejected"
+BLOCKED_TITLE = "У вас нет доступа к этой вакансии"
+INVITED_TITLE = "Вас пригласили"
+REJECTED_TITLE = "Вам отказали"
+
 RESPOND_RE = re.compile(r"^\s*откликнуться\s*$", re.IGNORECASE)
 LETTER_TOGGLE_RE = re.compile(r"добавить сопроводительное", re.IGNORECASE)
 TEST_ACTION_RE = re.compile(
@@ -138,6 +147,20 @@ def open_vacancy(page: Page, card: VacancyCard) -> VacancyDetails:
     if salary and "не указан" in salary.lower():
         salary = ""
 
+    company_name = company.splitlines()[0].strip() if company else ""
+    blocker = detect_page_blocker(page)
+    if blocker in (PAGE_BLOCKED, PAGE_INVITED, PAGE_REJECTED):
+        # На такой странице нет ни описания, ни формы отклика: вакансию
+        # пропускаем сразу, без разбора и без обращения к LLM.
+        return VacancyDetails(
+            url=card.url,
+            title=title,
+            company=company_name,
+            salary=salary,
+            description="",
+            blocker=blocker,
+        )
+
     description = _first_text(page, DESCRIPTION_SELECTORS)
     if not description:
         raise VacancyParseError(f"Не удалось извлечь описание вакансии: {card.url}")
@@ -145,16 +168,29 @@ def open_vacancy(page: Page, card: VacancyCard) -> VacancyDetails:
     return VacancyDetails(
         url=card.url,
         title=title,
-        company=company.splitlines()[0].strip() if company else "",
+        company=company_name,
         salary=salary,
         description=description,
         already_responded=_is_already_responded(page),
-        blocker=detect_page_blocker(page),
+        blocker=blocker,
     )
 
 
 def detect_page_blocker(page: Page) -> str | None:
-    """Ищет на странице вакансии признаки теста, анкеты или внешней формы."""
+    """Ищет на странице вакансии повод не откликаться автоматически.
+
+    Кроме теста, анкеты и внешней формы ловим состояния самой страницы:
+    вакансия больше недоступна («У вас нет доступа к этой вакансии») и
+    работодатель уже пригласил откликнуться («Вас пригласили»). Это не
+    отложенные вакансии, а пройденные: отклик там не нужен.
+    """
+    if _has_exact_text(page, BLOCKED_TITLE):
+        return PAGE_BLOCKED
+    if _has_exact_text(page, REJECTED_TITLE):
+        # Работодатель отказал по отклику: вакансия пройдена, статус rejected.
+        return PAGE_REJECTED
+    if _has_exact_text(page, INVITED_TITLE):
+        return PAGE_INVITED
     if _has_selector(page, QUESTIONNAIRE_SELECTORS) or _has_role_name(page, QUESTIONNAIRE_ACTION_RE):
         return "questionnaire"
     if _has_selector(page, TEST_SELECTORS) or _has_role_name(page, TEST_ACTION_RE):
@@ -503,6 +539,19 @@ def _first_text(scope: Locator | Page, selectors: Sequence[str]) -> str:
         return locator.inner_text().strip()
     except PlaywrightError:
         return ""
+
+
+def _has_exact_text(scope: Locator | Page, text: str) -> bool:
+    """Есть ли видимый элемент с точно таким текстом (без учёта соседних)."""
+    try:
+        locator = scope.get_by_text(text, exact=True)
+        count = min(locator.count(), 10)
+    except PlaywrightError:
+        return False
+    for index in range(count):
+        if _is_visible(locator.nth(index)):
+            return True
+    return False
 
 
 def _is_visible(locator: Locator) -> bool:

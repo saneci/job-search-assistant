@@ -68,6 +68,31 @@ def test_restart_appends_to_same_day_file(tmp_path: Path) -> None:
     assert [item["run_id"] for item in events] == ["first", "second"]
 
 
+def test_switch_day_opens_new_file(tmp_path: Path) -> None:
+    """Через полночь события уходят в файл новой даты, а не вчерашний."""
+    logger = RunLogger(tmp_path, run_id="long-run")
+    first_path = logger.events_path
+    logger.info("до полуночи")
+
+    assert logger.switch_day("2030-01-01") is True
+    logger.info("после полуночи")
+    logger.close()
+
+    assert logger.events_path != first_path
+    assert [item["message"] for item in read_events(first_path)] == ["до полуночи"]
+    assert [item["message"] for item in read_events(logger.events_path)] == [
+        "после полуночи"
+    ]
+    assert read_events(logger.events_path)[0]["run_id"] == "long-run"
+
+
+def test_switch_day_keeps_current_file(tmp_path: Path) -> None:
+    logger = RunLogger(tmp_path, run_id="same-day")
+
+    assert logger.switch_day(logger.day) is False
+    logger.close()
+
+
 def test_empty_info_stays_empty(tmp_path: Path, capsys) -> None:
     logger = RunLogger(tmp_path, run_id="blank")
 

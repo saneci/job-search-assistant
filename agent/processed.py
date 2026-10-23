@@ -28,6 +28,10 @@ class ProcessedStore:
     будут пройдены заново. При загрузке читаются все файлы дат, поэтому
     вакансия не будет обработана повторно ни завтра, ни через месяц. Прочие
     файлы каталога (не вида «ГГГГ-ММ-ДД.json») игнорируются.
+
+    Одна вакансия — одна запись: при повторе запись переносится в файл
+    сегодняшней даты, а копии, оставшиеся в старших файлах, снимаются при
+    загрузке истории (актуальной считается самая свежая запись).
     """
 
     def __init__(self, directory: Path, today: date | None = None) -> None:
@@ -35,31 +39,59 @@ class ProcessedStore:
         self.today = today or date.today()
         self._seen: dict[str, str] = {}
         self._records: dict[str, tuple[Path, dict[str, Any]]] = {}
+        # Сколько копий снято при последней загрузке истории (событие в логе).
+        self.dropped_copies = 0
 
     @property
     def path(self) -> Path:
         """Файл сегодняшней даты."""
         return self.directory / f"{self.today.strftime(DATE_FORMAT)}.json"
 
+    def roll_to(self, today: date) -> bool:
+        """Переключает отчёт на файл новой даты; True, если дата сменилась.
+
+        Запуск может идти через полночь: записи должны попасть в файл той
+        даты, когда они сделаны, а не в файл начала запуска.
+        """
+        if today == self.today:
+            return False
+        self.today = today
+        return True
+
     def load(self) -> int:
-        """Читает историю из всех файлов дат; возвращает число ключей."""
+        """Читает историю из всех файлов дат; возвращает число ключей.
+
+        Файлы читаются от свежих к старым, поэтому одна вакансия оставляет за
+        собой только самую новую запись: копии из старших файлов удаляются при
+        загрузке. Так история остаётся переносом записи, а не набором копий.
+        """
         self._seen.clear()
         self._records.clear()
+        self.dropped_copies = 0
         if not self.directory.is_dir():
             return 0
-        for file in sorted(self.directory.glob("*.json")):
+        for file in sorted(self.directory.glob("*.json"), reverse=True):
             day = _file_date(file)
             if day is None:
                 continue
+            kept: list[dict[str, Any]] = []
+            dropped = False
             for record in _read(file):
                 keys = vacancy_keys(
                     str(record.get("title", "")),
                     str(record.get("company", "")),
                     str(record.get("url", "")),
                 )
+                if keys and any(key in self._records for key in keys):
+                    dropped = True
+                    self.dropped_copies += 1
+                    continue
+                kept.append(record)
                 for key in keys:
                     self._seen.setdefault(key, day.strftime(DATE_FORMAT))
-                    self._records.setdefault(key, (file, record))
+                    self._records[key] = (file, record)
+            if dropped:
+                _write(file, kept)
         return len(self._seen)
 
     def find(self, title: str, company: str, url: str) -> str | None:
@@ -159,11 +191,24 @@ class ProcessedStore:
             item.pop("reason", None)
 
         if path == self.path:
-            rows = [item if _same_vacancy(row, item) else row for row in _read(path)]
+            # Замена ровно одной строки: если в файле оказались копии, лишние
+            # убираем — в отчёте на вакансию всегда одна запись.
+            rows: list[dict[str, Any]] = []
+            replaced = False
+            for row in _read(path):
+                if _same_vacancy(row, item):
+                    if not replaced:
+                        rows.append(item)
+                        replaced = True
+                    continue
+                rows.append(row)
             _write(path, rows)
         else:
+            # Перенос, а не копия: из старого файла запись убираем, в файл
+            # сегодняшней даты кладём ровно одну строку (даже если там уже
+            # была такая же — иначе в отчёте появится дубль).
             _write(path, [row for row in _read(path) if not _same_vacancy(row, item)])
-            today = _read(self.path)
+            today = [row for row in _read(self.path) if not _same_vacancy(row, item)]
             today.append(item)
             _write(self.path, today)
 

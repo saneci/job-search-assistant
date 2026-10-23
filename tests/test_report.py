@@ -8,7 +8,7 @@ from email.message import EmailMessage
 from pathlib import Path
 
 from agent.config import EmailConfig
-from agent.models import RunError, SentVacancy, SkippedVacancy
+from agent.models import REJECTED_REASON, RunError, SentVacancy, SkippedVacancy
 from agent.report import RunStats, build_report, send_email
 
 
@@ -63,6 +63,30 @@ def test_build_report(tmp_path: Path) -> None:
     assert "- Причина остановки: достигнут дневной лимит откликов (20)" in lines
     assert any(line.startswith("- Длительность: ") for line in lines)
     assert f"Отчёт сохранён в файле: {report_path}" in report
+
+
+def test_report_lists_rejections() -> None:
+    """Отказы по откликам видно отдельной строкой отчёта."""
+    stats = make_stats()
+    stats.rejected.append(
+        SkippedVacancy(
+            title="Java-разработчик",
+            company="Клиника",
+            url="https://hh.ru/vacancy/136409645",
+            reason=REJECTED_REASON,
+        )
+    )
+
+    lines = build_report(stats).splitlines()
+
+    assert "- Отказы по откликам: 1" in lines
+
+
+def test_report_skips_empty_rejections_line() -> None:
+    """Нет отказов — нет и строки: отчёт не обрастает нулями."""
+    lines = build_report(make_stats()).splitlines()
+
+    assert not any(line.startswith("- Отказы по откликам") for line in lines)
 
 
 def test_report_does_not_repeat_sent_vacancies() -> None:

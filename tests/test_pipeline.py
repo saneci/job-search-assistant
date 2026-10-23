@@ -9,15 +9,17 @@ from pathlib import Path
 
 from agent.config import AppConfig, NotificationConfig, load_config
 from agent.logging_setup import RunLogger
-from agent.models import SentVacancy, SkippedVacancy, VacancyCard
+from agent.models import SentVacancy, SkippedVacancy, VacancyCard, VacancyDetails
 from agent.pipeline import (
     OUTCOME_ERROR,
     OUTCOME_EXCLUDED,
     OUTCOME_QUEUED,
     OUTCOME_SENT,
     OUTCOME_SKIPPED,
+    PAGE_STATUS_REASONS,
     QUEUE_REASON_TEXTS,
     _captcha_waiter,
+    _check_new_day,
     _counters,
     _final_message,
     _notify_captcha,
@@ -124,6 +126,172 @@ def test_vacancy_log_without_company(tmp_path: Path) -> None:
     assert event["message"] == "Java-разработчик: открываю вакансию"
 
 
+class _NightDate(date):
+    """Дата «после полуночи» для проверки переключения файлов."""
+
+    @classmethod
+    def today(cls) -> date:
+        return date(2026, 10, 22)
+
+
+def test_check_new_day_rotates_log_and_report(tmp_path: Path, monkeypatch) -> None:
+    """Через полночь журнал и дневной отчёт переключаются на файлы новой даты."""
+    logger = RunLogger(tmp_path / "logs", run_id="night")
+    store = ProcessedStore(tmp_path / "report", today=date(2026, 10, 21))
+    monkeypatch.setattr("agent.pipeline.date", _NightDate)
+
+    _check_new_day(logger, store)
+    _check_new_day(logger, store)
+    logger.close()
+
+    assert store.today == date(2026, 10, 22)
+    assert store.path.name == "2026-10-22.json"
+    assert logger.day == "2026-10-22"
+    events = [
+        json.loads(line)
+        for line in (tmp_path / "logs" / "2026-10-22.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert [event["event"] for event in events].count("new_day") == 1
+
+
+def test_blocked_vacancy_is_skipped_with_reason(tmp_path: Path, monkeypatch) -> None:
+    """«У вас нет доступа к этой вакансии» → status skipped с этой же причиной."""
+    config = make_config(tmp_path)
+    card = VacancyCard(title="Java", company="Ozon", url="https://hh.ru/vacancy/7")
+    details = VacancyDetails(
+        url=card.url,
+        title=card.title,
+        company=card.company,
+        salary="",
+        description="",
+        blocker="blocked",
+    )
+    monkeypatch.setattr("agent.pipeline.open_vacancy", lambda page, vacancy: details)
+    stats = make_stats()
+    logger = RunLogger(tmp_path / "logs", run_id="blocked")
+
+    _process_vacancy(
+        page=None,  # type: ignore[arg-type]
+        config=config,
+        profile=None,  # type: ignore[arg-type]
+        llm=None,  # type: ignore[arg-type]
+        stats=stats,
+        logger=logger,
+        card=card,
+    )
+    logger.close()
+
+    assert [item.reason for item in stats.skipped] == ["У вас нет доступа к этой вакансии"]
+    assert stats.queued == []
+
+
+def test_invited_vacancy_is_skipped_without_queue(tmp_path: Path, monkeypatch) -> None:
+    """«Вас пригласили» → вакансию проходим, а не откладываем в ручные."""
+    config = make_config(tmp_path)
+    card = VacancyCard(title="Java", company="Ozon", url="https://hh.ru/vacancy/8")
+    details = VacancyDetails(
+        url=card.url,
+        title=card.title,
+        company=card.company,
+        salary="",
+        description="",
+        blocker="invited",
+    )
+    monkeypatch.setattr("agent.pipeline.open_vacancy", lambda page, vacancy: details)
+    stats = make_stats()
+    logger = RunLogger(tmp_path / "logs", run_id="invited")
+
+    _process_vacancy(
+        page=None,  # type: ignore[arg-type]
+        config=config,
+        profile=None,  # type: ignore[arg-type]
+        llm=None,  # type: ignore[arg-type]
+        stats=stats,
+        logger=logger,
+        card=card,
+    )
+    logger.close()
+
+    assert set(PAGE_STATUS_REASONS) == {"blocked", "invited", "rejected"}
+    assert [item.reason for item in stats.skipped] == ["Вас пригласили на эту вакансию"]
+    assert stats.queued == []
+
+
+def test_rejected_vacancy_gets_own_status(tmp_path: Path, monkeypatch) -> None:
+    """«Вам отказали» → статус rejected с причиной «По отклику пришёл отказ»."""
+    config = make_config(tmp_path)
+    card = VacancyCard(title="Java", company="Ozon", url="https://hh.ru/vacancy/9")
+    details = VacancyDetails(
+        url=card.url,
+        title=card.title,
+        company=card.company,
+        salary="",
+        description="",
+        blocker="rejected",
+    )
+    monkeypatch.setattr("agent.pipeline.open_vacancy", lambda page, vacancy: details)
+    stats = make_stats()
+    logger = RunLogger(tmp_path / "logs", run_id="rejected")
+
+    _process_vacancy(
+        page=None,  # type: ignore[arg-type]
+        config=config,
+        profile=None,  # type: ignore[arg-type]
+        llm=None,  # type: ignore[arg-type]
+        stats=stats,
+        logger=logger,
+        card=card,
+    )
+    logger.close()
+
+    assert stats.skipped == []
+    assert [item.reason for item in stats.rejected] == ["По отклику пришёл отказ"]
+    assert stats.queued == []
+    events = [
+        json.loads(line) for line in logger.events_path.read_text(encoding="utf-8").splitlines()
+    ]
+    page_events = [item for item in events if item["event"] == "page_status"]
+    assert [item["status"] for item in page_events] == ["rejected"]
+
+
+def test_already_responded_vacancy_gets_sent_status(tmp_path: Path, monkeypatch) -> None:
+    """«Отклик отправлен» на странице → статус sent, а не skipped."""
+    config = make_config(tmp_path)
+    card = VacancyCard(title="Java", company="Ozon", url="https://hh.ru/vacancy/11")
+    details = VacancyDetails(
+        url=card.url,
+        title=card.title,
+        company=card.company,
+        salary="",
+        description="",
+        already_responded=True,
+    )
+    monkeypatch.setattr("agent.pipeline.open_vacancy", lambda page, vacancy: details)
+    stats = make_stats()
+    logger = RunLogger(tmp_path / "logs", run_id="already")
+
+    _process_vacancy(
+        page=None,  # type: ignore[arg-type]
+        config=config,
+        profile=None,  # type: ignore[arg-type]
+        llm=None,  # type: ignore[arg-type]
+        stats=stats,
+        logger=logger,
+        card=card,
+    )
+    logger.close()
+
+    assert stats.skipped == []
+    assert [item.reason for item in stats.already_sent] == ["отклик уже отправлен"]
+    # Лимит откликов такие вакансии не расходуют.
+    assert stats.sent_count == 0
+    events = [
+        json.loads(line) for line in logger.events_path.read_text(encoding="utf-8").splitlines()
+    ]
+    already = [item for item in events if item["event"] == "already_responded"]
+    assert [item["status"] for item in already] == ["sent"]
+
+
 def test_plural_agrees_with_number() -> None:
     """Формы слов в логе согласуются с числом: 1 страница, 2 страницы, 5 страниц."""
     forms = ("страница", "страницы", "страниц")
@@ -180,8 +348,10 @@ def test_search_plan_and_page_lines(tmp_path: Path, monkeypatch, capsys) -> None
     logger.close()
 
     out = capsys.readouterr().out
-    plan = "Запрос «Java developer» на hh.ru нашёл 545 вакансий: 6 страниц по 100"
-    page = "Обработка результатов запроса «Java developer»: 1 вакансия на странице 1"
+    plan = "По запросу «Java developer» найдено 545 вакансий, разделяю обработку на 6 страниц"
+    page = (
+        "Обработка 1 вакансия из результата запроса «Java developer»: страница 1 из 6"
+    )
 
     assert plan in out
     assert page in out
@@ -196,18 +366,28 @@ def test_search_plan_and_page_lines(tmp_path: Path, monkeypatch, capsys) -> None
 
 
 def test_outcome_detects_sent() -> None:
-    assert _outcome((0, 0, 0, 0, 0), (1, 0, 0, 0, 0)) == OUTCOME_SENT
+    assert _outcome((0, 0, 0, 0, 0, 0, 0), (1, 0, 0, 0, 0, 0, 0)) == OUTCOME_SENT
 
 
 def test_outcome_prefers_sent_over_skipped() -> None:
-    assert _outcome((0, 1, 0, 0, 0), (1, 2, 0, 0, 0)) == OUTCOME_SENT
+    assert _outcome((0, 1, 0, 0, 0, 0, 0), (1, 2, 0, 0, 0, 0, 0)) == OUTCOME_SENT
 
 
 def test_outcome_detects_queue_and_error() -> None:
-    assert _outcome((0, 0, 0, 0, 0), (0, 0, 1, 0, 0)) == OUTCOME_QUEUED
-    assert _outcome((0, 0, 0, 0, 0), (0, 0, 0, 1, 0)) == OUTCOME_ERROR
-    assert _outcome((0, 0, 0, 0, 0), (0, 1, 0, 0, 0)) == OUTCOME_SKIPPED
-    assert _outcome((0, 0, 0, 0, 0), (0, 0, 0, 0, 1)) == OUTCOME_EXCLUDED
+    assert _outcome((0, 0, 0, 0, 0, 0, 0), (0, 0, 1, 0, 0, 0, 0)) == OUTCOME_QUEUED
+    assert _outcome((0, 0, 0, 0, 0, 0, 0), (0, 0, 0, 1, 0, 0, 0)) == OUTCOME_ERROR
+    assert _outcome((0, 0, 0, 0, 0, 0, 0), (0, 1, 0, 0, 0, 0, 0)) == OUTCOME_SKIPPED
+    assert _outcome((0, 0, 0, 0, 0, 0, 0), (0, 0, 0, 0, 1, 0, 0)) == OUTCOME_EXCLUDED
+
+
+def test_outcome_detects_rejected() -> None:
+    """Отказ по отклику — отдельный статус, не пропуск."""
+    assert _outcome((0, 0, 0, 0, 0, 0, 0), (0, 0, 0, 0, 0, 1, 0)) == "rejected"
+
+
+def test_outcome_marks_already_responded_as_sent() -> None:
+    """Отклик уже был отправлен — в файле дня это sent, а не skipped."""
+    assert _outcome((0, 0, 0, 0, 0, 0, 0), (0, 0, 0, 0, 0, 0, 1)) == OUTCOME_SENT
 
 
 def test_captcha_waiter_disabled_in_headless(tmp_path: Path) -> None:
@@ -406,7 +586,7 @@ class _FakePage:
 
 def test_outcome_is_none_when_nothing_happened() -> None:
     """Сработал лимит откликов — вакансию не запоминаем, пройдём в следующий раз."""
-    assert _outcome((1, 0, 0, 0, 0), (1, 0, 0, 0, 0)) is None
+    assert _outcome((1, 0, 0, 0, 0, 0, 0), (1, 0, 0, 0, 0, 0, 0)) is None
 
 
 def test_outcome_reason_takes_skip_reason() -> None:
@@ -420,7 +600,7 @@ def test_outcome_reason_takes_skip_reason() -> None:
         )
     )
 
-    assert _outcome_reason(stats, (0, 0, 0, 0, 0), OUTCOME_SKIPPED) == (
+    assert _outcome_reason(stats, (0, 0, 0, 0, 0, 0, 0), OUTCOME_SKIPPED) == (
         "вероятность 0.08 не выше порога 0.80"
     )
 
@@ -431,17 +611,50 @@ def test_outcome_reason_takes_queued_reason() -> None:
         {"url": "https://hh.ru/vacancy/1", "reason": "Для отклика нужно пройти тестирование"}
     )
 
-    assert _outcome_reason(stats, (0, 0, 0, 0, 0), OUTCOME_QUEUED) == (
+    assert _outcome_reason(stats, (0, 0, 0, 0, 0, 0, 0), OUTCOME_QUEUED) == (
         "Для отклика нужно пройти тестирование"
+    )
+
+
+def test_outcome_reason_takes_rejected_reason() -> None:
+    stats = RunStats(started_at=datetime(2026, 10, 21, 9, 0))
+    stats.rejected.append(
+        SkippedVacancy(
+            title="Java-разработчик",
+            company="Клиника",
+            url="https://hh.ru/vacancy/136409645",
+            reason="По отклику пришёл отказ",
+        )
+    )
+
+    assert (
+        _outcome_reason(stats, (0, 0, 0, 0, 0, 0, 0), "rejected") == "По отклику пришёл отказ"
+    )
+
+
+def test_outcome_reason_takes_already_responded_reason() -> None:
+    """Для «уже отправлено» причина остаётся в записи: видно, почему sent."""
+    stats = RunStats(started_at=datetime(2026, 10, 21, 9, 0))
+    stats.already_sent.append(
+        SkippedVacancy(
+            title="Java-разработчик",
+            company="Ozon",
+            url="https://hh.ru/vacancy/1",
+            reason="отклик уже отправлен",
+        )
+    )
+
+    assert (
+        _outcome_reason(stats, (0, 0, 0, 0, 0, 0, 0), OUTCOME_SENT) == "отклик уже отправлен"
     )
 
 
 def test_outcome_reason_empty_for_other_outcomes() -> None:
     stats = RunStats(started_at=datetime(2026, 10, 21, 9, 0))
 
-    assert _outcome_reason(stats, (0, 0, 0, 0), OUTCOME_SENT) == ""
-    assert _outcome_reason(stats, (0, 0, 0, 0), OUTCOME_QUEUED) == ""
-    assert _outcome_reason(stats, (0, 0, 0, 0), OUTCOME_SKIPPED) == ""
+    assert _outcome_reason(stats, (0, 0, 0, 0, 0, 0, 0), OUTCOME_SENT) == ""
+    assert _outcome_reason(stats, (0, 0, 0, 0, 0, 0, 0), OUTCOME_QUEUED) == ""
+    assert _outcome_reason(stats, (0, 0, 0, 0, 0, 0, 0), OUTCOME_SKIPPED) == ""
 
 
 def test_queue_reason_texts_match_requirements() -> None:
@@ -565,6 +778,34 @@ def test_loop_chain_records_skip_reason(tmp_path: Path) -> None:
     assert records["vacancies"][0]["reason"] == "Исключённая компания: Сбер"
 
 
+def test_loop_chain_records_rejection(tmp_path: Path) -> None:
+    """Цепочка как в цикле: отказ -> _outcome -> _outcome_reason -> файл дня."""
+    stats = RunStats(started_at=datetime(2026, 10, 21, 9, 0))
+    store = ProcessedStore(tmp_path / "report", today=date(2026, 10, 21))
+    logger = RunLogger(tmp_path / "logs", run_id="chain-rejected")
+    card = VacancyCard(title="Java", company="Клиника", url="https://hh.ru/vacancy/136409645")
+
+    counters = _counters(stats)
+    stats.rejected.append(
+        SkippedVacancy(
+            title="Java",
+            company="Клиника",
+            url="https://hh.ru/vacancy/136409645",
+            reason="По отклику пришёл отказ",
+        )
+    )
+    outcome = _outcome(counters, _counters(stats))
+    _remember_processing(store, logger, card, outcome, _outcome_reason(stats, counters, outcome))
+    logger.close()
+
+    records = json.loads((tmp_path / "report" / "2026-10-21.json").read_text(encoding="utf-8"))
+
+    assert outcome == "rejected"
+    assert records["summary"]["rejected"] == 1
+    assert records["vacancies"][0]["status"] == "rejected"
+    assert records["vacancies"][0]["reason"] == "По отклику пришёл отказ"
+
+
 def test_retry_statuses_take_config_or_explicit_value(tmp_path: Path) -> None:
     """--retry без значения берёт набор из retry.statuses, со значением — только он."""
     config = make_config(tmp_path)
@@ -636,6 +877,8 @@ def test_retry_goes_by_url_from_report(tmp_path: Path, monkeypatch) -> None:
     store.record(url="https://hh.ru/vacancy/1", title="Java", company="Ozon", status="error")
     store.record(url="https://hh.ru/vacancy/2", title="Go", company="VK", status="sent")
     logger = RunLogger(tmp_path / "logs", run_id="retry")
+    # Журнал и отчёт в тесте — за 21 октября: смена даты не должна вмешиваться.
+    logger.switch_day("2026-10-21")
     stats = make_stats()
     visited: list[str] = []
 
@@ -651,6 +894,15 @@ def test_retry_goes_by_url_from_report(tmp_path: Path, monkeypatch) -> None:
         )
 
     monkeypatch.setattr("agent.pipeline._process_vacancy", fake_process)
+
+    class _ReportDay(date):
+        """«Сегодня» в конвейере — та же дата, что у отчёта: файл дня не меняется."""
+
+        @classmethod
+        def today(cls) -> date:
+            return date(2026, 10, 21)
+
+    monkeypatch.setattr("agent.pipeline.date", _ReportDay)
 
     _retry_vacancies(
         _FakePage("https://hh.ru/vacancy/1"),

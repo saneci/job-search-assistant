@@ -42,11 +42,115 @@ def test_file_has_header_with_summary(tmp_path: Path) -> None:
         "queued": 0,
         "excluded": 0,
         "error": 0,
+        "rejected": 0,
     }
     assert payload["vacancies"][0]["title"] == "Java-разработчик"
     assert payload["vacancies"][0]["status"] == "sent"
     assert payload["vacancies"][0]["attempts"] == 1
     assert "processed_at" in payload["vacancies"][0]
+
+
+def test_roll_to_switches_report_file(tmp_path: Path) -> None:
+    """Через полночь записи идут в файл новой даты, а не в файл начала запуска."""
+    store = ProcessedStore(tmp_path, today=date(2026, 10, 21))
+
+    assert store.roll_to(date(2026, 10, 21)) is False
+    assert store.roll_to(date(2026, 10, 22)) is True
+    assert store.path == tmp_path / "2026-10-22.json"
+
+    store.record(
+        url="https://hh.ru/vacancy/1",
+        title="Java-разработчик",
+        company="Ozon",
+        status="skipped",
+    )
+
+    assert (tmp_path / "2026-10-22.json").exists()
+    assert not (tmp_path / "2026-10-21.json").exists()
+
+
+def write_day(directory: Path, day: str, rows: list[dict]) -> None:
+    """Кладёт файл дня вручную — чтобы проверить разбор готового отчёта."""
+    payload = {"date": day, "updated_at": "", "summary": {}, "vacancies": rows}
+    (directory / f"{day}.json").write_text(
+        json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+    )
+
+
+def read_day(directory: Path, day: str) -> dict:
+    return json.loads((directory / f"{day}.json").read_text(encoding="utf-8"))
+
+
+def test_update_moves_vacancy_to_new_day_file(tmp_path: Path) -> None:
+    """Повтор на следующую дату переносит запись в новый файл, а не копирует её."""
+    store = ProcessedStore(tmp_path, today=date(2026, 10, 21))
+    store.record(url="https://hh.ru/vacancy/1", title="Java", company="Ozon", status="error")
+
+    store.roll_to(date(2026, 10, 22))
+    store.record(url="https://hh.ru/vacancy/1", title="Java", company="Ozon", status="sent")
+
+    old = read_day(tmp_path, "2026-10-21")
+    new = read_day(tmp_path, "2026-10-22")
+
+    assert old["vacancies"] == []
+    assert [row["status"] for row in new["vacancies"]] == ["sent"]
+    assert new["vacancies"][0]["attempts"] == 2
+
+
+def test_repeat_within_day_keeps_single_row(tmp_path: Path) -> None:
+    """Две обработки одной вакансии за день — одна строка с двумя попытками."""
+    store = ProcessedStore(tmp_path, today=date(2026, 10, 21))
+    store.record(url="https://hh.ru/vacancy/1", title="Java", company="Ozon", status="queued")
+    store.record(url="https://hh.ru/vacancy/1", title="Java", company="Ozon", status="sent")
+
+    payload = read_day(tmp_path, "2026-10-21")
+
+    assert len(payload["vacancies"]) == 1
+    assert payload["vacancies"][0]["attempts"] == 2
+    assert payload["summary"]["sent"] == 1
+    assert payload["summary"]["queued"] == 0
+
+
+def test_copied_rows_collapse_when_updated(tmp_path: Path) -> None:
+    """Если в файлах оказались копии, обновление оставляет одну запись."""
+    row = {
+        "url": "https://hh.ru/vacancy/1",
+        "title": "Java",
+        "company": "Ozon",
+        "status": "queued",
+        "attempts": 1,
+        "processed_at": "2026-10-21T10:00:00+03:00",
+    }
+    write_day(tmp_path, "2026-10-21", [dict(row)])
+    write_day(tmp_path, "2026-10-22", [dict(row), dict(row)])
+
+    store = ProcessedStore(tmp_path, today=date(2026, 10, 22))
+    store.load()
+    store.record(url="https://hh.ru/vacancy/1", title="Java", company="Ozon", status="sent")
+
+    assert store.dropped_copies == 2  # копия внутри файла дня и копия из старого файла
+    assert read_day(tmp_path, "2026-10-21")["vacancies"] == []
+    assert len(read_day(tmp_path, "2026-10-22")["vacancies"]) == 1
+    assert read_day(tmp_path, "2026-10-22")["vacancies"][0]["attempts"] == 2
+
+
+def test_pending_takes_newest_copy(tmp_path: Path) -> None:
+    """Для повтора берётся свежая копия записи, а не самая старая."""
+    row = {
+        "url": "https://hh.ru/vacancy/1",
+        "title": "Java",
+        "company": "Ozon",
+        "status": "error",
+        "attempts": 1,
+        "processed_at": "2026-10-20T10:00:00+03:00",
+    }
+    write_day(tmp_path, "2026-10-20", [dict(row)])
+    write_day(tmp_path, "2026-10-21", [{**row, "attempts": 2, "processed_at": "2026-10-21T10:00:00+03:00"}])
+
+    store = ProcessedStore(tmp_path, today=date(2026, 10, 22))
+    store.load()
+
+    assert [item["attempts"] for item in store.pending(("error",))] == [2]
 
 
 def test_new_run_skips_previous_vacancy(tmp_path: Path) -> None:

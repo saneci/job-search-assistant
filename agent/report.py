@@ -23,6 +23,11 @@ class RunStats:
     sent: list[SentVacancy] = field(default_factory=list)
     skipped: list[SkippedVacancy] = field(default_factory=list)
     excluded: list[SkippedVacancy] = field(default_factory=list)
+    # Отказы работодателей по уже отправленным откликам (статус rejected).
+    rejected: list[SkippedVacancy] = field(default_factory=list)
+    # Вакансии, где отклик уже отправлен (статус sent в файле дня): лимит
+    # запуска они не расходуют, поэтому лежат отдельно от `sent`.
+    already_sent: list[SkippedVacancy] = field(default_factory=list)
     queued: list[dict[str, Any]] = field(default_factory=list)
     errors: list[RunError] = field(default_factory=list)
     stop_reason: str = ""
@@ -51,6 +56,8 @@ def build_report(stats: RunStats, report_path: Path | None = None) -> str:
     ]
     if stats.excluded:
         lines.append(f"- Исключённые вакансии: {len(stats.excluded)}")
+    if stats.rejected:
+        lines.append(f"- Отказы по откликам: {len(stats.rejected)}")
     lines.append(f"- Отложено (тесты/анкеты): {len(stats.queued)}")
     if stats.errors:
         lines.append(f"- Ошибок при обработке: {len(stats.errors)}")

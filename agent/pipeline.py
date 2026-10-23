@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 from playwright.sync_api import Error as PlaywrightError, Page
@@ -39,9 +39,12 @@ from .hh_vacancy import (
 from .llm import LLMClient, LLMError
 from .logging_setup import RunLogger
 from .models import (
+    ALREADY_RESPONDED_REASON,
+    REJECTED_REASON,
     STATUS_ERROR as OUTCOME_ERROR,
     STATUS_EXCLUDED as OUTCOME_EXCLUDED,
     STATUS_QUEUED as OUTCOME_QUEUED,
+    STATUS_REJECTED as OUTCOME_REJECTED,
     STATUS_SENT as OUTCOME_SENT,
     STATUS_SKIPPED as OUTCOME_SKIPPED,
     RunError,
@@ -72,6 +75,16 @@ QUEUE_REASON_TEXTS: dict[str, str] = {
     "external_form": "Отклик нужно отправить на сайте работодателя",
     "captcha": "hh.ru просит пройти капчу: откликнитесь вручную",
     "unknown": "hh.ru не подтвердил отправку отклика — проверьте вакансию вручную",
+}
+
+
+# Состояния страницы вакансии, при которых отклик не нужен: код → (статус
+# записи, причина в отчёте за день). Приглашение и недоступная вакансия —
+# `skipped`, отказ работодателя — отдельный статус `rejected`.
+PAGE_STATUS_REASONS: dict[str, tuple[str, str]] = {
+    "invited": (OUTCOME_SKIPPED, "Вас пригласили на эту вакансию"),
+    "blocked": (OUTCOME_SKIPPED, "У вас нет доступа к этой вакансии"),
+    "rejected": (OUTCOME_REJECTED, REJECTED_REASON),
 }
 
 
@@ -184,6 +197,14 @@ def _open_report(config: AppConfig, logger: RunLogger) -> ProcessedStore:
         )
     known = processed.load()
     logger.event("processed_loaded", count=known, path=str(processed.directory))
+    if processed.dropped_copies:
+        # В старых файлах оставались копии записи, которая уже есть в свежем:
+        # одна вакансия — одна запись, копии сняли при загрузке истории.
+        logger.event("processed_copies_dropped", count=processed.dropped_copies)
+        logger.info(
+            f"Убрал копии записей из старых файлов отчёта: {processed.dropped_copies}. "
+            "Вакансия остаётся только в файле последней обработки."
+        )
     return processed
 
 
@@ -207,19 +228,23 @@ def _process_vacancies(
     seen: set[str] = set()
     reviewed = 0
 
-    for query in search.queries:
+    for number, query in enumerate(search.queries):
         if _should_stop(search.limit_per_run, stats, logger):
             break
+        _check_new_day(logger, processed)
+        if number:
+            # Новый запрос: резюме поднимаем только если по кэшу уже пора.
+            boost_resume(page, config, logger)
 
         # Глубина: pages_limit из конфига, а если он не задан — считаем страницы
         # по числу найденных после открытия первой страницы этого запроса.
+        logger.info(f"Начинаю поиск на hh.ru по запросу «{query}»...")
         pages = search.pages_limit
         page_index = 0
         while pages is None or page_index < pages:
             if _should_stop(search.limit_per_run, stats, logger):
                 break
 
-            logger.info(f"Поиск «{query}», страница {page_index + 1}: открываю страницу...")
             try:
                 cards, total = open_search_page(page, search, query, page_index)
             except CaptchaError as exc:
@@ -259,10 +284,10 @@ def _process_vacancies(
                 )
                 if total:
                     logger.info(
-                        f"Запрос «{query}» на hh.ru нашёл {total} "
-                        f"{_plural(total, 'вакансию', 'вакансии', 'вакансий')}: "
-                        f"{pages} {_plural(pages, 'страница', 'страницы', 'страниц')} "
-                        f"по {search.per_page}"
+                        f"По запросу «{query}» найдено {total} "
+                        f"{_plural(total, 'вакансию', 'вакансии', 'вакансий')}, "
+                        f"разделяю обработку на {pages} "
+                        f"{_plural(pages, 'страница', 'страницы', 'страниц')}"
                     )
                 else:
                     logger.info(
@@ -271,14 +296,15 @@ def _process_vacancies(
                     )
 
             logger.info(
-                f"Обработка результатов запроса «{query}»: "
-                f"{len(cards)} {_plural(len(cards), 'вакансия', 'вакансии', 'вакансий')} "
-                f"на странице {page_index + 1}"
+                f"Обработка {len(cards)} "
+                f"{_plural(len(cards), 'вакансия', 'вакансии', 'вакансий')} "
+                f"из результата запроса «{query}»: страница {page_index + 1} из {pages}"
             )
 
             for card in cards:
                 if _should_stop(search.limit_per_run, stats, logger):
                     break
+                _check_new_day(logger, processed)
                 keys = vacancy_keys(card.title, card.company, card.url)
                 if any(key in seen for key in keys):
                     logger.event(
@@ -354,6 +380,7 @@ def _retry_vacancies(
     for record in records:
         if _should_stop(config.search.limit_per_run, stats, logger):
             break
+        _check_new_day(logger, processed)
         if stats.reviewed >= config.search.max_vacancies:
             stats.stop_reason = (
                 f"просмотрено максимум вакансий за запуск ({config.search.max_vacancies})"
@@ -496,16 +523,49 @@ def _process_vacancy(
         return
 
     if details.already_responded:
-        logger.event("skipped_already_responded", url=details.url, title=details.title)
-        stats.skipped.append(
+        # Отклик уже отправлен (возможно, руками): в файле дня — статус sent,
+        # но лимит откликов запуска он не расходует.
+        logger.event(
+            "already_responded",
+            url=details.url,
+            title=details.title,
+            status=OUTCOME_SENT,
+        )
+        stats.already_sent.append(
             SkippedVacancy(
                 title=details.title,
                 company=details.company,
                 url=details.url,
-                reason="отклик уже отправлен",
+                reason=ALREADY_RESPONDED_REASON,
             )
         )
-        log.info("пропуск: отклик уже отправлен")
+        log.info("отклик уже отправлен, помечаю вакансию отправленной")
+        return
+
+    page_status = PAGE_STATUS_REASONS.get(details.blocker or "")
+    if page_status is not None:
+        outcome, reason = page_status
+        logger.event(
+            "page_status",
+            url=details.url,
+            title=details.title,
+            page=details.blocker,
+            status=outcome,
+            reason=reason,
+        )
+        target = stats.rejected if outcome == OUTCOME_REJECTED else stats.skipped
+        target.append(
+            SkippedVacancy(
+                title=details.title,
+                company=details.company,
+                url=details.url,
+                reason=reason,
+            )
+        )
+        if outcome == OUTCOME_REJECTED:
+            log.info("на отклик пришёл отказ, вакансия пройдена")
+        else:
+            log.info(f"пропуск: {reason.lower()}")
         return
 
     if details.blocker:
@@ -647,15 +707,18 @@ def _process_vacancy(
         return
 
     if status == STATUS_ALREADY_RESPONDED:
-        stats.skipped.append(
+        # Форма отклика уже закрыта: отклик ушёл раньше (нашим прошлым запуском
+        # или руками). В файл дня — статус sent с причиной, лимит не тратим.
+        stats.already_sent.append(
             SkippedVacancy(
                 title=details.title,
                 company=details.company,
                 url=details.url,
-                reason="отклик уже отправлен",
+                reason=ALREADY_RESPONDED_REASON,
                 probability=decision.probability,
             )
         )
+        log.info("hh.ru уже принял отклик, помечаю вакансию отправленной")
         return
 
     if status == STATUS_CAPTCHA:
@@ -883,20 +946,24 @@ def _final_message(stats: RunStats, config: AppConfig) -> str:
     return message
 
 
-def _counters(stats: RunStats) -> tuple[int, int, int, int, int]:
-    """Счётчики результата: отправлено, пропущено, в очередь, ошибки, исключённые."""
+def _counters(stats: RunStats) -> tuple[int, int, int, int, int, int, int]:
+    """Счётчики результата: отправлено, пропущено, в очередь, ошибки, исключённые,
+    отказы, уже отправленные ранее.
+    """
     return (
         stats.sent_count,
         len(stats.skipped),
         len(stats.queued),
         len(stats.errors),
         len(stats.excluded),
+        len(stats.rejected),
+        len(stats.already_sent),
     )
 
 
 def _outcome(
-    before: tuple[int, int, int, int, int],
-    after: tuple[int, int, int, int, int],
+    before: tuple[int, int, int, int, int, int, int],
+    after: tuple[int, int, int, int, int, int, int],
 ) -> str | None:
     """Результат обработки вакансии по изменению счётчиков.
 
@@ -909,6 +976,11 @@ def _outcome(
         return OUTCOME_ERROR
     if after[4] > before[4]:
         return OUTCOME_EXCLUDED
+    if after[5] > before[5]:
+        return OUTCOME_REJECTED
+    if after[6] > before[6]:
+        # Отклик уже был отправлен: в файле дня это статус sent.
+        return OUTCOME_SENT
     if after[2] > before[2]:
         return OUTCOME_QUEUED
     if after[1] > before[1]:
@@ -918,16 +990,20 @@ def _outcome(
 
 def _outcome_reason(
     stats: RunStats,
-    before: tuple[int, int, int, int, int],
+    before: tuple[int, int, int, int, int, int, int],
     outcome: str,
 ) -> str:
     """Причина результата для файла дня: из последней записи по этому статусу."""
+    if outcome == OUTCOME_SENT and len(stats.already_sent) > before[6]:
+        return stats.already_sent[-1].reason
     if outcome == OUTCOME_SKIPPED and len(stats.skipped) > before[1]:
         return stats.skipped[-1].reason
     if outcome == OUTCOME_QUEUED and len(stats.queued) > before[2]:
         return str(stats.queued[-1].get("reason", ""))
     if outcome == OUTCOME_EXCLUDED and len(stats.excluded) > before[4]:
         return stats.excluded[-1].reason
+    if outcome == OUTCOME_REJECTED and len(stats.rejected) > before[5]:
+        return stats.rejected[-1].reason
     if outcome == OUTCOME_ERROR and len(stats.errors) > before[3]:
         return stats.errors[-1].message
     return ""
@@ -945,7 +1021,11 @@ def _remember_processing(
     Для пропусков, отложенных и упавших вакансий пишется причина — по файлу
     дня видно, почему вакансию не взяли и что имеет смысл повторить.
     """
-    if outcome in (OUTCOME_SKIPPED, OUTCOME_QUEUED, OUTCOME_EXCLUDED, OUTCOME_ERROR) and not reason:
+    if (
+        outcome
+        in (OUTCOME_SKIPPED, OUTCOME_QUEUED, OUTCOME_EXCLUDED, OUTCOME_ERROR, OUTCOME_REJECTED)
+        and not reason
+    ):
         logger.event("reason_missing", url=card.url, title=card.title, status=outcome)
     try:
         processed.record(
@@ -958,6 +1038,21 @@ def _remember_processing(
     except ProcessedError as exc:
         logger.event("processed_error", url=card.url, error=str(exc))
         logger.info(f"Не удалось сохранить память об обработанной вакансии: {exc}")
+
+
+def _check_new_day(logger: RunLogger, processed: ProcessedStore) -> None:
+    """Пишет в новые файлы журнала и отчёта, если дата сменилась во время запуска.
+
+    Журнал и дневной отчёт — файлы даты, поэтому после полуночи переключаемся
+    на новые файлы, иначе записи попадут во вчерашние.
+    """
+    today = date.today()
+    rotated = processed.roll_to(today)
+    rotated = logger.switch_day(today.strftime("%Y-%m-%d")) or rotated
+    if not rotated:
+        return
+    logger.event("new_day", date=today.isoformat(), report=str(processed.path))
+    logger.info(f"Наступила новая дата ({today:%d.%m.%Y}), пишу в новые файлы отчёта и журнала.")
 
 
 def _plural(count: int, one: str, few: str, many: str) -> str:
