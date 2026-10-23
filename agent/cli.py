@@ -9,10 +9,14 @@ import sys
 from .browser import BrowserError, BrowserSession
 from .config import DEFAULT_CONFIG_PATH, AppConfig, ConfigError, load_config
 from .logging_setup import RunLogger
+from .models import RETRYABLE_STATUSES
 from .notify import notify_test as send_test_notification
 from .notify import notify_test_targets
 from .pipeline import run
 from .profile import ProfileError
+
+# `--retry` без значения повторяет статусы из retry.statuses.
+RETRY_CHOICES = ("all",) + RETRYABLE_STATUSES
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -39,6 +43,23 @@ def build_parser() -> argparse.ArgumentParser:
         "--notify-test",
         action="store_true",
         help="отправить тестовое письмо-уведомление и выйти (проверка SMTP-канала)",
+    )
+    parser.add_argument(
+        "--retry",
+        "--re",
+        nargs="?",
+        const="all",
+        choices=RETRY_CHOICES,
+        metavar="СТАТУС",
+        help=(
+            "повторить вакансии из дневных отчётов по прямой ссылке, без поиска; "
+            "без значения — статусы из retry.statuses, со значением — только он"
+        ),
+    )
+    parser.add_argument(
+        "--excluded",
+        action="store_true",
+        help="синоним «--retry excluded»: повторить только компании из exclude_companies",
     )
     return parser
 
@@ -77,7 +98,7 @@ def main(argv: list[str] | None = None) -> int:
             return 2
 
         try:
-            run(config, logger)
+            run(config, logger, retry="excluded" if args.excluded else args.retry)
         except (BrowserError, ProfileError) as exc:
             logger.event("fatal_error", error=f"{type(exc).__name__}: {exc}")
             print(f"Запуск прерван: {exc}", file=sys.stderr)

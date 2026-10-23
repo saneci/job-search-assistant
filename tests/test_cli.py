@@ -46,6 +46,17 @@ def test_parser_notify_test_defaults_to_false() -> None:
     assert build_parser().parse_args([]).notify_test is False
 
 
+def test_parser_retry_flag_and_aliases() -> None:
+    parser = build_parser()
+
+    assert parser.parse_args(["--retry"]).retry == "all"
+    assert parser.parse_args(["--retry", "queued"]).retry == "queued"
+    assert parser.parse_args(["--re"]).retry == "all"
+    assert parser.parse_args(["--excluded"]).excluded is True
+    assert parser.parse_args([]).retry is None
+    assert parser.parse_args([]).excluded is False
+
+
 def test_notify_test_sends_to_each_enabled_kind(tmp_path: Path, monkeypatch, capsys) -> None:
     """Раздельные адреса отчёта и капчи — по тестовому письму на каждый."""
     notifications = {

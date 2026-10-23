@@ -9,7 +9,7 @@ from pathlib import Path
 
 from agent.config import EmailConfig
 from agent.models import RunError, SentVacancy, SkippedVacancy
-from agent.report import RunStats, build_details, build_report, send_email, write_details
+from agent.report import RunStats, build_report, send_email
 
 
 def make_stats() -> RunStats:
@@ -47,9 +47,9 @@ def make_stats() -> RunStats:
 
 
 def test_build_report(tmp_path: Path) -> None:
-    details_path = tmp_path / ".logs" / "2026-10-21-094456.json"
+    report_path = tmp_path / "report" / "2026-10-21.json"
 
-    report = build_report(make_stats(), details_path)
+    report = build_report(make_stats(), report_path)
     lines = report.splitlines()
 
     assert lines[0] == "=" * 33
@@ -62,43 +62,49 @@ def test_build_report(tmp_path: Path) -> None:
     assert "- Ошибок при обработке: 1" in lines
     assert "- Причина остановки: достигнут дневной лимит откликов (20)" in lines
     assert any(line.startswith("- Длительность: ") for line in lines)
-    assert "1. Python разработчик — Ozon" in report
-    assert "https://hh.ru/vacancy/1" in report
-    assert str(details_path) in report
+    assert f"Отчёт сохранён в файле: {report_path}" in report
 
 
-def test_build_report_without_details_footer() -> None:
-    """Консоль печатает путь к деталям отдельной строкой с меткой времени."""
+def test_report_does_not_repeat_sent_vacancies() -> None:
+    """Список отправленных живёт в файле дня — в отчёте его не дублируем."""
+    report = build_report(make_stats())
+
+    assert "Последние отправленные" not in report
+    assert "Ozon" not in report
+    assert "https://hh.ru/vacancy/1" not in report
+
+
+def test_build_report_without_path() -> None:
+    """Консоль печатает путь к файлу дня отдельной строкой с меткой времени."""
     report = build_report(make_stats(), None)
 
-    assert "Файл с деталями" not in report
+    assert "Отчёт сохранён в файле" not in report
     assert not report.endswith("\n")
 
 
 def test_build_report_without_sent() -> None:
     stats = RunStats(started_at=datetime(2026, 10, 21, 9, 44, 56))
 
-    report = build_report(stats, Path("details.json"))
+    report = build_report(stats, Path("report.json"))
 
     assert "Отправленных откликов нет." in report
 
 
-def test_build_details_and_write(tmp_path: Path) -> None:
-    details_path = tmp_path / "run.json"
+def test_build_report_counts_excluded_companies() -> None:
+    """Исключённые компании — отдельная строка: их видно и можно повторить."""
+    stats = make_stats()
+    stats.excluded.append(
+        SkippedVacancy(
+            title="Java-разработчик",
+            company="Сбер. IT",
+            url="https://hh.ru/vacancy/6",
+            reason="исключённая компания: Сбер. IT",
+        )
+    )
 
-    payload = build_details(make_stats(), "2026-10-21-094456")
-    write_details(details_path, payload)
+    report = build_report(stats)
 
-    assert payload["summary"] == {
-        "reviewed": 12,
-        "sent": 2,
-        "skipped": 1,
-        "queued": 1,
-        "errors": 1,
-    }
-    assert payload["sent"][0]["probability"] == 0.93
-    assert details_path.exists()
-    assert '"run_id": "2026-10-21-094456"' in details_path.read_text(encoding="utf-8")
+    assert "- Исключённые компании: 1" in report
 
 
 def test_send_email_disabled() -> None:

@@ -11,6 +11,8 @@ from typing import Any, Mapping, Sequence
 from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError
 
+from .models import RETRYABLE_STATUSES, STATUS_ERROR, STATUS_EXCLUDED, STATUS_QUEUED
+
 try:  # python-dotenv нужен только для чтения .env, для тестов логики не обязателен
     from dotenv import load_dotenv
 except ImportError:  # pragma: no cover - зависимость есть в requirements.txt
@@ -172,6 +174,16 @@ class ResumeConfig:
     boost_interval_hours: int = 4
 
 
+DEFAULT_RETRY_STATUSES = (STATUS_ERROR, STATUS_QUEUED, STATUS_EXCLUDED)
+
+
+@dataclass(frozen=True)
+class RetryConfig:
+    """Какие вакансии из дневных отчётов повторять при `--retry`."""
+
+    statuses: tuple[str, ...] = DEFAULT_RETRY_STATUSES
+
+
 @dataclass(frozen=True)
 class AppConfig:
     """Полная конфигурация запуска."""
@@ -190,6 +202,7 @@ class AppConfig:
     cover_letter_signature: str = ""
     processed_retention_days: int = 7
     resume: ResumeConfig = field(default_factory=ResumeConfig)
+    retry: RetryConfig = field(default_factory=RetryConfig)
     report_notify: NotificationConfig = field(default_factory=NotificationConfig)
     captcha_notify: NotificationConfig = field(default_factory=NotificationConfig)
 
@@ -262,7 +275,19 @@ def load_config(config_path: Path | str | None = None) -> AppConfig:
         ),
         cover_letter_signature=_optional_str(raw.get("cover_letter_signature")) or "",
         resume=_load_resume(raw),
+        retry=_load_retry(raw),
     )
+
+
+def _load_retry(raw: Mapping[str, Any]) -> RetryConfig:
+    """Статусы для повтора по отчётам; пусто — набор по умолчанию."""
+    section = _section(raw, "retry")
+    statuses = _filter_values(
+        section.get("statuses"),
+        "retry.statuses",
+        frozenset(RETRYABLE_STATUSES),
+    )
+    return RetryConfig(statuses=statuses or DEFAULT_RETRY_STATUSES)
 
 
 def _load_resume(raw: Mapping[str, Any]) -> ResumeConfig:

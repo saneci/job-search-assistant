@@ -60,3 +60,19 @@ class RunError:
     url: str
     title: str
     message: str
+
+
+# Статусы вакансии в дневном отчёте (data/report/<дата>.json).
+# `excluded` — компания из exclude_companies, `error` — сбой обработки:
+# такие вакансии можно повторить по прямой ссылке (`--retry`).
+STATUS_SENT = "sent"
+STATUS_SKIPPED = "skipped"
+STATUS_QUEUED = "queued"
+STATUS_EXCLUDED = "excluded"
+STATUS_ERROR = "error"
+
+STATUSES = (STATUS_SENT, STATUS_SKIPPED, STATUS_QUEUED, STATUS_EXCLUDED, STATUS_ERROR)
+
+# Что имеет смысл повторять: отклик не ушёл из-за сбоя, ограничения сайта
+# или списка исключённых компаний.
+RETRYABLE_STATUSES = (STATUS_ERROR, STATUS_QUEUED, STATUS_EXCLUDED, STATUS_SKIPPED)

@@ -12,6 +12,7 @@ from agent.logging_setup import RunLogger
 from agent.models import SentVacancy, SkippedVacancy, VacancyCard
 from agent.pipeline import (
     OUTCOME_ERROR,
+    OUTCOME_EXCLUDED,
     OUTCOME_QUEUED,
     OUTCOME_SENT,
     OUTCOME_SKIPPED,
@@ -23,13 +24,17 @@ from agent.pipeline import (
     _notify_captcha_stop,
     _outcome,
     _outcome_reason,
+    _process_vacancy,
     _queue,
     _remember_processing,
+    _retry_statuses,
+    _retry_vacancies,
     _save_problem_screenshot,
     _send_report_email,
     _VacancyLog,
 )
 from agent.processed import ProcessedStore
+from agent.profile import Profile
 from agent.report import RunStats
 
 
@@ -99,9 +104,10 @@ def test_vacancy_log_prefixes_lines_and_events(tmp_path: Path) -> None:
     ]
 
     assert events[0]["event"] == "info"
-    assert events[0]["message"] == "Java-разработчик — Ozon (id=777): открываю вакансию"
+    assert events[0]["message"] == "[777] Java-разработчик — Ozon: открываю вакансию"
     assert events[1]["event"] == "respond"
-    assert events[1]["vacancy"] == "Java-разработчик — Ozon (id=777)"
+    assert events[1]["vacancy"] == "Java-разработчик — Ozon"
+    assert events[1]["vacancy_id"] == "777"
 
 
 def test_vacancy_log_without_company(tmp_path: Path) -> None:
@@ -117,17 +123,18 @@ def test_vacancy_log_without_company(tmp_path: Path) -> None:
 
 
 def test_outcome_detects_sent() -> None:
-    assert _outcome((0, 0, 0, 0), (1, 0, 0, 0)) == OUTCOME_SENT
+    assert _outcome((0, 0, 0, 0, 0), (1, 0, 0, 0, 0)) == OUTCOME_SENT
 
 
 def test_outcome_prefers_sent_over_skipped() -> None:
-    assert _outcome((0, 1, 0, 0), (1, 2, 0, 0)) == OUTCOME_SENT
+    assert _outcome((0, 1, 0, 0, 0), (1, 2, 0, 0, 0)) == OUTCOME_SENT
 
 
 def test_outcome_detects_queue_and_error() -> None:
-    assert _outcome((0, 0, 0, 0), (0, 0, 1, 0)) == OUTCOME_QUEUED
-    assert _outcome((0, 0, 0, 0), (0, 0, 0, 1)) == OUTCOME_ERROR
-    assert _outcome((0, 0, 0, 0), (0, 1, 0, 0)) == OUTCOME_SKIPPED
+    assert _outcome((0, 0, 0, 0, 0), (0, 0, 1, 0, 0)) == OUTCOME_QUEUED
+    assert _outcome((0, 0, 0, 0, 0), (0, 0, 0, 1, 0)) == OUTCOME_ERROR
+    assert _outcome((0, 0, 0, 0, 0), (0, 1, 0, 0, 0)) == OUTCOME_SKIPPED
+    assert _outcome((0, 0, 0, 0, 0), (0, 0, 0, 0, 1)) == OUTCOME_EXCLUDED
 
 
 def test_captcha_waiter_disabled_in_headless(tmp_path: Path) -> None:
@@ -278,7 +285,7 @@ def test_report_email_uses_own_recipient(tmp_path: Path, monkeypatch) -> None:
 
     assert sent is True
     assert captured["recipient"] == "report@example.com"
-    assert captured["subject"] == "hh-agent: отчёт за 2026-10-21 09:00"
+    assert captured["subject"] == "Отчёт за 2026-10-21 09:00"
 
 
 def test_notify_captcha_uses_vacancy_and_swallows_errors(tmp_path: Path, monkeypatch) -> None:
@@ -315,15 +322,18 @@ def test_notify_captcha_uses_vacancy_and_swallows_errors(tmp_path: Path, monkeyp
 
 
 class _FakePage:
-    """Страница-заглушка: для ожидания капчи нужен только url."""
+    """Страница-заглушка: для ожидания капчи нужен url, для цикла — признак «жива»."""
 
     def __init__(self, url: str) -> None:
         self.url = url
 
+    def is_closed(self) -> bool:
+        return False
+
 
 def test_outcome_is_none_when_nothing_happened() -> None:
     """Сработал лимит откликов — вакансию не запоминаем, пройдём в следующий раз."""
-    assert _outcome((1, 0, 0, 0), (1, 0, 0, 0)) is None
+    assert _outcome((1, 0, 0, 0, 0), (1, 0, 0, 0, 0)) is None
 
 
 def test_outcome_reason_takes_skip_reason() -> None:
@@ -337,7 +347,7 @@ def test_outcome_reason_takes_skip_reason() -> None:
         )
     )
 
-    assert _outcome_reason(stats, (0, 0, 0, 0), OUTCOME_SKIPPED) == (
+    assert _outcome_reason(stats, (0, 0, 0, 0, 0), OUTCOME_SKIPPED) == (
         "вероятность 0.08 не выше порога 0.80"
     )
 
@@ -348,7 +358,7 @@ def test_outcome_reason_takes_queued_reason() -> None:
         {"url": "https://hh.ru/vacancy/1", "reason": "Для отклика нужно пройти тестирование"}
     )
 
-    assert _outcome_reason(stats, (0, 0, 0, 0), OUTCOME_QUEUED) == (
+    assert _outcome_reason(stats, (0, 0, 0, 0, 0), OUTCOME_QUEUED) == (
         "Для отклика нужно пройти тестирование"
     )
 
@@ -451,8 +461,8 @@ def test_remember_processing_writes_reason_to_day_report(tmp_path: Path) -> None
 
     records = json.loads((tmp_path / "report" / "2026-10-21.json").read_text(encoding="utf-8"))
 
-    assert records[0]["status"] == "skipped"
-    assert records[0]["reason"] == "стоп-слово в названии: 1С"
+    assert records["vacancies"][0]["status"] == "skipped"
+    assert records["vacancies"][0]["reason"] == "стоп-слово в названии: 1С"
 
 
 def test_loop_chain_records_skip_reason(tmp_path: Path) -> None:
@@ -463,7 +473,7 @@ def test_loop_chain_records_skip_reason(tmp_path: Path) -> None:
     card = VacancyCard(title="Java", company="Ozon", url="https://hh.ru/vacancy/1")
 
     counters = _counters(stats)
-    stats.skipped.append(
+    stats.excluded.append(
         SkippedVacancy(
             title="Java",
             company="Ozon",
@@ -477,5 +487,88 @@ def test_loop_chain_records_skip_reason(tmp_path: Path) -> None:
 
     records = json.loads((tmp_path / "report" / "2026-10-21.json").read_text(encoding="utf-8"))
 
-    assert outcome == OUTCOME_SKIPPED
-    assert records[0]["reason"] == "исключённая компания: Сбер"
+    assert outcome == OUTCOME_EXCLUDED
+    assert records["vacancies"][0]["status"] == "excluded"
+    assert records["vacancies"][0]["reason"] == "исключённая компания: Сбер"
+
+
+def test_retry_statuses_take_config_or_explicit_value(tmp_path: Path) -> None:
+    """--retry без значения берёт набор из retry.statuses, со значением — только он."""
+    config = make_config(tmp_path)
+
+    assert _retry_statuses(config, "all") == config.retry.statuses
+    assert config.retry.statuses == ("error", "queued", "excluded")
+    assert _retry_statuses(config, "excluded") == ("excluded",)
+
+
+def test_excluded_company_gets_own_status(tmp_path: Path) -> None:
+    """Компания из exclude_companies — статус excluded, а не skipped.
+
+    Так её видно в отчёте отдельно и можно повторить, убрав из списка.
+    """
+    base = make_config(tmp_path)
+    config = replace(base, search=replace(base.search, exclude_companies=("Сбер",)))
+    stats = make_stats()
+    logger = RunLogger(tmp_path / "logs", run_id="excluded")
+    card = VacancyCard(title="Java", company="Сбер. IT", url="https://hh.ru/vacancy/7")
+
+    _process_vacancy(
+        _FakePage("https://hh.ru/search/vacancy"),
+        config,
+        Profile(text="Java", examples="", style_rules=""),
+        None,  # type: ignore[arg-type]
+        stats,
+        logger,
+        card,
+    )
+    logger.close()
+
+    assert stats.skipped == []
+    assert [item.company for item in stats.excluded] == ["Сбер. IT"]
+    assert stats.excluded[0].reason == "исключённая компания: Сбер"
+
+
+def test_retry_goes_by_url_from_report(tmp_path: Path, monkeypatch) -> None:
+    """--retry открывает ссылки из отчёта и обновляет запись, не трогая выдачу."""
+    config = make_config(tmp_path)
+    store = ProcessedStore(tmp_path / "report", today=date(2026, 10, 21))
+    store.record(url="https://hh.ru/vacancy/1", title="Java", company="Ozon", status="error")
+    store.record(url="https://hh.ru/vacancy/2", title="Go", company="VK", status="sent")
+    logger = RunLogger(tmp_path / "logs", run_id="retry")
+    stats = make_stats()
+    visited: list[str] = []
+
+    def fake_process(page, config, profile, llm, stats, logger, card) -> None:
+        visited.append(card.url)
+        stats.sent.append(
+            SentVacancy(
+                title=card.title,
+                company=card.company,
+                url=card.url,
+                probability=0.9,
+            )
+        )
+
+    monkeypatch.setattr("agent.pipeline._process_vacancy", fake_process)
+
+    _retry_vacancies(
+        _FakePage("https://hh.ru/vacancy/1"),
+        config,
+        Profile(text="Java", examples="", style_rules=""),
+        None,  # type: ignore[arg-type]
+        stats,
+        logger,
+        store,
+        ("error",),
+    )
+    logger.close()
+
+    payload = json.loads((tmp_path / "report" / "2026-10-21.json").read_text(encoding="utf-8"))
+
+    assert visited == ["https://hh.ru/vacancy/1"]
+    assert payload["vacancies"][0]["status"] == "sent"
+    assert payload["vacancies"][0]["attempts"] == 2
+    events = [
+        json.loads(line) for line in logger.events_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert [item["count"] for item in events if item["event"] == "retry_selected"] == [1]

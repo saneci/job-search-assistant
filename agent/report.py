@@ -1,10 +1,9 @@
-"""Отчёт о запуске: текст, детальный JSON и отправка на email."""
+"""Отчёт о запуске: текст, письмо на email и SMTP-транспорт."""
 
 from __future__ import annotations
 
-import json
 import smtplib
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from datetime import datetime
 from email.message import EmailMessage
 from pathlib import Path
@@ -23,10 +22,10 @@ class RunStats:
     finished_at: datetime | None = None
     sent: list[SentVacancy] = field(default_factory=list)
     skipped: list[SkippedVacancy] = field(default_factory=list)
+    excluded: list[SkippedVacancy] = field(default_factory=list)
     queued: list[dict[str, Any]] = field(default_factory=list)
     errors: list[RunError] = field(default_factory=list)
     stop_reason: str = ""
-    last_action: str = ""
     reviewed: int = 0
 
     @property
@@ -34,11 +33,11 @@ class RunStats:
         return len(self.sent)
 
 
-def build_report(stats: RunStats, details_path: Path | None, sent_limit: int = 3) -> str:
-    """Формирует текст отчёта по разделу 3.6 требований.
+def build_report(stats: RunStats, report_path: Path | None = None) -> str:
+    """Формирует текст отчёта для консоли и письма.
 
-    С `details_path=None` строка «Файл с деталями» не добавляется — её
-    печатает консоль отдельной строкой с меткой времени.
+    С `report_path=None` путь к файлу дня не добавляется — его печатает
+    консоль отдельной строкой с меткой времени.
     """
     finished = stats.finished_at or datetime.now()
     separator = "=" * 33
@@ -49,55 +48,24 @@ def build_report(stats: RunStats, details_path: Path | None, sent_limit: int = 3
         f"- Обработано вакансий: {stats.reviewed}",
         f"- Отправлено откликов: {len(stats.sent)}",
         f"- Пропущено (не подошло): {len(stats.skipped)}",
-        f"- Отложено (тесты/анкеты): {len(stats.queued)}",
     ]
+    if stats.excluded:
+        lines.append(f"- Исключённые компании: {len(stats.excluded)}")
+    lines.append(f"- Отложено (тесты/анкеты): {len(stats.queued)}")
     if stats.errors:
         lines.append(f"- Ошибок при обработке: {len(stats.errors)}")
     if stats.stop_reason:
         lines.append(f"- Причина остановки: {stats.stop_reason}")
     lines.append(f"- Длительность: {_duration(stats.started_at, finished)}")
-    lines.append("")
 
-    if stats.sent:
-        lines.append("Последние отправленные:")
-        for index, vacancy in enumerate(stats.sent[-sent_limit:], start=1):
-            lines.append(f"{index}. {vacancy.title} — {vacancy.company or 'компания не указана'}")
-            lines.append(f"   {vacancy.url}")
-    else:
+    if not stats.sent:
+        lines.append("")
         lines.append("Отправленных откликов нет.")
 
-    if details_path is not None:
+    if report_path is not None:
         lines.append("")
-        lines.append(f"Отчёт сохранён в файле: {details_path}")
+        lines.append(f"Отчёт сохранён в файле: {report_path}")
     return "\n".join(lines)
-
-
-def build_details(stats: RunStats, run_id: str) -> dict[str, Any]:
-    """Собирает детальный JSON запуска."""
-    return {
-        "run_id": run_id,
-        "started_at": stats.started_at.isoformat(timespec="seconds"),
-        "finished_at": stats.finished_at.isoformat(timespec="seconds") if stats.finished_at else None,
-        "stop_reason": stats.stop_reason,
-        "last_action": stats.last_action,
-        "summary": {
-            "reviewed": stats.reviewed,
-            "sent": len(stats.sent),
-            "skipped": len(stats.skipped),
-            "queued": len(stats.queued),
-            "errors": len(stats.errors),
-        },
-        "sent": [asdict(item) for item in stats.sent],
-        "skipped": [asdict(item) for item in stats.skipped],
-        "queued": stats.queued,
-        "errors": [asdict(item) for item in stats.errors],
-    }
-
-
-def write_details(path: Path, payload: dict[str, Any]) -> None:
-    """Сохраняет детальный JSON запуска."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def send_email(

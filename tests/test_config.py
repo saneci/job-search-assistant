@@ -75,6 +75,23 @@ def test_browser_channel_default_is_playwright_chromium(tmp_path: Path) -> None:
     assert load_config(write_config(tmp_path)).browser.channel is None
 
 
+def test_retry_statuses_defaults(tmp_path: Path) -> None:
+    """По умолчанию повторяем ошибки, отложенные вакансии и исключённые компании."""
+    assert load_config(write_config(tmp_path)).retry.statuses == ("error", "queued", "excluded")
+
+
+def test_retry_statuses_from_config(tmp_path: Path) -> None:
+    config = load_config(write_config(tmp_path, retry={"statuses": ["skipped", "error"]}))
+
+    assert config.retry.statuses == ("skipped", "error")
+
+
+def test_retry_statuses_reject_unrepeatable_value(tmp_path: Path) -> None:
+    """`sent` повторять бессмысленно: отклик уже ушёл."""
+    with pytest.raises(ConfigError):
+        load_config(write_config(tmp_path, retry={"statuses": ["sent"]}))
+
+
 def test_exclude_companies(tmp_path: Path) -> None:
     config = load_config(write_config(tmp_path, exclude_companies=["Сбер", "Тинькофф"]))
 

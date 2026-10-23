@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from agent.config import EmailConfig, NotificationConfig
 from agent.notify import (
-    SUBJECT_PREFIX,
     notify_captcha,
     notify_test,
     notify_test_targets,
@@ -52,7 +51,7 @@ def test_send_notification_marks_subject(monkeypatch) -> None:
     sent, message = send_notification(make_email(), "to@example.com", "Тема", "Текст")
 
     assert sent is True
-    assert calls[0] == ("to@example.com", f"{SUBJECT_PREFIX} Тема", "Текст")
+    assert calls[0] == ("to@example.com", "Тема", "Текст")
     assert message == "письмо отправлено"
 
 
@@ -71,7 +70,7 @@ def test_notify_captcha_contains_vacancy_and_url(monkeypatch) -> None:
     address, subject, body = calls[0]
     assert sent is True
     assert address == "to@example.com"
-    assert subject == f"{SUBJECT_PREFIX} Капча на hh.ru: Java-разработчик — Ozon"
+    assert subject == "Необходимо пройти капчу на hh.ru"
     assert "Вакансия: Java-разработчик — Ozon" in body
     assert "Ссылка: https://hh.ru/vacancy/777" in body
     assert "Жду решения до 300 с." in body
@@ -86,7 +85,7 @@ def test_notify_captcha_without_vacancy(monkeypatch) -> None:
     )
 
     _, subject, body = calls[0]
-    assert subject == f"{SUBJECT_PREFIX} Капча на hh.ru"
+    assert subject == "Необходимо пройти капчу на hh.ru"
     assert "Вакансия:" not in body
     assert "Ссылка:" not in body
     assert "Запуск остановлен." in body
@@ -142,7 +141,7 @@ def test_notify_test_message(monkeypatch) -> None:
 
     _, subject, body = calls[0]
     assert sent is True
-    assert subject == f"{SUBJECT_PREFIX} Проверка уведомлений"
+    assert subject == "Проверка уведомлений"
     assert "Тестовое письмо" in body
 
 
