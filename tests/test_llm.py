@@ -465,6 +465,14 @@ def test_ensure_greeting_removes_dangling_lead() -> None:
     assert letter == "Здравствуйте! Мне интересна задача строить бэкенд."
 
 
+def test_ensure_greeting_keeps_first_sentence_intact() -> None:
+    """Промпт просит «Здравствуйте! Заинтересовала Ваша вакансия.» — код фразу не трогает."""
+    letter, added = ensure_greeting("Заинтересовала Ваша вакансия. Мне интересны задачи.")
+
+    assert letter == "Здравствуйте! Заинтересовала Ваша вакансия. Мне интересны задачи."
+    assert added is True
+
+
 def test_ensure_greeting_keeps_required_opening_first() -> None:
     """Вакансия просит начать с «3PL»: слово остаётся первым, приветствие после него."""
     letter, added = ensure_greeting("3PL. Мне интересна задача строить бэкенд.", "3PL")
@@ -614,6 +622,13 @@ def test_system_prompt_fits_budget() -> None:
 
     assert prompt
     assert len(prompt) <= 3500
+
+
+def test_system_prompt_requires_opening_sentence() -> None:
+    """Первое предложение письма: «Здравствуйте! Заинтересовала Ваша вакансия.»."""
+    prompt = load_system_prompt(PROJECT_ROOT / "SYSTEM_PROMPT.md")
+
+    assert "Здравствуйте! Заинтересовала Ваша вакансия." in prompt
 
 
 def test_system_prompt_has_no_threshold_numbers() -> None:
