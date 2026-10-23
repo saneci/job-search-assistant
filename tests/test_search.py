@@ -6,9 +6,12 @@ from urllib.parse import parse_qs, urlparse
 
 from agent.config import DelayRange, SearchConfig
 from agent.hh_search import (
+    HH_MAX_PAGES,
+    _needs_scroll,
     build_search_url,
     is_company_excluded,
     is_excluded,
+    pages_plan,
     parse_total,
     vacancy_id,
     vacancy_keys,
@@ -46,7 +49,7 @@ def test_build_search_url_minimal() -> None:
     assert params["text"] == ["Java backend engineer"]
     assert params["area"] == ["1"]
     assert params["page"] == ["0"]
-    assert params["items_on_page"] == ["20"]
+    assert params["items_on_page"] == ["50"]
     assert "salary" not in params
     assert "experience" not in params
 
@@ -149,12 +152,46 @@ def test_parse_total_from_search_header() -> None:
     assert parse_total("") is None
 
 
-def test_per_page_is_capped_by_hh_page_size() -> None:
-    """hh отдаёт 20 карточек на страницу, даже если просить 50."""
-    params = parse_qs(urlparse(build_search_url(make_search(per_page=50), "Java", 0)).query)
+def test_per_page_goes_to_url_as_is() -> None:
+    """hh.ru отдаёт столько карточек, сколько попросили: 20, 50 или 100."""
+    for per_page in (20, 50, 100):
+        params = parse_qs(
+            urlparse(build_search_url(make_search(per_page=per_page), "Java", 0)).query
+        )
+        assert params["items_on_page"] == [str(per_page)]
 
-    assert params["items_on_page"] == ["20"]
+
+def test_vacancy_id_extracts_number() -> None:
     assert vacancy_id("https://hh.ru/vacancy/1234356?query=java") == "1234356"
     assert vacancy_id("https://hh.ru/vacancy/1234356/") == "1234356"
     assert vacancy_id("https://hh.ru/search/vacancy") is None
     assert vacancy_id("") is None
+
+
+def test_pages_plan_counts_pages_from_total() -> None:
+    """Страниц ровно столько, сколько нужно под найденное число вакансий."""
+    assert pages_plan(546, 100) == 6
+    assert pages_plan(546, 20) == 28
+    assert pages_plan(400, 20) == 20
+    assert pages_plan(401, 20) == 21
+    assert pages_plan(1, 100) == 1
+
+
+def test_pages_plan_without_total_stops_at_empty_page() -> None:
+    """Число найденных неизвестно — идём до первой пустой страницы."""
+    assert pages_plan(None, 100) == HH_MAX_PAGES
+    assert pages_plan(0, 100) == HH_MAX_PAGES
+
+
+def test_pages_plan_keeps_safety_cap() -> None:
+    """Предохранитель: hh.ru не отдаёт больше HH_MAX_PAGES страниц."""
+    assert pages_plan(10_000, 100) == HH_MAX_PAGES
+
+
+def test_needs_scroll_until_page_is_full() -> None:
+    """Карточки догружаются прокруткой, пока их не станет столько, сколько заказали."""
+    assert _needs_scroll(20, 100, 0) is True
+    assert _needs_scroll(100, 100, 0) is False
+    assert _needs_scroll(20, 100, 2) is True
+    assert _needs_scroll(20, 100, 3) is False
+    assert _needs_scroll(100, 20, 0) is False

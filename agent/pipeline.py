@@ -21,6 +21,7 @@ from .hh_search import (
     is_company_excluded,
     is_excluded,
     open_search_page,
+    pages_plan,
     vacancy_id,
     vacancy_keys,
 )
@@ -210,7 +211,11 @@ def _process_vacancies(
         if _should_stop(search.limit_per_run, stats, logger):
             break
 
-        for page_index in range(search.pages_limit):
+        # Глубина: pages_limit из конфига, а если он не задан — считаем страницы
+        # по числу найденных после открытия первой страницы этого запроса.
+        pages = search.pages_limit
+        page_index = 0
+        while pages is None or page_index < pages:
             if _should_stop(search.limit_per_run, stats, logger):
                 break
 
@@ -245,6 +250,26 @@ def _process_vacancies(
                 else:
                     logger.info(f"Запрос «{query}», страница {page_index + 1}: вакансий не найдено.")
                 break
+
+            if pages is None:
+                pages = pages_plan(total, search.per_page)
+                logger.event(
+                    "search_pages_plan",
+                    query=query,
+                    total=total,
+                    per_page=search.per_page,
+                    pages=pages,
+                )
+                if total:
+                    logger.info(
+                        f"Запрос «{query}»: {total} вакансий → {pages} страниц "
+                        f"по {search.per_page}."
+                    )
+                else:
+                    logger.info(
+                        f"Запрос «{query}»: число найденных неизвестно, иду до первой "
+                        f"пустой страницы (не больше {pages})."
+                    )
 
             found_total = f" (hh.ru всего нашёл {total})" if total and page_index == 0 else ""
             logger.info(
@@ -297,6 +322,7 @@ def _process_vacancies(
                 _ensure_session_alive(page)
 
             _pause(config, logger, "переход к следующей странице поиска")
+            page_index += 1
 
 
 def _retry_vacancies(

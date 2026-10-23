@@ -16,11 +16,16 @@ from .models import VacancyCard
 SEARCH_URL = "https://hh.ru/search/vacancy"
 HH_BASE_URL = "https://hh.ru"
 
-# hh.ru отдаёт в вёрстке не больше 20 карточек на страницу, даже если просить
-# items_on_page=50. Если отправить 50, hh сдвигает страницы по 50, а карточек
-# рисует 20 — часть вакансий терялась. Поэтому просим ровно столько, сколько
-# реально приходит в DOM, а глубину задаём через pages_limit.
-HH_PAGE_SIZE = 20
+# Глубина выдачи: больше 50 страниц hh.ru не отдаёт ни по одному запросу.
+# Это только предохранитель — обычно число страниц считаем по «Найдено N».
+HH_MAX_PAGES = 50
+
+# hh.ru рисует карточки по мере прокрутки: в DOM сразу появляется первая
+# двадцатка, остальные из items_on_page подгружаются при скролле.
+SCROLL_PAUSE_MS = 400
+SCROLL_ROUNDS = 40
+# Сколько прокруток подряд без прироста карточек считаем концом страницы.
+SCROLL_STABLE_ROUNDS = 3
 
 TITLE_SELECTOR = "a[data-qa='serp-item__title'], a[data-qa='vacancy-serp__vacancy-title']"
 
@@ -54,7 +59,7 @@ def build_search_url(search: SearchConfig, query: str, page_index: int = 0) -> s
         ("text", query),
         ("area", str(search.area_id)),
         ("page", str(page_index)),
-        ("items_on_page", str(min(search.per_page, HH_PAGE_SIZE))),
+        ("items_on_page", str(search.per_page)),
     ]
     if search.salary_from is not None:
         params.append(("salary", str(search.salary_from)))
@@ -64,6 +69,19 @@ def build_search_url(search: SearchConfig, query: str, page_index: int = 0) -> s
     if search.schedule:
         params.append(("schedule", search.schedule))
     return f"{SEARCH_URL}?{urlencode(params)}"
+
+
+def pages_plan(total: int | None, per_page: int) -> int:
+    """Сколько страниц выдачи обойти, когда глубина не задана в конфиге.
+
+    Считаем от числа найденных: «Найдено 546 вакансий» при `per_page: 100` —
+    это 6 страниц. Если hh.ru число не показал, идём до первой пустой
+    страницы, но не больше ``HH_MAX_PAGES``.
+    """
+    if not total or per_page <= 0:
+        return HH_MAX_PAGES
+    pages = -(-total // per_page)
+    return max(1, min(pages, HH_MAX_PAGES))
 
 
 def is_excluded(title: str, keywords: Sequence[str]) -> str | None:
@@ -132,6 +150,7 @@ def open_search_page(
     if detect_captcha(page):
         raise CaptchaError("hh.ru показал капчу на странице поиска")
     _wait_for_results(page)
+    _load_all_cards(page, search.per_page)
     return collect_cards(page), read_total(page)
 
 
@@ -202,6 +221,37 @@ def _wait_for_results(page: Page) -> None:
     except PlaywrightTimeoutError:
         # Пустая выдача или другая вёрстка: карточек просто не будет.
         return
+
+
+def _load_all_cards(page: Page, expected: int) -> None:
+    """Догружает карточки прокруткой страницы выдачи.
+
+    hh.ru отдаёт за страницу 20, 50 или 100 вакансий, но в DOM сначала
+    появляется первая двадцатка — остальные рисуются по мере прокрутки.
+    Прокручиваем до конца документа, пока карточек не станет столько, сколько
+    заказали, или пока список не перестанет расти (страница кончилась).
+    """
+    previous = -1
+    stable = 0
+    for _ in range(SCROLL_ROUNDS):
+        try:
+            count = page.locator(TITLE_SELECTOR).count()
+        except PlaywrightError:
+            return
+        stable = stable + 1 if count == previous else 0
+        if not _needs_scroll(count, expected, stable):
+            return
+        previous = count
+        try:
+            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        except PlaywrightError:
+            return
+        page.wait_for_timeout(SCROLL_PAUSE_MS)
+
+
+def _needs_scroll(count: int, expected: int, stable: int) -> bool:
+    """Нужно ли прокрутить выдачу ещё раз, чтобы догрузить карточки."""
+    return count < expected and stable < SCROLL_STABLE_ROUNDS
 
 
 def _card_container(link: Locator) -> Locator | None:

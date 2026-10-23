@@ -50,6 +50,8 @@ AREA_IDS: dict[str, int] = {
 
 EXPERIENCE_VALUES = frozenset({"noExperience", "between1And3", "between3And6", "moreThan6"})
 SCHEDULE_VALUES = frozenset({"fullDay", "shift", "flexible", "remote", "flyInFlyOut"})
+# Размеры страницы выдачи, которые понимает hh.ru (параметр items_on_page).
+PER_PAGE_VALUES = frozenset({20, 50, 100})
 
 
 class ConfigError(RuntimeError):
@@ -86,7 +88,7 @@ class SearchConfig:
     exclude_companies: tuple[str, ...]
     limit_per_run: int
     delay: DelayRange
-    pages_limit: int
+    pages_limit: int | None
     per_page: int
     max_vacancies: int
 
@@ -338,8 +340,8 @@ def _load_search(raw: Mapping[str, Any]) -> SearchConfig:
         exclude_companies=_str_list(raw.get("exclude_companies"), "exclude_companies"),
         limit_per_run=_positive_int(_limit_per_run_value(raw), "limit_per_run"),
         delay=_parse_delay(_require(raw, "delay_between_actions", "")),
-        pages_limit=_positive_int(raw.get("pages_limit", 5), "pages_limit"),
-        per_page=min(_positive_int(raw.get("per_page", 50), "per_page"), 100),
+        pages_limit=_optional_positive_int(raw.get("pages_limit"), "pages_limit"),
+        per_page=_page_size(raw.get("per_page", 100), "per_page"),
         max_vacancies=_positive_int(raw.get("max_vacancies", 200), "max_vacancies"),
     )
 
@@ -538,6 +540,22 @@ def _positive_int(value: Any, key: str) -> int:
     if value <= 0:
         raise ConfigError(f"Параметр {key} должен быть больше нуля")
     return value
+
+
+def _optional_positive_int(value: Any, key: str) -> int | None:
+    """Необязательное положительное число: пустое значение означает None."""
+    if value is None:
+        return None
+    return _positive_int(value, key)
+
+
+def _page_size(value: Any, key: str) -> int:
+    """Размер страницы выдачи: hh.ru понимает только 20, 50 и 100 карточек."""
+    size = _positive_int(value, key)
+    if size not in PER_PAGE_VALUES:
+        allowed = ", ".join(str(item) for item in sorted(PER_PAGE_VALUES))
+        raise ConfigError(f"Параметр {key} должен быть одним из: {allowed}")
+    return size
 
 
 def _optional_non_negative_int(value: Any, key: str) -> int | None:

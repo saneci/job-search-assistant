@@ -71,6 +71,30 @@ def test_full_search_config(tmp_path: Path) -> None:
     assert config.search.delay.next() >= 3
 
 
+def test_pages_limit_is_optional(tmp_path: Path) -> None:
+    """Без pages_limit глубина считается по числу найденных вакансий."""
+    assert load_config(write_config(tmp_path)).search.pages_limit is None
+
+
+def test_pages_limit_from_config(tmp_path: Path) -> None:
+    assert load_config(write_config(tmp_path, pages_limit=5)).search.pages_limit == 5
+
+
+def test_pages_limit_cannot_be_zero(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="pages_limit"):
+        load_config(write_config(tmp_path, pages_limit=0))
+
+
+def test_per_page_default_is_100(tmp_path: Path) -> None:
+    assert load_config(write_config(tmp_path)).search.per_page == 100
+
+
+def test_per_page_accepts_only_hh_sizes(tmp_path: Path) -> None:
+    assert load_config(write_config(tmp_path, per_page=50)).search.per_page == 50
+    with pytest.raises(ConfigError, match="per_page"):
+        load_config(write_config(tmp_path, per_page=30))
+
+
 def test_browser_channel_default_is_playwright_chromium(tmp_path: Path) -> None:
     assert load_config(write_config(tmp_path)).browser.channel is None
 
@@ -406,4 +430,3 @@ def test_notifications_kinds_have_own_switch_and_recipient(tmp_path: Path) -> No
 def test_notifications_kind_enabled_must_be_bool(tmp_path: Path) -> None:
     with pytest.raises(ConfigError, match="notifications.captcha.enabled"):
         load_config(write_config(tmp_path, notifications={"captcha": {"enabled": "да"}}))
-
