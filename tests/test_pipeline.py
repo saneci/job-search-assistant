@@ -24,6 +24,8 @@ from agent.pipeline import (
     _notify_captcha_stop,
     _outcome,
     _outcome_reason,
+    _plural,
+    _process_vacancies,
     _process_vacancy,
     _queue,
     _remember_processing,
@@ -120,6 +122,77 @@ def test_vacancy_log_without_company(tmp_path: Path) -> None:
     event = json.loads(logger.events_path.read_text(encoding="utf-8").splitlines()[0])
 
     assert event["message"] == "Java-разработчик: открываю вакансию"
+
+
+def test_plural_agrees_with_number() -> None:
+    """Формы слов в логе согласуются с числом: 1 страница, 2 страницы, 5 страниц."""
+    forms = ("страница", "страницы", "страниц")
+
+    assert [_plural(count, *forms) for count in (1, 2, 4, 5, 11, 21, 22, 25, 114)] == [
+        "страница",
+        "страницы",
+        "страницы",
+        "страниц",
+        "страниц",
+        "страница",
+        "страницы",
+        "страниц",
+        "страниц",
+    ]
+
+
+def test_search_plan_and_page_lines(tmp_path: Path, monkeypatch, capsys) -> None:
+    """План страниц и начало обработки печатаются понятными фразами."""
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        json.dumps(
+            {
+                "search_query": "Java developer",
+                "area": "Москва",
+                "limit_per_run": 1,
+                "max_vacancies": 5,
+                "per_page": 100,
+                "delay_between_actions": {"from": 0, "to": 0},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    config = load_config(path)
+    card = VacancyCard(title="Java-разработчик", company="Ozon", url="https://hh.ru/vacancy/1")
+    pages = [[card], []]
+    monkeypatch.setattr(
+        "agent.pipeline.open_search_page", lambda *args, **kwargs: (pages.pop(0), 545)
+    )
+    monkeypatch.setattr("agent.pipeline._process_and_remember", lambda *args, **kwargs: None)
+    monkeypatch.setattr("agent.pipeline._ensure_session_alive", lambda page: None)
+
+    logger = RunLogger(tmp_path / "logs", run_id="search-lines")
+    _process_vacancies(
+        page=None,  # type: ignore[arg-type]
+        config=config,
+        profile=None,  # type: ignore[arg-type]
+        llm=None,  # type: ignore[arg-type]
+        stats=make_stats(),
+        logger=logger,
+        processed=ProcessedStore(tmp_path / "report", today=date(2026, 10, 21)),
+    )
+    logger.close()
+
+    out = capsys.readouterr().out
+    plan = "Запрос «Java developer» на hh.ru нашёл 545 вакансий: 6 страниц по 100"
+    page = "Обработка результатов запроса «Java developer»: 1 вакансия на странице 1"
+
+    assert plan in out
+    assert page in out
+
+    events = [
+        json.loads(line)
+        for line in logger.events_path.read_text(encoding="utf-8").splitlines()
+    ]
+    messages = [event.get("message") for event in events]
+    assert plan in messages
+    assert page in messages
 
 
 def test_outcome_detects_sent() -> None:
@@ -456,13 +529,13 @@ def test_remember_processing_writes_reason_to_day_report(tmp_path: Path) -> None
     store = ProcessedStore(tmp_path / "report", today=date(2026, 10, 21))
     card = VacancyCard(title="Java", company="Ozon", url="https://hh.ru/vacancy/1")
 
-    _remember_processing(store, logger, card, OUTCOME_SKIPPED, "стоп-слово в названии: 1С")
+    _remember_processing(store, logger, card, OUTCOME_SKIPPED, "Стоп-слово в названии: 1С")
     logger.close()
 
     records = json.loads((tmp_path / "report" / "2026-10-21.json").read_text(encoding="utf-8"))
 
     assert records["vacancies"][0]["status"] == "skipped"
-    assert records["vacancies"][0]["reason"] == "стоп-слово в названии: 1С"
+    assert records["vacancies"][0]["reason"] == "Стоп-слово в названии: 1С"
 
 
 def test_loop_chain_records_skip_reason(tmp_path: Path) -> None:
@@ -478,7 +551,7 @@ def test_loop_chain_records_skip_reason(tmp_path: Path) -> None:
             title="Java",
             company="Ozon",
             url="https://hh.ru/vacancy/1",
-            reason="исключённая компания: Сбер",
+            reason="Исключённая компания: Сбер",
         )
     )
     outcome = _outcome(counters, _counters(stats))
@@ -489,7 +562,7 @@ def test_loop_chain_records_skip_reason(tmp_path: Path) -> None:
 
     assert outcome == OUTCOME_EXCLUDED
     assert records["vacancies"][0]["status"] == "excluded"
-    assert records["vacancies"][0]["reason"] == "исключённая компания: Сбер"
+    assert records["vacancies"][0]["reason"] == "Исключённая компания: Сбер"
 
 
 def test_retry_statuses_take_config_or_explicit_value(tmp_path: Path) -> None:
@@ -525,7 +598,7 @@ def test_excluded_company_gets_own_status(tmp_path: Path) -> None:
 
     assert stats.skipped == []
     assert [item.company for item in stats.excluded] == ["Сбер. IT"]
-    assert stats.excluded[0].reason == "исключённая компания: Сбер"
+    assert stats.excluded[0].reason == "Исключённая компания: Сбер"
 
 
 def test_stop_word_gets_excluded_status(tmp_path: Path) -> None:
@@ -553,7 +626,7 @@ def test_stop_word_gets_excluded_status(tmp_path: Path) -> None:
 
     assert stats.skipped == []
     assert stats.excluded[0].url == "https://hh.ru/vacancy/138652903"
-    assert stats.excluded[0].reason == "стоп-слово в названии: lead"
+    assert stats.excluded[0].reason == "Стоп-слово в названии: lead"
 
 
 def test_retry_goes_by_url_from_report(tmp_path: Path, monkeypatch) -> None:

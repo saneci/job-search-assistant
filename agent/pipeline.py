@@ -242,13 +242,10 @@ def _process_vacancies(
                 break
 
             if not cards:
-                if total:
-                    logger.info(
-                        f"Запрос «{query}», страница {page_index + 1}: вакансий нет "
-                        f"(hh.ru всего нашёл {total})."
-                    )
-                else:
-                    logger.info(f"Запрос «{query}», страница {page_index + 1}: вакансий не найдено.")
+                logger.info(
+                    f"Обработка результатов запроса «{query}»: "
+                    f"на странице {page_index + 1} вакансий нет"
+                )
                 break
 
             if pages is None:
@@ -262,19 +259,21 @@ def _process_vacancies(
                 )
                 if total:
                     logger.info(
-                        f"Запрос «{query}»: {total} вакансий → {pages} страниц "
-                        f"по {search.per_page}."
+                        f"Запрос «{query}» на hh.ru нашёл {total} "
+                        f"{_plural(total, 'вакансию', 'вакансии', 'вакансий')}: "
+                        f"{pages} {_plural(pages, 'страница', 'страницы', 'страниц')} "
+                        f"по {search.per_page}"
                     )
                 else:
                     logger.info(
                         f"Запрос «{query}»: число найденных неизвестно, иду до первой "
-                        f"пустой страницы (не больше {pages})."
+                        f"пустой страницы (не больше {pages})"
                     )
 
-            found_total = f" (hh.ru всего нашёл {total})" if total and page_index == 0 else ""
             logger.info(
-                f"Запрос «{query}», страница {page_index + 1}: "
-                f"найдено {len(cards)} вакансий{found_total}."
+                f"Обработка результатов запроса «{query}»: "
+                f"{len(cards)} {_plural(len(cards), 'вакансия', 'вакансии', 'вакансий')} "
+                f"на странице {page_index + 1}"
             )
 
             for card in cards:
@@ -429,7 +428,7 @@ def _process_vacancy(
                 title=card.title,
                 company=card.company,
                 url=card.url,
-                reason=f"стоп-слово в названии: {excluded}",
+                reason=f"Стоп-слово в названии: {excluded}",
             )
         )
         log.info(f"пропуск: стоп-слово «{excluded}» в названии")
@@ -449,7 +448,7 @@ def _process_vacancy(
                 title=card.title,
                 company=card.company,
                 url=card.url,
-                reason=f"исключённая компания: {excluded_company}",
+                reason=f"Исключённая компания: {excluded_company}",
             )
         )
         log.info(f"пропуск: компания «{card.company}» в списке исключений")
@@ -490,7 +489,7 @@ def _process_vacancy(
                 title=details.title,
                 company=details.company,
                 url=details.url,
-                reason=f"исключённая компания: {excluded_company}",
+                reason=f"Исключённая компания: {excluded_company}",
             )
         )
         log.info(f"пропуск: компания «{details.company}» в списке исключений")
@@ -562,7 +561,7 @@ def _process_vacancy(
         f"{label}={value:.2f}" for label, value in decision.probabilities.items()
     )
     log.info(
-        f"LLM-решение: «{verdict}» (порог {decision.threshold:.2f}, {probabilities})"
+        f"LLM-решение: «{verdict}» ({probabilities}, порог {decision.threshold:.2f})"
     )
     if llm_reason and config.llm.decision.explain_rejections:
         log.info(f"LLM-вердикт: {llm_reason}")
@@ -959,6 +958,19 @@ def _remember_processing(
     except ProcessedError as exc:
         logger.event("processed_error", url=card.url, error=str(exc))
         logger.info(f"Не удалось сохранить память об обработанной вакансии: {exc}")
+
+
+def _plural(count: int, one: str, few: str, many: str) -> str:
+    """Русская форма слова для числа: 1 страница, 2 страницы, 5 страниц."""
+    tail = count % 100
+    if 11 <= tail <= 14:
+        return many
+    tail = count % 10
+    if tail == 1:
+        return one
+    if 2 <= tail <= 4:
+        return few
+    return many
 
 
 def _should_stop(limit_per_run: int, stats: RunStats, logger: RunLogger) -> bool:

@@ -36,7 +36,7 @@ def make_stats() -> RunStats:
                 title="1С разработчик",
                 company="Ромашка",
                 url="https://hh.ru/vacancy/3",
-                reason="стоп-слово в названии: 1С",
+                reason="Стоп-слово в названии: 1С",
             )
         ],
         queued=[{"url": "https://hh.ru/vacancy/4", "title": "Java", "company": "VK", "reason": "test"}],
@@ -98,7 +98,7 @@ def test_build_report_counts_excluded_vacancies() -> None:
             title="Java-разработчик",
             company="Сбер. IT",
             url="https://hh.ru/vacancy/6",
-            reason="исключённая компания: Сбер. IT",
+            reason="Исключённая компания: Сбер. IT",
         )
     )
 
