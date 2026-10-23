@@ -528,6 +528,34 @@ def test_excluded_company_gets_own_status(tmp_path: Path) -> None:
     assert stats.excluded[0].reason == "исключённая компания: Сбер"
 
 
+def test_stop_word_gets_excluded_status(tmp_path: Path) -> None:
+    """Стоп-слово в названии — статус excluded: его видно отдельно и можно повторить."""
+    base = make_config(tmp_path)
+    config = replace(base, search=replace(base.search, exclude_keywords=("lead",)))
+    stats = make_stats()
+    logger = RunLogger(tmp_path / "logs", run_id="stop-word")
+    card = VacancyCard(
+        title="Java Team Lead (Депозитарий)",
+        company="Сбер. IT",
+        url="https://hh.ru/vacancy/138652903",
+    )
+
+    _process_vacancy(
+        _FakePage("https://hh.ru/search/vacancy"),
+        config,
+        Profile(text="Java", examples="", style_rules=""),
+        None,  # type: ignore[arg-type]
+        stats,
+        logger,
+        card,
+    )
+    logger.close()
+
+    assert stats.skipped == []
+    assert stats.excluded[0].url == "https://hh.ru/vacancy/138652903"
+    assert stats.excluded[0].reason == "стоп-слово в названии: lead"
+
+
 def test_retry_goes_by_url_from_report(tmp_path: Path, monkeypatch) -> None:
     """--retry открывает ссылки из отчёта и обновляет запись, не трогая выдачу."""
     config = make_config(tmp_path)

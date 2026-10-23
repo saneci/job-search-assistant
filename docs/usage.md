@@ -29,7 +29,7 @@ run.bat --notify-test               # проверить канал писем
 run.bat --retry                     # повторить error + queued + excluded
 run.bat --retry queued              # только отложенные: тесты, анкеты, капча
 run.bat --retry error               # только упавшие
-run.bat --excluded                  # только исключённые компании
+run.bat --excluded                  # только исключённые вакансии: стоп-слова и компании
 sh run.sh --re --excluded           # то же самое: «excluded» перекрывает «all»
 ```
 
@@ -44,8 +44,8 @@ sh run.sh --re --excluded           # то же самое: «excluded» пер�
 - необязательное значение статуса
 - `--excluded` — самостоятельный флаг-синоним (отдельная команда для краткости), `./run.sh --re --excluded`
   сработает, но это избыточно: результат тот же, что у `./run.sh --excluded`.
-- `--excluded` имеет смысл после того, как компанию убрали из `exclude_companies`: пока она в списке,
-  вакансия снова получит статус `excluded`
+- `--excluded` имеет смысл после того, как вакансию перестали исключать: пока стоп-слово остаётся
+  в `exclude_keywords` или компания в `exclude_companies`, вакансия снова получит статус `excluded`.
 
 Формат отчёта и статусы — в [logs-and-reports.md](logs-and-reports.md).
 

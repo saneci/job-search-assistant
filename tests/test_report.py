@@ -90,8 +90,8 @@ def test_build_report_without_sent() -> None:
     assert "Отправленных откликов нет." in report
 
 
-def test_build_report_counts_excluded_companies() -> None:
-    """Исключённые компании — отдельная строка: их видно и можно повторить."""
+def test_build_report_counts_excluded_vacancies() -> None:
+    """Исключённые вакансии — отдельная строка: их видно и можно повторить."""
     stats = make_stats()
     stats.excluded.append(
         SkippedVacancy(
@@ -104,7 +104,7 @@ def test_build_report_counts_excluded_companies() -> None:
 
     report = build_report(stats)
 
-    assert "- Исключённые компании: 1" in report
+    assert "- Исключённые вакансии: 1" in report
 
 
 def test_send_email_disabled() -> None:

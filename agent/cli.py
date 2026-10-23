@@ -59,7 +59,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--excluded",
         action="store_true",
-        help="синоним «--retry excluded»: повторить только компании из exclude_companies",
+        help="синоним «--retry excluded»: только исключённые вакансии (стоп-слова, компании)",
     )
     return parser
 

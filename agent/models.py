@@ -63,8 +63,9 @@ class RunError:
 
 
 # Статусы вакансии в дневном отчёте (data/report/<дата>.json).
-# `excluded` — компания из exclude_companies, `error` — сбой обработки:
-# такие вакансии можно повторить по прямой ссылке (`--retry`).
+# `excluded` — исключённая вакансия (стоп-слово в названии или компания из
+# exclude_companies), `error` — сбой обработки: такие вакансии можно повторить
+# по прямой ссылке (`--retry`).
 STATUS_SENT = "sent"
 STATUS_SKIPPED = "skipped"
 STATUS_QUEUED = "queued"

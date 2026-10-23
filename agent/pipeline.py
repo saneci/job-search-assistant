@@ -393,12 +393,12 @@ def _process_vacancy(
     excluded = is_excluded(card.title, config.search.exclude_keywords)
     if excluded:
         logger.event(
-            "skipped_exclude_keyword",
+            "excluded_keyword",
             url=card.url,
             title=card.title,
             keyword=excluded,
         )
-        stats.skipped.append(
+        stats.excluded.append(
             SkippedVacancy(
                 title=card.title,
                 company=card.company,
@@ -412,7 +412,7 @@ def _process_vacancy(
     excluded_company = is_company_excluded(card.company, config.search.exclude_companies)
     if excluded_company:
         logger.event(
-            "skipped_exclude_company",
+            "excluded_company",
             url=card.url,
             title=card.title,
             company=card.company,
@@ -453,7 +453,7 @@ def _process_vacancy(
     excluded_company = is_company_excluded(details.company, config.search.exclude_companies)
     if excluded_company:
         logger.event(
-            "skipped_exclude_company",
+            "excluded_company",
             url=details.url,
             title=details.title,
             company=details.company,

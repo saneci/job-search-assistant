@@ -50,7 +50,7 @@ def build_report(stats: RunStats, report_path: Path | None = None) -> str:
         f"- Пропущено (не подошло): {len(stats.skipped)}",
     ]
     if stats.excluded:
-        lines.append(f"- Исключённые компании: {len(stats.excluded)}")
+        lines.append(f"- Исключённые вакансии: {len(stats.excluded)}")
     lines.append(f"- Отложено (тесты/анкеты): {len(stats.queued)}")
     if stats.errors:
         lines.append(f"- Ошибок при обработке: {len(stats.errors)}")
