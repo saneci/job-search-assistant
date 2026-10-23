@@ -20,6 +20,7 @@ from .prompts import (
     RETRY_JSON_INSTRUCTION,
     build_rejection_prompt,
     build_user_prompt,
+    detect_required_opening,
     load_system_prompt,
 )
 
@@ -54,6 +55,8 @@ class GenerationResult:
     reason: str
     cover_letter: str
     greeting_added: bool = False
+    # Обязательное начало письма из вакансии («3PL»), если оно есть.
+    required_opening: str = ""
 
 
 class LLMClient:
@@ -121,9 +124,10 @@ class LLMClient:
         signature: str = "",
     ) -> GenerationResult:
         """Генерирует сопроводительное письмо с валидацией JSON."""
+        opening = detect_required_opening(vacancy)
         messages: list[dict[str, str]] = [
             {"role": "system", "content": self._system_prompt},
-            {"role": "user", "content": build_user_prompt(profile, vacancy)},
+            {"role": "user", "content": build_user_prompt(profile, vacancy, opening)},
         ]
         attempts = 2 if self.config.generation.retry_on_invalid_json else 1
         last_error: LLMResponseError | None = None
@@ -132,7 +136,7 @@ class LLMClient:
             content = self._chat(messages)
             try:
                 return parse_generation(
-                    extract_json_object(content), max_letter_length, signature
+                    extract_json_object(content), max_letter_length, signature, opening=opening
                 )
             except LLMResponseError as exc:
                 last_error = exc
@@ -340,8 +344,13 @@ def parse_generation(
     payload: Mapping[str, Any],
     max_length: int = 1500,
     signature: str = "",
+    opening: str = "",
 ) -> GenerationResult:
-    """Валидирует JSON Generation-вызова."""
+    """Валидирует JSON Generation-вызова.
+
+    `opening` — обязательное начало письма из вакансии: тогда оно сохраняется
+    первым, а приветствие встаёт сразу после него.
+    """
     verdict = normalize_verdict(payload.get("verdict"))
     if verdict is None:
         raise LLMResponseError(
@@ -356,7 +365,7 @@ def parse_generation(
     if verdict == NOT_FIT_LABEL:
         cover_letter = ""
     elif cover_letter:
-        cover_letter, greeting_added = ensure_greeting(cover_letter)
+        cover_letter, greeting_added = ensure_greeting(cover_letter, opening)
         cover_letter = add_signature(cover_letter, signature, max_length)
 
     return GenerationResult(
@@ -364,6 +373,7 @@ def parse_generation(
         reason=reason,
         cover_letter=cover_letter,
         greeting_added=greeting_added,
+        required_opening=opening.strip(),
     )
 
 
@@ -378,20 +388,72 @@ _GREETING_RE = re.compile(
 _SHORT_LEAD_RE = re.compile(r"^[A-ZА-ЯЁ0-9][\w+-]{0,5}\.\s+")
 
 
-def ensure_greeting(text: str) -> tuple[str, bool]:
-    """Гарантирует приветствие в начале письма.
+def ensure_greeting(text: str, opening: str = "") -> tuple[str, bool]:
+    """Гарантирует приветствие, не ломая обязательное начало письма.
 
-    Модель иногда начинает письмо с обрывка («3PL. Мне интересна…») или сразу
-    с сути. Тогда приветствие добавляется кодом, без повторного вызова LLM.
+    Если вакансия требует начать с конкретного слова («Начните сопроводительное
+    письмо со слова 3PL»), это слово остаётся первым, а приветствие встаёт сразу
+    после него: «3PL. Здравствуйте! Меня заинтересовала вакансия». Иначе
+    приветствие добавляется в начало, а случайный обрывок вроде «3PL.» срезается.
+
     Возвращает (текст, было ли приветствие добавлено).
     """
     text = (text or "").strip()
     if not text:
         return "", False
+
+    opening = (opening or "").strip()
+    if opening:
+        return _greeting_after_opening(text, opening)
+
     if _GREETING_RE.match(text):
         return text, False
     body = _SHORT_LEAD_RE.sub("", text, count=1).strip() or text
     return f"Здравствуйте! {body}", True
+
+
+def _greeting_after_opening(text: str, opening: str) -> tuple[str, bool]:
+    """Ставит приветствие сразу после обязательного начала, сохраняя его дословно."""
+    end = _opening_end(text, opening)
+    if end is None:
+        # Модель проигнорировала требование: ставим слово первым, приветствие за ним.
+        rest = _drop_opening(_without_greeting(text), opening) or _without_greeting(text)
+        return f"{opening}. Здравствуйте! {_capitalized(rest)}".strip(), True
+
+    head = opening + text[len(opening) : end].rstrip()
+    rest = text[end:].lstrip()
+    if _GREETING_RE.match(rest):
+        return text, False
+
+    head = head.rstrip(" \t.!?:;,—-–")
+    if not rest:
+        return f"{head}. Здравствуйте!", True
+    return f"{head}. Здравствуйте! {_capitalized(rest)}", True
+
+
+def _opening_end(text: str, opening: str) -> int | None:
+    """Индекс сразу после обязательного начала и следующей за ним пунктуации."""
+    if text[: len(opening)].lower() != opening.lower():
+        return None
+    end = len(opening)
+    if end < len(text) and (text[end].isalnum() or text[end] == "_"):
+        return None
+    while end < len(text) and text[end] in " \t.!?:;,—-–":
+        end += 1
+    return end
+
+
+def _without_greeting(text: str) -> str:
+    return _GREETING_RE.sub("", text, count=1).strip()
+
+
+def _drop_opening(text: str, opening: str) -> str:
+    end = _opening_end(text, opening)
+    return "" if end is None else text[end:].strip()
+
+
+def _capitalized(text: str) -> str:
+    return text[:1].upper() + text[1:] if text else text
 
 
 def add_signature(text: str, signature: str, limit: int = 1500) -> str:

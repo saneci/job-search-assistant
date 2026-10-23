@@ -311,6 +311,33 @@ def test_generate_adds_signature_from_argument() -> None:
     assert result.cover_letter == "Здравствуйте! Текст.\n\n" + SIGNATURE
 
 
+def test_generate_sends_required_opening_to_prompt() -> None:
+    """Требование вакансии уходит в промпт, а письмо начинается с нужного слова."""
+    captured: dict[str, Any] = {}
+    vacancy = dataclasses.replace(
+        VACANCY,
+        description=(
+            "Как откликнуться. Начните сопроводительное письмо со слова 3PL. "
+            "Дальше расскажите, почему вам интересна роль."
+        ),
+    )
+    content = json.dumps(
+        {"verdict": "подходит", "reason": "ok", "cover_letter": "3PL. Мне интересна задача."},
+        ensure_ascii=False,
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["messages"] = json.loads(request.content)["messages"]
+        return chat_response(content)
+
+    with make_client(handler) as client:
+        result = client.generate(PROFILE, vacancy)
+
+    assert "«3PL»" in captured["messages"][1]["content"]
+    assert result.required_opening == "3PL"
+    assert result.cover_letter.startswith("3PL. Здравствуйте! Мне интересна задача.")
+
+
 def test_truncate_cover_letter_by_sentence() -> None:
     text = "Первое предложение. Второе предложение. " + "х" * 2000
 
@@ -436,6 +463,42 @@ def test_ensure_greeting_removes_dangling_lead() -> None:
     letter, added = ensure_greeting("3PL. Мне интересна задача строить бэкенд.")
 
     assert letter == "Здравствуйте! Мне интересна задача строить бэкенд."
+
+
+def test_ensure_greeting_keeps_required_opening_first() -> None:
+    """Вакансия просит начать с «3PL»: слово остаётся первым, приветствие после него."""
+    letter, added = ensure_greeting("3PL. Мне интересна задача строить бэкенд.", "3PL")
+
+    assert letter == "3PL. Здравствуйте! Мне интересна задача строить бэкенд."
+    assert added is True
+
+
+def test_ensure_greeting_keeps_opening_with_greeting() -> None:
+    text = "3PL. Здравствуйте! Мне интересна задача."
+
+    assert ensure_greeting(text, "3PL") == (text, False)
+
+
+def test_ensure_greeting_moves_greeting_after_opening() -> None:
+    """Модель начала с приветствия, хотя вакансия требует слово первым."""
+    letter, added = ensure_greeting("Здравствуйте! 3PL. Мне интересна задача.", "3PL")
+
+    assert letter == "3PL. Здравствуйте! Мне интересна задача."
+    assert added is True
+
+
+def test_ensure_greeting_adds_missing_opening() -> None:
+    letter, added = ensure_greeting("Мне интересна задача.", "3PL")
+
+    assert letter == "3PL. Здравствуйте! Мне интересна задача."
+    assert added is True
+
+
+def test_ensure_greeting_uses_opening_from_vacancy() -> None:
+    """Регистр и написание обязательного начала берём из вакансии."""
+    letter, added = ensure_greeting("3pl. мне интересна задача.", "3PL")
+
+    assert letter == "3PL. Здравствуйте! Мне интересна задача."
     assert added is True
 
 
@@ -452,6 +515,20 @@ def test_parse_generation_adds_greeting_before_signature() -> None:
 
     assert result.greeting_added is True
     assert result.cover_letter.startswith("Здравствуйте! Мне интересна задача.")
+    assert result.cover_letter.endswith(SIGNATURE)
+
+
+def test_parse_generation_respects_required_opening() -> None:
+    result = parse_generation(
+        {"verdict": "подходит", "reason": "ok", "cover_letter": "3PL. Мне интересна задача."},
+        1500,
+        SIGNATURE,
+        opening="3PL",
+    )
+
+    assert result.required_opening == "3PL"
+    assert result.greeting_added is True
+    assert result.cover_letter.startswith("3PL. Здравствуйте! Мне интересна задача.")
     assert result.cover_letter.endswith(SIGNATURE)
 
 

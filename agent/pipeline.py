@@ -488,10 +488,17 @@ def _process_vacancy(
         llm_reason_source="model",
         letter_length=len(generation.cover_letter),
         greeting_added=generation.greeting_added,
+        required_opening=generation.required_opening,
     )
     log.info(f"LLM-вердикт: {generation.reason or '—'}")
     if generation.greeting_added:
-        log.info("в письме не было приветствия, добавил «Здравствуйте!»")
+        if generation.required_opening:
+            log.info(
+                f"приветствие добавлено после обязательного начала "
+                f"«{generation.required_opening}»"
+            )
+        else:
+            log.info("в письме не было приветствия, добавил «Здравствуйте!»")
 
     captcha_waiter = _captcha_waiter(page, config, logger, details)
     try:
@@ -742,7 +749,7 @@ def _send_report_email(config: AppConfig, report: str, stats: RunStats) -> tuple
         return False, "письма с отчётом отключены (notifications.report.enabled: false)"
     return send_email(
         config.email,
-        f"hh-agent: отчёт за {stats.started_at:%Y-%m-%d %H:%M}",
+        f"Отчёт за {stats.started_at:%Y-%m-%d %H:%M}",
         report,
         recipient=settings.target(config.email),
     )
