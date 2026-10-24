@@ -46,6 +46,17 @@ sh run.sh           # Git Bash / WSL / Linux / macOS
 
 Отчёт и письма о капче могут приходить на email — [docs/notifications.md](docs/notifications.md).
 
+## Веб-интерфейс
+
+Страницы работают поверх `data/report` и не требуют браузера hh.ru:
+
+```bash
+pip install -r requirements-web.txt
+uvicorn web.main:app --reload
+```
+
+Главная — `/`, воронка метрик — `/metrics`, таблица вакансий — `/report`.
+
 ## Как это работает
 
 Поиск по `config.yaml` → отсев по стоп-словам и прошлым запускам → Decision-вызов LLM (вероятность

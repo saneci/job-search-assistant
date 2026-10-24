@@ -24,7 +24,8 @@
   гарантируются кодом; подпись входит в `llm.cover_letter.max_length`.
 - Если вакансия требует начать письмо с конкретного слова, оно остаётся первым.
 - Дневные отчёты `data/report/<дата>.json` — история вакансий, не удаляются никогда.
-  Статусы: `sent`, `skipped`, `queued`, `excluded`, `error`, `rejected`.
+  Статусы: `sent`, `skipped`, `queued`, `excluded`, `error`, `rejected`, `offer`.
+  `rejected` и `offer` терминальны; `offer` ставится только из `sent`, в UI — с подтверждением.
 - Капча не обходится: ожидание `browser.captcha_wait_seconds` и одно письмо о капче.
 - Повторы (`--retry`) идут по ссылкам из отчётов без поиска; статусы — `pipeline.retry.statuses`.
 - Подъём резюме — не чаще `pipeline.resume.boost_interval_hours`, кэш в `data.paths.cache`.

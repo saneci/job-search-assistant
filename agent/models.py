@@ -66,13 +66,15 @@ class RunError:
 # `excluded` — исключённая вакансия (стоп-слово в названии или компания из
 # exclude_companies), `error` — сбой обработки: такие вакансии можно повторить
 # по прямой ссылке (`--retry`), `rejected` — работодатель отказал по уже
-# отправленному отклику (на странице вакансии «Вам отказали»).
+# отправленному отклику (на странице вакансии «Вам отказали»), `offer` —
+# ручной статус веб-интерфейса: по отклику пришёл оффер.
 STATUS_SENT = "sent"
 STATUS_SKIPPED = "skipped"
 STATUS_QUEUED = "queued"
 STATUS_EXCLUDED = "excluded"
 STATUS_ERROR = "error"
 STATUS_REJECTED = "rejected"
+STATUS_OFFER = "offer"
 
 STATUSES = (
     STATUS_SENT,
@@ -81,6 +83,7 @@ STATUSES = (
     STATUS_EXCLUDED,
     STATUS_ERROR,
     STATUS_REJECTED,
+    STATUS_OFFER,
 )
 
 # Причина отказа: её пишет и агент при обработке, и веб-интерфейс при правке.

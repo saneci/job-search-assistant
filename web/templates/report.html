@@ -5,140 +5,14 @@
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <meta name="color-scheme" content="light dark">
         <title>Отчёт по вакансиям</title>
+        <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+        <link rel="stylesheet" href="/static/styles.css">
         <style>
-            :root {
-                --bg: #f0f2f5;
-                --text: #1a1a2e;
-                --surface: #fff;
-                --surface-2: #f8f9fb;
-                --border: #e8eaed;
-                --border-soft: #f0f0f0;
-                --muted: #666;
-                --muted-strong: #555;
-                --muted-soft: #777;
-                --muted-light: #999;
-                --muted-empty: #aaa;
-                --link: #1565c0;
-                --filter-border: #d0d5dd;
-                --filter-bg: #fff;
-                --filter-text: #444;
-                --filter-hover: #2d5a87;
-                --filter-active-bg: #1e3a5f;
-                --filter-active-text: #fff;
-                --row-hover: #f5f8ff;
-                --header-grad: linear-gradient(135deg, #1e3a5f 0%, #2d5a87 100%);
-                --header-text: #fff;
-                --shadow-card: 0 2px 8px rgba(0, 0, 0, .06);
-                --shadow-card-hover: 0 4px 16px rgba(0, 0, 0, .1);
-                --shadow-header: 0 4px 16px rgba(0, 0, 0, .12);
-                --spinner-border: #e0e0e0;
-                --spinner-top: #2d5a87;
-                --btn-toggle-bg: rgba(255, 255, 255, .15);
-                --btn-toggle-hover: rgba(255, 255, 255, .3);
-            }
-
-            [data-theme="dark"] {
-                --bg: #0f1620;
-                --text: #e6edf3;
-                --surface: #16202b;
-                --surface-2: #1c2733;
-                --border: #2a3744;
-                --border-soft: #223040;
-                --muted: #9aa7b4;
-                --muted-strong: #b6c2ce;
-                --muted-soft: #8b98a5;
-                --muted-light: #7a8794;
-                --muted-empty: #5f6b78;
-                --link: #6ab0f3;
-                --filter-border: #33465a;
-                --filter-bg: #1c2733;
-                --filter-text: #cdd6df;
-                --filter-hover: #6ab0f3;
-                --filter-active-bg: #2d5a87;
-                --filter-active-text: #fff;
-                --row-hover: #1e2b3a;
-                --header-grad: linear-gradient(135deg, #0b1a2a 0%, #17324d 100%);
-                --header-text: #e6edf3;
-                --shadow-card: 0 2px 8px rgba(0, 0, 0, .4);
-                --shadow-card-hover: 0 4px 16px rgba(0, 0, 0, .55);
-                --shadow-header: 0 4px 16px rgba(0, 0, 0, .5);
-                --spinner-border: #2a3744;
-                --spinner-top: #6ab0f3;
-                --btn-toggle-bg: rgba(255, 255, 255, .1);
-                --btn-toggle-hover: rgba(255, 255, 255, .22);
-            }
-
-            * {
-                box-sizing: border-box;
-                margin: 0;
-                padding: 0;
-            }
-
-            body {
-                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
-                background: var(--bg);
-                color: var(--text);
-                padding: 24px;
-                line-height: 1.5;
-                transition: background .2s ease, color .2s ease;
-            }
-
-            .container {
-                max-width: 1440px;
-                margin: 0 auto;
-            }
-
-            .header {
-                background: var(--header-grad);
-                color: var(--header-text);
-                padding: 28px 32px;
-                border-radius: 16px;
-                margin-bottom: 24px;
-                box-shadow: var(--shadow-header);
-                transition: background .2s ease;
-            }
-
             .header-top {
                 display: flex;
                 align-items: flex-start;
                 justify-content: space-between;
                 gap: 16px;
-            }
-
-            .header h1 {
-                font-size: 1.6rem;
-                font-weight: 600;
-                margin-bottom: 4px;
-            }
-
-            .header .meta {
-                font-size: .9rem;
-                opacity: .85;
-            }
-
-            .theme-toggle {
-                flex-shrink: 0;
-                width: 40px;
-                height: 40px;
-                border: none;
-                border-radius: 50%;
-                background: var(--btn-toggle-bg);
-                color: var(--header-text);
-                font-size: 1.2rem;
-                cursor: pointer;
-                display: inline-flex;
-                align-items: center;
-                justify-content: center;
-                transition: background .15s ease, transform .15s ease;
-            }
-
-            .theme-toggle:hover {
-                background: var(--btn-toggle-hover);
-                transform: scale(1.05);
-            }
-
-            .theme-toggle:active {
-                transform: scale(.95);
             }
 
             .summary-grid {
@@ -184,6 +58,22 @@
                 color: #2e7d32;
             }
 
+            .card-offer {
+                border-left-color: #1565c0;
+            }
+
+            .card-offer .value {
+                color: #1565c0;
+            }
+
+            [data-theme="dark"] .card-offer {
+                border-left-color: #7fb6f0;
+            }
+
+            [data-theme="dark"] .card-offer .value {
+                color: #7fb6f0;
+            }
+
             .card-skipped {
                 border-left-color: #e65100;
             }
@@ -224,56 +114,6 @@
                 color: #ad1457;
             }
 
-            .filters {
-                background: var(--surface);
-                border-radius: 12px;
-                padding: 16px 20px;
-                margin-bottom: 20px;
-                box-shadow: var(--shadow-card);
-                display: flex;
-                flex-wrap: wrap;
-                gap: 12px;
-                align-items: center;
-                transition: background .2s ease;
-            }
-
-            .filters label {
-                font-size: .85rem;
-                font-weight: 600;
-                color: var(--muted-strong);
-            }
-
-            .filter-group {
-                display: flex;
-                flex-wrap: wrap;
-                gap: 8px;
-                align-items: center;
-            }
-
-            .filter-btn {
-                padding: 6px 16px;
-                border: 1.5px solid var(--filter-border);
-                border-radius: 20px;
-                background: var(--filter-bg);
-                cursor: pointer;
-                font-size: .85rem;
-                font-weight: 500;
-                color: var(--filter-text);
-                transition: all .15s;
-                white-space: nowrap;
-            }
-
-            .filter-btn:hover {
-                border-color: var(--filter-hover);
-                color: var(--filter-hover);
-            }
-
-            .filter-btn.active {
-                background: var(--filter-active-bg);
-                color: var(--filter-active-text);
-                border-color: var(--filter-active-bg);
-            }
-
             .search-input {
                 flex: 1;
                 min-width: 200px;
@@ -293,13 +133,6 @@
 
             .search-input::placeholder {
                 color: var(--muted-light);
-            }
-
-            .count-badge {
-                font-size: .8rem;
-                color: var(--muted);
-                margin-left: auto;
-                white-space: nowrap;
             }
 
             .table-wrapper {
@@ -442,7 +275,7 @@
                 border-left-color: #f08a8a;
             }
 
-            /* НОВЫЕ СТИЛИ ДЛЯ СЕЛЕКТА СТАТУСА */
+            /* Селект статуса: цвет зависит от статуса вакансии. */
             .status-select {
                 padding: 6px 12px;
                 border-radius: 20px;
@@ -505,6 +338,12 @@
                 border-color: #f8bbd0;
             }
 
+            .status-select.offer {
+                background-color: #e0f7fa;
+                color: #006064;
+                border-color: #b2ebf2;
+            }
+
             /* Цвета для селектов (тёмная тема) */
             [data-theme="dark"] .status-select.sent {
                 background-color: #1e3a24;
@@ -536,6 +375,12 @@
                 border-color: #5e2a2c;
             }
 
+            [data-theme="dark"] .status-select.offer {
+                background-color: #12383a;
+                color: #7fd8d8;
+                border-color: #1f5a5c;
+            }
+
             [data-theme="dark"] .status-select.rejected {
                 background-color: #3a1a2b;
                 color: #f08ab0;
@@ -543,33 +388,12 @@
             }
 
             @media (max-width: 768px) {
-                body {
-                    padding: 12px;
-                }
-
-                .header {
-                    padding: 20px;
-                }
-
-                .header h1 {
-                    font-size: 1.2rem;
-                }
-
                 .summary-grid {
                     grid-template-columns: repeat(2, 1fr);
                 }
 
                 .summary-card .value {
                     font-size: 1.4rem;
-                }
-
-                .filters {
-                    flex-direction: column;
-                    align-items: stretch;
-                }
-
-                .count-badge {
-                    margin-left: 0;
                 }
 
                 th, td {
@@ -666,6 +490,97 @@
             .date-option input {
                 cursor: pointer;
             }
+
+            /* Терминальный статус: селект заблокирован, но не выглядит «загружается». */
+            .status-select.is-terminal:disabled {
+                opacity: .9;
+                cursor: not-allowed;
+            }
+
+            .modal-backdrop {
+                position: fixed;
+                inset: 0;
+                z-index: 1000;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                padding: 20px;
+                background: rgba(8, 15, 25, .55);
+                backdrop-filter: blur(2px);
+            }
+
+            .modal-backdrop[hidden] {
+                display: none;
+            }
+
+            .modal-card {
+                width: 100%;
+                max-width: 460px;
+                padding: 24px;
+                border: 1px solid var(--border);
+                border-radius: 16px;
+                background: var(--surface);
+                color: var(--text);
+                box-shadow: 0 18px 48px rgba(0, 0, 0, .28);
+            }
+
+            .modal-icon {
+                margin-bottom: 10px;
+                font-size: 1.8rem;
+                line-height: 1;
+            }
+
+            .modal-card h2 {
+                margin: 0 0 10px;
+                font-size: 1.2rem;
+                line-height: 1.3;
+            }
+
+            .modal-card p {
+                margin: 0;
+                color: var(--muted-strong);
+                line-height: 1.55;
+            }
+
+            .modal-actions {
+                display: flex;
+                justify-content: flex-end;
+                gap: 10px;
+                margin-top: 22px;
+            }
+
+            .modal-btn {
+                font: inherit;
+                font-size: .9rem;
+                padding: 9px 16px;
+                border-radius: 10px;
+                border: 1px solid var(--filter-border);
+                cursor: pointer;
+            }
+
+            .modal-btn-cancel {
+                background: var(--surface-2);
+                color: var(--text);
+            }
+
+            .modal-btn-cancel:hover {
+                border-color: var(--muted-light);
+            }
+
+            .modal-btn-confirm {
+                background: var(--filter-active-bg);
+                border-color: var(--filter-active-bg);
+                color: var(--filter-active-text);
+            }
+
+            .modal-btn-confirm:hover {
+                filter: brightness(1.12);
+            }
+
+            .modal-btn:focus-visible {
+                outline: 2px solid var(--link);
+                outline-offset: 2px;
+            }
         </style>
     </head>
     <body>
@@ -676,9 +591,15 @@
                         <h1>📋 Отчёт по обработанным вакансиям</h1>
                         <div class="meta" id="headerMeta">Загрузка данных…</div>
                     </div>
-                    <button class="theme-toggle" id="themeToggle" type="button" aria-label="Переключить тему"
-                            title="Переключить тему">🌙
-                    </button>
+                    <div style="display: flex; gap: 12px; align-items: center; flex-shrink: 0;">
+                        <a href="/" class="theme-toggle" style="text-decoration: none;" title="На главную"
+                           aria-label="На главную">
+                            🏠
+                        </a>
+                        <button class="theme-toggle" id="themeToggle" type="button" aria-label="Переключить тему"
+                                title="Переключить тему">🌙
+                        </button>
+                    </div>
                 </div>
                 <div class="header-filters">
                     <div class="date-filter">
@@ -697,7 +618,7 @@
 
             <div class="summary-grid" id="summaryGrid">
                 <div class="summary-card card-sent">
-                    <div class="label">Отклики</div>
+                    <div class="label">Отправлено</div>
                     <div class="value" id="sumSent">—</div>
                 </div>
                 <div class="summary-card card-queued">
@@ -712,10 +633,9 @@
                     <div class="label">Не подходит</div>
                     <div class="value" id="sumSkipped">—</div>
                 </div>
-                <div class="summary-card card-sent">
-                    <!-- TODO: сделать новый статус -->
+                <div class="summary-card card-offer">
                     <div class="label">Офферы</div>
-                    <div class="value" id="sumOffered">0</div>
+                    <div class="value" id="sumOffered">—</div>
                 </div>
                 <div class="summary-card card-rejected">
                     <div class="label">Отказы</div>
@@ -736,6 +656,7 @@
                     <button class="filter-btn" data-status="excluded">Исключено</button>
                     <button class="filter-btn" data-status="skipped">Не подходит</button>
                     <button class="filter-btn" data-status="rejected">Отказ</button>
+                    <button class="filter-btn" data-status="offer">Оффер</button>
                     <button class="filter-btn" data-status="error">Ошибки</button>
                 </div>
                 <input type="text" class="search-input" id="searchInput"
@@ -756,7 +677,7 @@
                         <th>Компания</th>
                         <th>Статус</th>
                         <th>Причина / Комментарий</th>
-                        <th>Время</th>
+                        <th>Дата</th>
                     </tr>
                     </thead>
                     <tbody id="tableBody"></tbody>
@@ -768,33 +689,22 @@
             </div>
         </div>
 
+        <div class="modal-backdrop" id="terminalDialog" hidden>
+            <div class="modal-card" role="dialog" aria-modal="true"
+                 aria-labelledby="terminalTitle" aria-describedby="terminalText">
+                <div class="modal-icon" aria-hidden="true">⚠️</div>
+                <h2 id="terminalTitle">Необратимое изменение</h2>
+                <p id="terminalText"></p>
+                <div class="modal-actions">
+                    <button class="modal-btn modal-btn-cancel" id="terminalCancel" type="button">Отмена</button>
+                    <button class="modal-btn modal-btn-confirm" id="terminalConfirm" type="button">Зафиксировать
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <script src="/static/script.js"></script>
         <script>
-            /* ---------- Тема ---------- */
-            const THEME_KEY = 'vacancy-report-theme';
-
-            function applyTheme(theme) {
-                document.documentElement.setAttribute('data-theme', theme);
-                const btn = document.getElementById('themeToggle');
-                if (btn) {
-                    btn.textContent = theme === 'dark' ? '☀️' : '🌙';
-                    btn.setAttribute('aria-label', theme === 'dark' ? 'Включить светлую тему' : 'Включить тёмную тему');
-                }
-            }
-
-            function getPreferredTheme() {
-                const saved = localStorage.getItem(THEME_KEY);
-                if (saved === 'dark' || saved === 'light') return saved;
-                return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-            }
-
-            applyTheme(getPreferredTheme());
-            document.getElementById('themeToggle').addEventListener('click', () => {
-                const current = document.documentElement.getAttribute('data-theme');
-                const next = current === 'dark' ? 'light' : 'dark';
-                applyTheme(next);
-                localStorage.setItem(THEME_KEY, next);
-            });
-
             /* ---------- Глобальные переменные ---------- */
             const STATUS_LABELS = {
                 sent: 'Отправлено',
@@ -802,13 +712,31 @@
                 queued: 'В очереди',
                 excluded: 'Исключено',
                 error: 'Ошибка',
-                rejected: 'Отказ'
+                rejected: 'Отказ',
+                offer: 'Оффер'
+            };
+
+            // Исход отклика фиксируется один раз: после rejected/offer статус не меняется.
+            const TERMINAL_STATUSES = new Set(['rejected', 'offer']);
+            const TERMINAL_WARNINGS = {
+                rejected: {
+                    title: 'Зафиксировать отказ?',
+                    text: 'Статус «Отказ» терминальный. После сохранения изменить его или вернуть вакансию в другой статус будет нельзя — это необратимая операция.',
+                    confirm: 'Зафиксировать отказ'
+                },
+                offer: {
+                    title: 'Зафиксировать оффер?',
+                    text: 'Статус «Оффер» терминальный. После сохранения изменить его или вернуть вакансию в другой статус будет нельзя — это необратимая операция.',
+                    confirm: 'Зафиксировать оффер'
+                }
             };
             let allVacancies = [];
             let currentStatus = 'all';
             let currentQuery = '';
             let selectedFiles = [];      // выбранные даты = файлы дня ([] — все файлы)
             let reportsIndex = [];       // файлы дня: имя, дата, обновление, итоги
+            let terminalResolve = null;  // ожидающий ответ модального окна
+            let terminalFocus = null;    // куда вернуть фокус после закрытия
 
             const els = {
                 headerMeta: document.getElementById('headerMeta'),
@@ -818,6 +746,7 @@
                 sumExcluded: document.getElementById('sumExcluded'),
                 sumError: document.getElementById('sumError'),
                 sumRejected: document.getElementById('sumRejected'),
+                sumOffered: document.getElementById('sumOffered'),
                 loader: document.getElementById('loader'),
                 errorBox: document.getElementById('errorBox'),
                 table: document.getElementById('vacancyTable'),
@@ -830,36 +759,66 @@
                 dateLabel: document.getElementById('dateLabel'),
                 datePanel: document.getElementById('datePanel'),
                 dateAll: document.getElementById('dateAll'),
-                dateList: document.getElementById('dateList')
+                dateList: document.getElementById('dateList'),
+                terminalDialog: document.getElementById('terminalDialog'),
+                terminalTitle: document.getElementById('terminalTitle'),
+                terminalText: document.getElementById('terminalText'),
+                terminalCancel: document.getElementById('terminalCancel'),
+                terminalConfirm: document.getElementById('terminalConfirm')
             };
 
             /* ---------- Утилиты ---------- */
-            function formatDate(iso) {
+            function formatDateTime(iso) {
                 if (!iso) return '—';
-                try {
-                    return new Date(iso).toLocaleDateString('ru-RU', {
-                        day: '2-digit',
-                        month: '2-digit',
-                        year: 'numeric'
-                    });
-                } catch {
-                    return iso;
-                }
-            }
-
-            function formatTime(iso) {
-                if (!iso) return '—';
-                try {
-                    return new Date(iso).toLocaleTimeString('ru-RU', {hour: '2-digit', minute: '2-digit'});
-                } catch {
-                    return iso;
-                }
+                const value = new Date(iso);
+                if (Number.isNaN(value.getTime())) return iso;
+                const pad = (part) => String(part).padStart(2, '0');
+                return `${value.getFullYear()}-${pad(value.getMonth() + 1)}-${pad(value.getDate())} `
+                    + `${pad(value.getHours())}:${pad(value.getMinutes())}:${pad(value.getSeconds())}`;
             }
 
             function escapeHtml(s) {
                 if (s == null) return '';
                 return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
             }
+
+            /* ---------- Подтверждение терминального статуса ---------- */
+            function askTerminalConfirmation(status) {
+                const warning = TERMINAL_WARNINGS[status];
+                if (!warning) return Promise.resolve(true);
+                if (terminalResolve) closeTerminalDialog(false);
+
+                terminalFocus = document.activeElement;
+                els.terminalTitle.textContent = warning.title;
+                els.terminalText.textContent = warning.text;
+                els.terminalConfirm.textContent = warning.confirm;
+                els.terminalDialog.hidden = false;
+                document.body.style.overflow = 'hidden';
+                els.terminalConfirm.focus();
+
+                return new Promise(resolve => {
+                    terminalResolve = resolve;
+                });
+            }
+
+            function closeTerminalDialog(confirmed) {
+                if (!terminalResolve) return;
+                const resolve = terminalResolve;
+                terminalResolve = null;
+                els.terminalDialog.hidden = true;
+                document.body.style.overflow = '';
+                if (terminalFocus instanceof HTMLElement) terminalFocus.focus();
+                resolve(confirmed);
+            }
+
+            els.terminalCancel.addEventListener('click', () => closeTerminalDialog(false));
+            els.terminalConfirm.addEventListener('click', () => closeTerminalDialog(true));
+            els.terminalDialog.addEventListener('click', (event) => {
+                if (event.target === els.terminalDialog) closeTerminalDialog(false);
+            });
+            document.addEventListener('keydown', (event) => {
+                if (event.key === 'Escape' && !els.terminalDialog.hidden) closeTerminalDialog(false);
+            });
 
             /* ---------- Отрисовка ---------- */
             function renderSummary(summary) {
@@ -870,18 +829,13 @@
                 els.sumExcluded.textContent = s.excluded ?? 0;
                 els.sumError.textContent = s.error ?? 0;
                 els.sumRejected.textContent = s.rejected ?? 0;
+                els.sumOffered.textContent = s.offer ?? 0;
             }
 
             function renderHeader(data) {
-                const updated = data.updated_at ? new Date(data.updated_at).toLocaleString('ru-RU', {
-                    day: '2-digit',
-                    month: 'long',
-                    year: 'numeric',
-                    hour: '2-digit',
-                    minute: '2-digit'
-                }) : '—';
                 const total = Array.isArray(data.vacancies) ? data.vacancies.length : 0;
-                els.headerMeta.textContent = `Обновлено: ${updated} · Всего обработано ${total} вакансий`;
+                els.headerMeta.textContent =
+                    `Обновлено: ${formatDateTime(data.updated_at)} · Всего обработано ${total} вакансий`;
             }
 
             function renderTable() {
@@ -932,9 +886,16 @@
                     // Статус (ВЫПАДАЮЩИЙ СПИСОК)
                     const tdStatus = document.createElement('td');
                     const select = document.createElement('select');
-                    select.className = 'status-select ' + (v.status || 'skipped');
+                    const currentStatus = v.status || 'skipped';
+                    const isTerminal = TERMINAL_STATUSES.has(currentStatus);
+                    select.className = 'status-select ' + currentStatus;
                     select.dataset.url = v.url;
                     select.dataset.report = v.report_name || '';
+                    if (isTerminal) {
+                        select.disabled = true;
+                        select.classList.add('is-terminal');
+                        select.title = `Статус «${STATUS_LABELS[currentStatus] || currentStatus}» терминальный: изменить нельзя`;
+                    }
 
                     // Опции
                     for (const [key, label] of Object.entries(STATUS_LABELS)) {
@@ -942,19 +903,37 @@
                         opt.value = key;
                         opt.textContent = label;
                         if (v.status === key) opt.selected = true;
+                        // Оффер имеет смысл только после отправленного отклика.
+                        if (key === 'offer' && currentStatus !== 'sent') {
+                            opt.disabled = true;
+                            opt.title = 'Сначала переведите вакансию в статус «Отправлено»';
+                        }
                         select.appendChild(opt);
                     }
 
                     // Обработчик смены статуса
-                    select.addEventListener('change', async (e) => {
-                        const newStatus = e.target.value;
-                        const url = e.target.dataset.url;
-                        const reportName = e.target.dataset.report;
+                    select.addEventListener('change', async (event) => {
+                        const target = event.currentTarget;
+                        const newStatus = target.value;
+                        const oldStatus = currentStatus;
+                        const oldClass = target.className;
+                        const url = target.dataset.url;
+                        const reportName = target.dataset.report;
+
+                        // Терминальный статус фиксируется только после явного подтверждения.
+                        if (TERMINAL_STATUSES.has(newStatus)) {
+                            const confirmed = await askTerminalConfirmation(newStatus);
+                            if (!confirmed) {
+                                target.value = oldStatus;
+                                target.className = oldClass;
+                                return;
+                            }
+                        }
 
                         // Блокируем на время запроса
-                        e.target.disabled = true;
-                        const oldClass = e.target.className;
-                        e.target.className = 'status-select ' + newStatus;
+                        target.disabled = true;
+                        target.className = 'status-select ' + newStatus +
+                            (TERMINAL_STATUSES.has(newStatus) ? ' is-terminal' : '');
 
                         try {
                             const resp = await fetch('/api/v1/update-status', {
@@ -967,7 +946,16 @@
                                 })
                             });
 
-                            if (!resp.ok) throw new Error('Ошибка сервера');
+                            if (!resp.ok) {
+                                let detail = `Ошибка HTTP ${resp.status}`;
+                                try {
+                                    const payload = await resp.json();
+                                    if (typeof payload.detail === 'string') detail = payload.detail;
+                                } catch {
+                                    // Тело не JSON — оставляем код ответа.
+                                }
+                                throw new Error(detail);
+                            }
                             const result = await resp.json();
 
                             // Обновляем локальные данные
@@ -982,15 +970,14 @@
                             // Обновляем сводку из ответа сервера
                             if (result.summary) renderSummary(result.summary);
 
-                            // Перерисовываем таблицу, чтобы применить фильтры (если нужно)
-                            renderTable(); // Если раскомментировать, строка может исчезнуть, если выбран фильтр по старому статусу.
+                            // Перерисовываем таблицу с учётом фильтра по новому статусу.
+                            renderTable();
 
                         } catch (err) {
                             alert('Не удалось сохранить статус: ' + err.message);
-                            e.target.value = v.status; // Откатываем
-                            e.target.className = oldClass;
-                        } finally {
-                            e.target.disabled = false;
+                            target.value = oldStatus; // Откатываем
+                            target.className = oldClass;
+                            target.disabled = TERMINAL_STATUSES.has(oldStatus);
                         }
                     });
 
@@ -1003,10 +990,10 @@
                     tdReason.textContent = v.reason || '—';
                     tr.appendChild(tdReason);
 
-                    // Время
+                    // Дата и время
                     const tdTime = document.createElement('td');
                     tdTime.className = 'time-cell';
-                    tdTime.textContent = formatTime(v.processed_at);
+                    tdTime.textContent = formatDateTime(v.processed_at);
                     tr.appendChild(tdTime);
 
                     frag.appendChild(tr);

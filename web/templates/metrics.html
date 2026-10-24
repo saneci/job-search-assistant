@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="ru">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <meta name="color-scheme" content="light dark">
+        <title>Воронка поиска работы</title>
+        <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+        <link rel="stylesheet" href="/static/styles.css">
+        <style>
+            /* Сетка метрик */
+            .metrics-grid {
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+                gap: 16px;
+                margin-bottom: 24px;
+            }
+            .metric-card {
+                background: var(--surface); border-radius: 12px; padding: 20px;
+                box-shadow: var(--shadow-card); border-left: 4px solid var(--color-base);
+                transition: transform .15s, box-shadow .15s;
+            }
+            .metric-card:hover { transform: translateY(-2px); box-shadow: 0 4px 16px rgba(0, 0, 0, .1); }
+            .metric-card .label { font-size: .8rem; text-transform: uppercase; color: var(--muted); font-weight: 600; margin-bottom: 8px; }
+            .metric-card .value { font-size: 2rem; font-weight: 700; color: var(--text); }
+            .metric-card .sub { font-size: .85rem; color: var(--muted-strong); margin-top: 4px; }
+
+            /* Главный блок */
+            .main-panel {
+                background: var(--surface); border-radius: 12px; padding: 32px;
+                box-shadow: var(--shadow-card); display: grid;
+                grid-template-columns: 1fr 1fr; gap: 48px; align-items: stretch;
+            }
+
+            .chart-section { display: flex; flex-direction: column; }
+            .chart-section h2 {
+                font-size: 1.1rem; margin-bottom: 24px; font-weight: 600;
+                color: var(--text); border-bottom: 1px solid var(--border); padding-bottom: 12px;
+            }
+
+            /* Левая колонка: Пайчарт */
+            .pie-wrapper {
+                display: flex; flex-direction: column; align-items: center;
+                justify-content: center; gap: 32px; flex: 1;
+            }
+
+            .pie-chart {
+                width: 280px;
+                height: 280px;
+                border-radius: 50%;
+                background: var(--surface-2);
+            }
+
+            /* Легенда */
+            .pie-legend {
+                display: flex; flex-wrap: wrap; gap: 16px 24px;
+                justify-content: center; width: 100%;
+            }
+            .legend-item {
+                display: flex; align-items: center; gap: 10px;
+                font-size: 0.9rem; color: var(--muted-strong);
+            }
+            .legend-color { width: 14px; height: 14px; border-radius: 4px; }
+            .legend-item strong { color: var(--text); }
+
+            /* Правая колонка */
+            .right-column { display: flex; flex-direction: column; justify-content: space-between; gap: 32px; }
+            .stack-group { display: flex; flex-direction: column; gap: 12px; }
+            .stack-bar {
+                display: flex; height: 48px; border-radius: 8px;
+                overflow: hidden; box-shadow: inset 0 1px 3px rgba(0,0,0,0.1);
+            }
+            .stack-segment {
+                height: 100%; display: flex; align-items: center; justify-content: center;
+                color: white; font-size: 0.85rem; font-weight: 600;
+                transition: width 1s ease-out; overflow: hidden; white-space: nowrap;
+            }
+            .stack-segment span { padding: 0 8px; }
+
+            .empty-note {
+                grid-column: 1 / -1;
+                padding: 32px;
+                text-align: center;
+                color: var(--muted-strong);
+            }
+
+            /* Адаптивность */
+            @media (max-width: 992px) {
+                .main-panel { grid-template-columns: 1fr; gap: 40px; }
+            }
+            @media (max-width: 768px) {
+                .metrics-grid { grid-template-columns: repeat(2, 1fr); }
+                .main-panel { padding: 20px; }
+                .pie-chart { width: 220px; height: 220px; }
+                .pie-legend { flex-direction: column; align-items: flex-start; gap: 12px; }
+            }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <!-- Шапка -->
+            <div class="header header--row">
+                <div>
+                    <h1>📊 Воронка поиска работы</h1>
+                    <div class="meta">{{ metrics.updated_text }}</div>
+                </div>
+                <div style="display: flex; gap: 12px; align-items: center;">
+                    <a href="/" class="theme-toggle" style="text-decoration: none;" title="На главную" aria-label="На главную">
+                        🏠
+                    </a>
+                    <button class="theme-toggle" id="themeToggle" type="button">🌙</button>
+                </div>
+            </div>
+
+            {% if metrics.period %}
+            <div class="filters">
+                <label>Период:</label>
+                <div class="filter-group">
+                    {% for option in metrics.period.options %}
+                    <a class="filter-btn{% if option.active %} active{% endif %}"
+                       href="/metrics?period={{ option.key }}"
+                       {% if option.active %}aria-current="true"{% endif %}>{{ option.label }}</a>
+                    {% endfor %}
+                </div>
+                <span class="count-badge">{{ metrics.period.label }}</span>
+            </div>
+            {% endif %}
+
+            {% if metrics.empty %}
+            <div class="main-panel">
+                <div class="empty-note">
+                    {% if metrics.reports_count %}
+                    За выбранный период ({{ metrics.period.label }}) данных нет. Выберите другой период.
+                    {% else %}
+                    В data/report пока нет данных. Запустите агент — здесь появится воронка.
+                    {% endif %}
+                </div>
+            </div>
+            {% else %}
+
+            <!-- Ключевые метрики -->
+            <div class="metrics-grid">
+                <div class="metric-card" style="border-left-color: var(--color-sent);">
+                    <div class="label">Конверсия в отклик</div>
+                    <div class="value" style="color: var(--color-sent);">{{ metrics.rate_text.response }}</div>
+                    <div class="sub">{{ metrics.responses }} {{ metrics.words.responses }} из {{ metrics.total }} {{ metrics.words.vacancies_genitive }}</div>
+                </div>
+                <div class="metric-card" style="border-left-color: var(--color-offer);">
+                    <div class="label">Конверсия в оффер</div>
+                    <div class="value" style="color: var(--color-offer);">{{ metrics.rate_text.offer }}</div>
+                    <div class="sub">{{ metrics.offers }} {{ metrics.words.offers }} из {{ metrics.responses }}</div>
+                </div>
+                <div class="metric-card" style="border-left-color: var(--color-rejected);">
+                    <div class="label">Доля отказов</div>
+                    <div class="value" style="color: var(--color-rejected);">{{ metrics.rate_text.rejected }}</div>
+                    <div class="sub">{{ metrics.rejected }} {{ metrics.words.rejected }} из {{ metrics.responses }}</div>
+                </div>
+                <div class="metric-card" style="border-left-color: var(--muted);">
+                    <div class="label">Игнор (молчание)</div>
+                    <div class="value" style="color: var(--muted-strong);">{{ metrics.rate_text.ignore }}</div>
+                    <div class="sub">{{ metrics.sent }} {{ metrics.words.sent }} без ответа</div>
+                </div>
+            </div>
+
+            <!-- Единый блок с графиками -->
+            <div class="main-panel">
+
+                <!-- Левая колонка: Воронка в виде пайчарта -->
+                <div class="chart-section">
+                    <h2>Воронка найма (от просмотра до оффера)</h2>
+                    <div class="pie-wrapper">
+
+                        <div class="pie-chart" style="background: {{ metrics.pie_css }};"></div>
+
+                        <div class="pie-legend">
+                            {% for item in metrics.pie_legend %}
+                            <div class="legend-item">
+                                <div class="legend-color" style="background: {{ item.color }};"></div>
+                                <span>{{ item.label }} (<strong>{{ item.count }}</strong>)</span>
+                            </div>
+                            {% endfor %}
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Правая колонка: Два горизонтальных графика -->
+                <div class="right-column">
+
+                    <!-- График 1 -->
+                    <div class="chart-section">
+                        <h2>Распределение обработанных вакансий ({{ metrics.total }})</h2>
+                        <div class="stack-group">
+                            <div class="stack-bar">
+                                {% for item in metrics.distribution if item.count %}
+                                <div class="stack-segment" style="width: {{ item.percent }}%; background: {{ item.color }};" title="{{ item.label }}: {{ item.count }}">
+                                    {% if item.percent >= 7 %}<span>{{ item.percent_text }}</span>{% endif %}
+                                </div>
+                                {% endfor %}
+                            </div>
+                            <div class="pie-legend" style="justify-content: flex-start;">
+                                {% for item in metrics.distribution %}
+                                <div class="legend-item"><div class="legend-color" style="background: {{ item.color }};"></div>{{ item.label }} ({{ item.count }})</div>
+                                {% endfor %}
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- График 2 -->
+                    <div class="chart-section">
+                        <h2>Судьба отправленных откликов ({{ metrics.responses }})</h2>
+                        <div class="stack-group">
+                            {% if metrics.has_responses %}
+                            <div class="stack-bar">
+                                {% for item in metrics.fate if item.count %}
+                                <div class="stack-segment" style="width: {{ item.percent }}%; background: {{ item.color }};" title="{{ item.label }}: {{ item.count }}">
+                                    {% if item.percent >= 10 %}<span>{{ item.label }}: {{ item.percent_text }}</span>{% endif %}
+                                </div>
+                                {% endfor %}
+                            </div>
+                            {% else %}
+                            <div class="empty-note">Отправленных откликов пока нет.</div>
+                            {% endif %}
+                            <div class="pie-legend" style="justify-content: flex-start;">
+                                {% for item in metrics.fate %}
+                                <div class="legend-item"><div class="legend-color" style="background: {{ item.color }};"></div>{{ item.label }} ({{ item.count }})</div>
+                                {% endfor %}
+                            </div>
+                        </div>
+                    </div>
+
+                </div>
+            </div>
+            {% endif %}
+        </div>
+
+        <script src="/static/script.js"></script>
+    </body>
+</html>

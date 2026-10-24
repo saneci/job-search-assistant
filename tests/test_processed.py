@@ -1,5 +1,4 @@
-﻿"""Тесты памяти об обработанных вакансиях (data/processed/<дата>.json)."""
-
+﻿
 from __future__ import annotations
 
 import json
@@ -43,6 +42,7 @@ def test_file_has_header_with_summary(tmp_path: Path) -> None:
         "excluded": 0,
         "error": 0,
         "rejected": 0,
+        "offer": 0,
     }
     assert payload["vacancies"][0]["title"] == "Java-разработчик"
     assert payload["vacancies"][0]["status"] == "sent"

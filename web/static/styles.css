@@ -1,0 +1,277 @@
+/* Общие стили всех страниц: палитра темы, сброс, контейнер, хедер, фильтры
+   и кнопка переключения темы. Стили конкретных блоков остаются в шаблонах. */
+
+:root {
+    /* Поверхности и текст */
+    --bg: #f0f2f5;
+    --text: #1a1a2e;
+    --surface: #fff;
+    --surface-2: #f8f9fb;
+    --border: #e8eaed;
+    --border-soft: #f0f0f0;
+    --muted: #666;
+    --muted-strong: #555;
+    --muted-soft: #777;
+    --muted-light: #999;
+    --muted-empty: #aaa;
+    --link: #1565c0;
+    --row-hover: #f5f8ff;
+
+    /* Хедер, тени и кнопка темы */
+    --header-grad: linear-gradient(135deg, #1e3a5f 0%, #2d5a87 100%);
+    --header-text: #fff;
+    --shadow-card: 0 2px 8px rgba(0, 0, 0, .06);
+    --shadow-card-hover: 0 6px 24px rgba(0, 0, 0, .12);
+    --shadow-header: 0 4px 16px rgba(0, 0, 0, .12);
+    --btn-toggle-bg: rgba(255, 255, 255, .15);
+    --btn-toggle-hover: rgba(255, 255, 255, .3);
+
+    /* Фильтры и поиск */
+    --filter-border: #d0d5dd;
+    --filter-bg: #fff;
+    --filter-text: #444;
+    --filter-hover: #2d5a87;
+    --filter-active-bg: #1e3a5f;
+    --filter-active-text: #fff;
+
+    /* Индикатор загрузки */
+    --spinner-border: #e0e0e0;
+    --spinner-top: #2d5a87;
+
+    /* Акценты главной страницы */
+    --accent-funnel: #2d5a87;
+    --accent-report: #2e7d32;
+
+    /* Цвета статусов для графиков воронки */
+    --color-base: #94a3b8;
+    --color-sent: #2e7d32;
+    --color-rejected: #ad1457;
+    --color-skipped: #e65100;
+    --color-excluded: #6a1b9a;
+    --color-queued: #1565c0;
+    --color-offer: #1565c0;
+    --color-error: #c62828;
+}
+
+[data-theme="dark"] {
+    --bg: #0f1620;
+    --text: #e6edf3;
+    --surface: #16202b;
+    --surface-2: #1c2733;
+    --border: #2a3744;
+    --border-soft: #223040;
+    --muted: #9aa7b4;
+    --muted-strong: #b6c2ce;
+    --muted-soft: #8b98a5;
+    --muted-light: #7a8794;
+    --muted-empty: #5f6b78;
+    --link: #6ab0f3;
+    --row-hover: #1e2b3a;
+
+    --header-grad: linear-gradient(135deg, #0b1a2a 0%, #17324d 100%);
+    --header-text: #e6edf3;
+    --shadow-card: 0 2px 8px rgba(0, 0, 0, .4);
+    --shadow-card-hover: 0 6px 24px rgba(0, 0, 0, .55);
+    --shadow-header: 0 4px 16px rgba(0, 0, 0, .5);
+    --btn-toggle-bg: rgba(255, 255, 255, .1);
+    --btn-toggle-hover: rgba(255, 255, 255, .22);
+
+    --filter-border: #33465a;
+    --filter-bg: #1c2733;
+    --filter-text: #cdd6df;
+    --filter-hover: #6ab0f3;
+    --filter-active-bg: #2d5a87;
+    --filter-active-text: #fff;
+
+    --spinner-border: #2a3744;
+    --spinner-top: #6ab0f3;
+
+    --accent-funnel: #7fb6f0;
+    --accent-report: #7fd18a;
+
+    --color-base: #475569;
+    --color-sent: #7fd18a;
+    --color-rejected: #f08ab0;
+    --color-skipped: #f0b070;
+    --color-excluded: #c39ae6;
+    --color-queued: #7fb6f0;
+    --color-offer: #7fb6f0;
+    --color-error: #f08a8a;
+}
+
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    padding: 24px;
+    line-height: 1.5;
+    transition: background .2s ease, color .2s ease;
+}
+
+.container {
+    max-width: 1440px;
+    margin: 0 auto;
+}
+
+.theme-toggle {
+    flex-shrink: 0;
+    width: 40px;
+    height: 40px;
+    border: none;
+    border-radius: 50%;
+    background: var(--btn-toggle-bg);
+    color: var(--header-text);
+    font-size: 1.2rem;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    transition: background .15s ease, transform .15s ease;
+}
+
+.theme-toggle:hover {
+    background: var(--btn-toggle-hover);
+    transform: scale(1.05);
+}
+
+.theme-toggle:active {
+    transform: scale(.95);
+}
+
+/* Хедер: градиентная шапка, общая для всех страниц. */
+.header {
+    background: var(--header-grad);
+    color: var(--header-text);
+    padding: 28px 32px;
+    border-radius: 16px;
+    margin-bottom: 24px;
+    box-shadow: var(--shadow-header);
+    transition: background .2s ease;
+}
+
+/* Шапка в одну строку: заголовок слева, кнопки справа. */
+.header--row {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 16px;
+}
+
+.header h1 {
+    font-size: 1.6rem;
+    font-weight: 600;
+    margin-bottom: 4px;
+}
+
+.header .meta {
+    font-size: .9rem;
+    opacity: .85;
+}
+
+.header .meta + .meta {
+    margin-top: 4px;
+}
+
+/* Панель фильтров: кнопки-таблетки и счётчик выбранного. */
+.filters {
+    background: var(--surface);
+    border-radius: 12px;
+    padding: 16px 20px;
+    margin-bottom: 24px;
+    box-shadow: var(--shadow-card);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    align-items: center;
+    transition: background .2s ease;
+}
+
+.filters label {
+    font-size: .85rem;
+    font-weight: 600;
+    color: var(--muted-strong);
+}
+
+.filter-group {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+}
+
+.filter-btn {
+    padding: 6px 16px;
+    border: 1.5px solid var(--filter-border);
+    border-radius: 20px;
+    background: var(--filter-bg);
+    cursor: pointer;
+    font-size: .85rem;
+    font-weight: 500;
+    color: var(--filter-text);
+    text-decoration: none;
+    transition: all .15s;
+    white-space: nowrap;
+}
+
+.filter-btn:hover {
+    border-color: var(--filter-hover);
+    color: var(--filter-hover);
+}
+
+.filter-btn.active {
+    background: var(--filter-active-bg);
+    color: var(--filter-active-text);
+    border-color: var(--filter-active-bg);
+}
+
+.filter-btn:focus-visible {
+    outline: 2px solid var(--filter-hover);
+    outline-offset: 2px;
+}
+
+.count-badge {
+    font-size: .8rem;
+    color: var(--muted);
+    margin-left: auto;
+    white-space: nowrap;
+}
+
+@media (max-width: 768px) {
+    body {
+        padding: 12px;
+    }
+
+    .header {
+        padding: 20px;
+    }
+
+    .header h1 {
+        font-size: 1.2rem;
+    }
+
+    .filters {
+        flex-direction: column;
+        align-items: stretch;
+        padding: 14px 16px;
+        gap: 10px;
+    }
+
+    .filter-group {
+        gap: 6px;
+    }
+
+    .filter-btn {
+        padding: 5px 10px;
+    }
+
+    .count-badge {
+        margin-left: 0;
+        text-align: right;
+    }
+}

@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Мониторинг поиска работы">
+    <defs>
+        <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0" stop-color="#1e3a5f"/>
+            <stop offset="1" stop-color="#2d5a87"/>
+        </linearGradient>
+    </defs>
+    <rect width="64" height="64" rx="14" fill="url(#bg)"/>
+    <rect x="13" y="35" width="10" height="16" rx="3" fill="#fff" opacity=".92"/>
+    <rect x="27" y="27" width="10" height="24" rx="3" fill="#fff" opacity=".96"/>
+    <rect x="41" y="18" width="10" height="33" rx="3" fill="#fff"/>
+    <path d="M13 55h38" stroke="#fff" stroke-opacity=".45" stroke-width="3" stroke-linecap="round"/>
+</svg>

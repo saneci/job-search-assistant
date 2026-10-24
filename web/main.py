@@ -1,4 +1,4 @@
-"""Веб-интерфейс дневных отчётов: просмотр вакансий и правка статусов.
+"""Веб-интерфейс дневных отчётов: главная, воронка и правка статусов.
 
 Модуль работает только с файлами `data/report` — тем же форматом, что пишет
 агент (`agent/processed.py`): шапка с итогами и плоский список `vacancies`.
@@ -8,29 +8,81 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from calendar import monthrange
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
+
+from .metrics import build_metrics, dedupe_vacancies
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 REPORTS_DIR = PROJECT_ROOT / "data" / "report"
 TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
+STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 # Статусы записи: те же, что в отчёте агента (agent/models.py STATUSES).
-STATUSES = ("sent", "skipped", "queued", "excluded", "error", "rejected")
+STATUSES = ("sent", "skipped", "queued", "excluded", "error", "rejected", "offer")
 
-# Статус «отказ» ставит человек, когда работодатель ответил отказом: причина
-# всегда одна и та же, попытки отклика не пересчитываем (agent/models.py).
+# Исход отклика человек ставит вручную: причина всегда одна и та же, попытки
+# отклика не пересчитываем (agent/models.py).
+STATUS_SENT = "sent"
 STATUS_REJECTED = "rejected"
+STATUS_OFFER = "offer"
 REJECTED_REASON = "По отклику пришёл отказ"
+OFFER_REASON = "По отклику пришёл оффер"
+
+# Исход отклика — терминальная операция: после него статус не меняется.
+TERMINAL_STATUSES = (STATUS_REJECTED, STATUS_OFFER)
+
+# Периоды воронки: считаются по календарю относительно последней даты в данных.
+PERIODS = ("year", "quarter", "month", "week", "day")
+PERIOD_LABELS = {
+    "year": "Год",
+    "quarter": "Квартал",
+    "month": "Месяц",
+    "week": "Неделя",
+    "day": "День",
+}
+DEFAULT_PERIOD = "year"
+MONTHS_NOMINATIVE = (
+    "Январь",
+    "Февраль",
+    "Март",
+    "Апрель",
+    "Май",
+    "Июнь",
+    "Июль",
+    "Август",
+    "Сентябрь",
+    "Октябрь",
+    "Ноябрь",
+    "Декабрь",
+)
+MONTHS_GENITIVE = (
+    "января",
+    "февраля",
+    "марта",
+    "апреля",
+    "мая",
+    "июня",
+    "июля",
+    "августа",
+    "сентября",
+    "октября",
+    "ноября",
+    "декабря",
+)
+QUARTER_NAMES = ("I", "II", "III", "IV")
 
 app = FastAPI(title="Отчёты по вакансиям")
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
 class StatusUpdate(BaseModel):
@@ -98,6 +150,142 @@ def all_vacancies(paths: list[Path]) -> list[dict[str, Any]]:
     return items
 
 
+def selected_reports(files: str = "") -> list[Path]:
+    """Файлы дня по списку имён; без списка — все."""
+    selected = report_files()
+    if not files:
+        return selected
+    wanted = {item.strip() for item in files.split(",") if item.strip()}
+    return [path for path in selected if path.name in wanted or path.stem in wanted]
+
+
+def period_bounds(period: str, anchor: date) -> tuple[date, date]:
+    """Границы календарного периода, в который попадает anchor."""
+    if period not in PERIODS:
+        raise ValueError(f"Неизвестный период: {period}")
+    if period == "year":
+        return date(anchor.year, 1, 1), date(anchor.year, 12, 31)
+    if period == "quarter":
+        first_month = (anchor.month - 1) // 3 * 3 + 1
+        last_month = first_month + 2
+        return (
+            date(anchor.year, first_month, 1),
+            date(anchor.year, last_month, monthrange(anchor.year, last_month)[1]),
+        )
+    if period == "month":
+        return (
+            date(anchor.year, anchor.month, 1),
+            date(anchor.year, anchor.month, monthrange(anchor.year, anchor.month)[1]),
+        )
+    if period == "week":
+        start = anchor - timedelta(days=anchor.weekday())
+        return start, start + timedelta(days=6)
+    return anchor, anchor
+
+
+def record_date(record: dict[str, Any]) -> date | None:
+    """Дата обработки записи; без валидного processed_at записи в период не попадают."""
+    value = str(record.get("processed_at", "")).strip()
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value).date()
+    except ValueError:
+        return None
+
+
+def latest_record_date(records: list[dict[str, Any]]) -> date | None:
+    """Самая свежая дата обработки — опора для календарных периодов."""
+    dates = [value for record in records if (value := record_date(record))]
+    return max(dates) if dates else None
+
+
+def filter_by_period(
+    records: list[dict[str, Any]], start: date, end: date
+) -> list[dict[str, Any]]:
+    """Оставляет записи, обработанные в указанном календарном диапазоне."""
+    result: list[dict[str, Any]] = []
+    for record in records:
+        value = record_date(record)
+        if value is not None and start <= value <= end:
+            result.append(record)
+    return result
+
+
+def period_label(period: str, start: date, end: date) -> str:
+    """Подпись выбранного периода для шапки фильтра."""
+    if period == "year":
+        return str(start.year)
+    if period == "quarter":
+        return f"{QUARTER_NAMES[(start.month - 1) // 3]} квартал {start.year}"
+    if period == "month":
+        return f"{MONTHS_NOMINATIVE[start.month - 1]} {start.year}"
+    if period == "day":
+        return f"{start.day} {MONTHS_GENITIVE[start.month - 1]} {start.year}"
+    if start.year == end.year and start.month == end.month:
+        return f"{start.day}–{end.day} {MONTHS_GENITIVE[start.month - 1]} {start.year}"
+    if start.year == end.year:
+        return (
+            f"{start.day} {MONTHS_GENITIVE[start.month - 1]} — "
+            f"{end.day} {MONTHS_GENITIVE[end.month - 1]} {start.year}"
+        )
+    return (
+        f"{start.day} {MONTHS_GENITIVE[start.month - 1]} {start.year} — "
+        f"{end.day} {MONTHS_GENITIVE[end.month - 1]} {end.year}"
+    )
+
+
+def current_metrics(
+    paths: list[Path] | None = None,
+    period: str | None = None,
+    anchor: date | None = None,
+) -> dict[str, Any]:
+    """Метрики по выбранным файлам (по умолчанию — по всем отчётам).
+
+    Без `period` считаются все отчёты. С периодом записи фильтруются по
+    `processed_at`; точкой отсчёта служит последняя дата в данных, чтобы
+    воронка не оказалась пустой только из-за давно не обновлявшегося отчёта.
+    """
+    selected = report_files() if paths is None else paths
+    items = dedupe_vacancies(all_vacancies(selected))
+    period_info: dict[str, Any] | None = None
+    if period is not None:
+        if period not in PERIODS:
+            raise HTTPException(status_code=422, detail=f"Неизвестный период: {period}")
+        anchor_date = anchor or latest_record_date(items) or date.today()
+        start, end = period_bounds(period, anchor_date)
+        items = filter_by_period(items, start, end)
+        period_info = {
+            "key": period,
+            "label": period_label(period, start, end),
+            "start": start.isoformat(),
+            "end": end.isoformat(),
+            "options": [
+                {
+                    "key": key,
+                    "label": label,
+                    "active": key == period,
+                }
+                for key, label in PERIOD_LABELS.items()
+            ],
+        }
+    updated_at = ""
+    for path in selected:
+        try:
+            data = read_report(path)
+        except HTTPException:
+            continue
+        updated_at = max(updated_at, str(data.get("updated_at", "")))
+    result = build_metrics(
+        items,
+        reports_count=len(selected),
+        updated_at=updated_at,
+    )
+    if period_info is not None:
+        result["period"] = period_info
+    return result
+
+
 def now() -> str:
     """Локальное время в ISO-виде — как поле processed_at в отчёте."""
     return datetime.now().astimezone().isoformat(timespec="seconds")
@@ -105,8 +293,36 @@ def now() -> str:
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request) -> HTMLResponse:
+    """Главная страница: переход к воронке и отчёту, живые итоги."""
+    return templates.TemplateResponse(
+        request=request, name="index.html", context={"metrics": current_metrics()}
+    )
+
+
+@app.get("/report", response_class=HTMLResponse)
+@app.get("/report.html", response_class=HTMLResponse, include_in_schema=False)
+async def report(request: Request) -> HTMLResponse:
     """Страница отчёта: таблица вакансий, фильтры и правка статусов."""
     return templates.TemplateResponse(request=request, name="report.html")
+
+
+@app.get("/metrics", response_class=HTMLResponse)
+@app.get("/metrics.html", response_class=HTMLResponse, include_in_schema=False)
+async def metrics(request: Request, period: str = DEFAULT_PERIOD) -> HTMLResponse:
+    """Воронка поиска работы: метрики по дневным отчётам за выбранный период."""
+    if period not in PERIODS:
+        raise HTTPException(status_code=422, detail=f"Неизвестный период: {period}")
+    return templates.TemplateResponse(
+        request=request,
+        name="metrics.html",
+        context={"metrics": current_metrics(period=period)},
+    )
+
+
+@app.get("/index.html", include_in_schema=False)
+async def index_alias() -> RedirectResponse:
+    """Старая ссылка на главную."""
+    return RedirectResponse(url="/", status_code=307)
 
 
 @app.get("/api/v1/reports")
@@ -137,10 +353,7 @@ async def list_vacancies(files: str = "") -> dict[str, Any]:
     Дата и файл дня — одно и то же (`2026-10-23.json`), поэтому фильтр идёт
     по имени файла; для старых клиентов принимаем и дату без расширения.
     """
-    selected = report_files()
-    if files:
-        wanted = {item.strip() for item in files.split(",") if item.strip()}
-        selected = [path for path in selected if path.name in wanted or path.stem in wanted]
+    selected = selected_reports(files)
     vacancies = all_vacancies(selected)
     return {
         "summary": summarize(vacancies),
@@ -155,6 +368,14 @@ async def get_report(report_name: str) -> dict[str, Any]:
     return read_report(report_path(report_name))
 
 
+@app.get("/api/v1/metrics")
+async def get_metrics(files: str = "", period: str = "") -> dict[str, Any]:
+    """Метрики по выбранным файлам дня; без периода — по всем отчётам."""
+    if period and period not in PERIODS:
+        raise HTTPException(status_code=422, detail=f"Неизвестный период: {period}")
+    return current_metrics(selected_reports(files), period=period or None)
+
+
 @app.post("/api/v1/update-status")
 async def update_status(update: StatusUpdate) -> dict[str, Any]:
     """Меняет статус вакансии, не переписывая остальную запись.
@@ -163,8 +384,12 @@ async def update_status(update: StatusUpdate) -> dict[str, Any]:
 
     * `rejected` — отказ работодателя: пишем только `status`, `reason`
       («По отклику пришёл отказ») и `processed_at`; попытки не считаем;
+    * `offer` — оффер: то же самое, причина «По отклику пришёл оффер»;
+      поставить его можно только из статуса `sent`;
     * остальные статусы — `status`, `attempts` (+1) и `processed_at`,
       причина остаётся прежней.
+
+    `rejected` и `offer` — терминальные: из них статус больше не меняется.
 
     Итоги в шапке пересчитываем по самим записям, чтобы цифры наверху
     сходились с таблицей.
@@ -176,10 +401,27 @@ async def update_status(update: StatusUpdate) -> dict[str, Any]:
     for vacancy in data["vacancies"]:
         if not isinstance(vacancy, dict) or str(vacancy.get("url", "")) != update.url:
             continue
+        current_status = str(vacancy.get("status", ""))
+        if current_status in TERMINAL_STATUSES:
+            label = "Отказ" if current_status == STATUS_REJECTED else "Оффер"
+            raise HTTPException(
+                status_code=409,
+                detail=f"Статус «{label}» терминальный: изменить его нельзя",
+            )
+        if update.status == STATUS_OFFER and current_status != STATUS_SENT:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Оффер можно поставить только после статуса «Отправлено» "
+                    f"(сейчас: {current_status or 'нет статуса'})"
+                ),
+            )
         vacancy["status"] = update.status
         vacancy["processed_at"] = now()
-        if update.status == STATUS_REJECTED:
-            vacancy["reason"] = REJECTED_REASON
+        if update.status in TERMINAL_STATUSES:
+            vacancy["reason"] = (
+                REJECTED_REASON if update.status == STATUS_REJECTED else OFFER_REASON
+            )
         else:
             vacancy["attempts"] = int(vacancy.get("attempts", 0)) + 1
         write_report(path, data)
@@ -187,7 +429,7 @@ async def update_status(update: StatusUpdate) -> dict[str, Any]:
             "ok": True,
             "report_name": path.name,
             "summary": data["summary"],
-            "attempts": vacancy["attempts"],
+            "attempts": vacancy.get("attempts", 0),
             "reason": str(vacancy.get("reason", "")),
             "processed_at": vacancy["processed_at"],
         }
