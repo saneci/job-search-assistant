@@ -116,6 +116,22 @@ def test_retry_statuses_reject_unrepeatable_value(tmp_path: Path) -> None:
         load_config(write_config(tmp_path, retry={"statuses": ["sent"]}))
 
 
+def test_logs_retention_days_default(tmp_path: Path) -> None:
+    """По умолчанию журналы живут 30 дней; отчёты не удаляются вовсе."""
+    config = load_config(write_config(tmp_path))
+
+    assert config.logs_retention_days == 30
+
+
+def test_logs_retention_days_from_config(tmp_path: Path) -> None:
+    assert load_config(write_config(tmp_path, logs_retention_days=3)).logs_retention_days == 3
+
+
+def test_logs_retention_days_must_be_positive(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="logs_retention_days"):
+        load_config(write_config(tmp_path, logs_retention_days=0))
+
+
 def test_exclude_companies(tmp_path: Path) -> None:
     config = load_config(write_config(tmp_path, exclude_companies=["Сбер", "Тинькофф"]))
 

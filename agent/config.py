@@ -202,7 +202,9 @@ class AppConfig:
     report_dir: Path
     cover_letter_max_length: int = 1500
     cover_letter_signature: str = ""
-    processed_retention_days: int = 7
+    # Сколько дней хранить журналы и скриншоты в logs. Дневные отчёты
+    # (data/report) не удаляются никогда: это история для аналитики.
+    logs_retention_days: int = 30
     resume: ResumeConfig = field(default_factory=ResumeConfig)
     retry: RetryConfig = field(default_factory=RetryConfig)
     report_notify: NotificationConfig = field(default_factory=NotificationConfig)
@@ -269,8 +271,8 @@ def load_config(config_path: Path | str | None = None) -> AppConfig:
             paths.get("report_dir") or paths.get("processed_dir") or "data/report",
             "paths.report_dir",
         ),
-        processed_retention_days=_positive_int(
-            raw.get("processed_retention_days", 7), "processed_retention_days"
+        logs_retention_days=_positive_int(
+            raw.get("logs_retention_days", 30), "logs_retention_days"
         ),
         cover_letter_max_length=_positive_int(
             raw.get("cover_letter_max_length", 1500), "cover_letter_max_length"

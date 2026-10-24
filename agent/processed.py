@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -116,23 +116,6 @@ class ProcessedStore:
         found.sort(key=lambda item: str(item.get("processed_at", "")), reverse=True)
         return found
 
-
-    def prune(self, days: int) -> list[str]:
-        """Удаляет файлы дат старше days дней. Возвращает имена удалённых файлов."""
-        if days <= 0 or not self.directory.is_dir():
-            return []
-        limit = self.today - timedelta(days=days)
-        removed: list[str] = []
-        for file in sorted(self.directory.glob("*.json")):
-            day = _file_date(file)
-            if day is None or day >= limit:
-                continue
-            try:
-                file.unlink()
-            except OSError:
-                continue
-            removed.append(file.name)
-        return removed
 
     def record(
         self,

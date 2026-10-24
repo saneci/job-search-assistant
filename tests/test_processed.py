@@ -217,39 +217,20 @@ def test_broken_file_does_not_break_load(tmp_path: Path) -> None:
     assert store.load() == 0
 
 
-
-def test_prune_removes_old_files_only(tmp_path: Path) -> None:
-    old = tmp_path / "2026-10-01.json"
-    fresh = tmp_path / "2026-10-20.json"
+def test_report_files_are_never_deleted(tmp_path: Path) -> None:
+    """Отчёты — история для аналитики: старые файлы дня остаются на месте."""
+    old = tmp_path / "2025-01-01.json"
     old.write_text("[]", encoding="utf-8")
-    fresh.write_text("[]", encoding="utf-8")
 
     store = ProcessedStore(tmp_path, today=date(2026, 10, 21))
+    store.load()
+    store.record(url="https://hh.ru/vacancy/1", title="Java", company="Ozon", status="sent")
 
-    assert store.prune(days=7) == ["2026-10-01.json"]
-    assert not old.exists()
-    assert fresh.exists()
-
-
-def test_prune_keeps_files_within_retention(tmp_path: Path) -> None:
-    (tmp_path / "2026-10-15.json").write_text("[]", encoding="utf-8")
-    store = ProcessedStore(tmp_path, today=date(2026, 10, 21))
-
-    assert store.prune(days=7) == []
-
-
-def test_prune_ignores_foreign_files(tmp_path: Path) -> None:
-    (tmp_path / "notes.json").write_text("[]", encoding="utf-8")
-    store = ProcessedStore(tmp_path, today=date(2026, 10, 21))
-
-    assert store.prune(days=7) == []
-    assert (tmp_path / "notes.json").exists()
-
-
-def test_prune_without_directory_is_noop(tmp_path: Path) -> None:
-    store = ProcessedStore(tmp_path / "missing", today=date(2026, 10, 21))
-
-    assert store.prune(days=7) == []
+    assert old.exists()
+    assert sorted(path.name for path in tmp_path.glob("*.json")) == [
+        "2025-01-01.json",
+        "2026-10-21.json",
+    ]
 
 
 def test_skipped_record_has_reason(tmp_path: Path) -> None:

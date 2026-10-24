@@ -1,12 +1,14 @@
-"""Тесты журнала запуска: префикс вакансии, метки времени в консоли."""
+"""Тесты журнала запуска: префикс вакансии, метки времени в консоли, чистка логов."""
 
 from __future__ import annotations
 
 import json
+import os
 import re
+from datetime import date, datetime
 from pathlib import Path
 
-from agent.logging_setup import RunLogger
+from agent.logging_setup import RunLogger, prune_logs
 
 
 def read_events(path: Path) -> list[dict]:
@@ -100,3 +102,42 @@ def test_empty_info_stays_empty(tmp_path: Path, capsys) -> None:
     logger.close()
 
     assert capsys.readouterr().out == "\n"
+
+
+def test_prune_logs_removes_old_files_only(tmp_path: Path) -> None:
+    """Журналы и скриншоты старше срока удаляются, свежие остаются."""
+    old_log = tmp_path / "2026-09-01.jsonl"
+    old_shot = tmp_path / "2026-09-01-101500-captcha.png"
+    fresh_log = tmp_path / "2026-10-20.jsonl"
+    for path in (old_log, old_shot, fresh_log):
+        path.write_text("x", encoding="utf-8")
+
+    removed = prune_logs(tmp_path, days=7, today=date(2026, 10, 21))
+
+    assert removed == ["2026-09-01.jsonl", "2026-09-01-101500-captcha.png"]
+    assert fresh_log.exists()
+
+
+def test_prune_logs_keeps_current_file(tmp_path: Path) -> None:
+    """Журнал текущего запуска открыт на запись — его не трогаем."""
+    current = tmp_path / "2026-09-01.jsonl"
+    current.write_text("x", encoding="utf-8")
+
+    removed = prune_logs(tmp_path, days=7, today=date(2026, 10, 21), keep=[current])
+
+    assert removed == []
+    assert current.exists()
+
+
+def test_prune_logs_uses_mtime_without_date_in_name(tmp_path: Path) -> None:
+    """Файл без даты в имени оцениваем по времени изменения."""
+    path = tmp_path / "old-run.jsonl"
+    path.write_text("x", encoding="utf-8")
+    stamp = datetime(2026, 1, 1, 10, 0).timestamp()
+    os.utime(path, (stamp, stamp))
+
+    assert prune_logs(tmp_path, days=7, today=date(2026, 10, 21)) == ["old-run.jsonl"]
+
+
+def test_prune_logs_without_directory_is_noop(tmp_path: Path) -> None:
+    assert prune_logs(tmp_path / "missing", days=7, today=date(2026, 10, 21)) == []

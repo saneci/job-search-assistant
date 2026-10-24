@@ -38,7 +38,7 @@ from .hh_vacancy import (
     response_state,
 )
 from .llm import LLMClient, LLMError
-from .logging_setup import RunLogger
+from .logging_setup import RunLogger, prune_logs
 from .models import (
     ALREADY_RESPONDED_REASON,
     REJECTED_REASON,
@@ -186,16 +186,29 @@ def run(
 
 
 def _open_report(config: AppConfig, logger: RunLogger) -> ProcessedStore:
-    """Готовит дневные отчёты: удаляет старые файлы и читает историю вакансий."""
-    processed = ProcessedStore(config.report_dir)
-    removed = processed.prune(config.processed_retention_days)
+    """Готовит отчёты: чистит старые журналы и читает историю вакансий.
+
+    Дневные отчёты (`data/report`) не удаляем никогда: это история вакансий
+    для аналитики. Срок хранения есть только у журналов и скриншотов.
+    """
+    removed = prune_logs(
+        config.logs_dir,
+        config.logs_retention_days,
+        keep=[logger.events_path],
+    )
     if removed:
         logger.event(
-            "processed_pruned",
+            "logs_pruned",
             count=len(removed),
-            days=config.processed_retention_days,
+            days=config.logs_retention_days,
             files=removed,
         )
+        logger.info(
+            f"Удалил старые журналы: {len(removed)} "
+            f"{_plural(len(removed), 'файл', 'файла', 'файлов')} "
+            f"старше {config.logs_retention_days} дней."
+        )
+    processed = ProcessedStore(config.report_dir)
     known = processed.load()
     logger.event("processed_loaded", count=known, path=str(processed.directory))
     if processed.dropped_copies:

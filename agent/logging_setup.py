@@ -3,9 +3,62 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+import re
+from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any, TextIO
+from typing import Any, Iterable, TextIO
+
+# Что чистим по сроку хранения: журналы событий и скриншоты проблемных состояний.
+LOG_FILE_PATTERNS = ("*.jsonl", "*.json", "*.png")
+
+# Дата в имени файла: 2026-10-21.jsonl, 2026-10-21-170519-captcha.png.
+_FILE_DATE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})")
+
+
+def prune_logs(
+    logs_dir: Path,
+    days: int,
+    today: date | None = None,
+    keep: Iterable[Path] = (),
+) -> list[str]:
+    """Удаляет журналы и скриншоты старше days дней. Возвращает имена файлов.
+
+    Дату файла берём из имени (``2026-10-21.jsonl``), а если её там нет —
+    из времени изменения файла. `keep` — файлы, которые трогать нельзя:
+    например, журнал текущего запуска (он ещё открыт на запись).
+    """
+    if days <= 0 or not logs_dir.is_dir():
+        return []
+    limit = (today or date.today()) - timedelta(days=days)
+    protected = {path.resolve() for path in keep}
+    removed: list[str] = []
+    for pattern in LOG_FILE_PATTERNS:
+        for path in sorted(logs_dir.glob(pattern)):
+            if not path.is_file() or path.resolve() in protected:
+                continue
+            file_day = _log_file_date(path)
+            if file_day is None or file_day >= limit:
+                continue
+            try:
+                path.unlink()
+            except OSError:
+                continue
+            removed.append(path.name)
+    return removed
+
+
+def _log_file_date(path: Path) -> date | None:
+    """Дата журнала из имени файла, иначе — из времени изменения."""
+    match = _FILE_DATE_RE.match(path.name)
+    if match:
+        try:
+            return datetime.strptime(match.group(1), "%Y-%m-%d").date()
+        except ValueError:
+            pass
+    try:
+        return datetime.fromtimestamp(path.stat().st_mtime).date()
+    except OSError:
+        return None
 
 
 class RunLogger:
