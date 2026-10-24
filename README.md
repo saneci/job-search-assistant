@@ -28,11 +28,14 @@ sh run.sh           # Git Bash / WSL / Linux / macOS
 
 1. `.env` из `.env.example`: нужен `AITUNNEL_API_KEY`, для писем на email — `SMTP_PASSWORD`
    (переменные описаны в самом `.env.example`).
-2. `config.yaml` — единственный источник параметров: поиск и фильтры, лимиты и паузы, LLM,
-   уведомления, пути. Каждый ключ описан комментарием рядом с ним.
-3. `data/profile.md` — профиль для LLM: стек, опыт, примеры писем, правила стиля.
+2. `config.local.yaml` из `config.local.example.yaml` — личные данные: запросы поиска, стоп-слова,
+   подпись с контактами, название резюме, адреса писем. Файл в `.gitignore`.
+3. `config.yaml` — поведение по разделам `search` → `pipeline` → `data` → `llm` → `browser` →
+   `notifications`. Каждый ключ описан комментарием рядом с ним; значения из `config.local.yaml`
+   его перекрывают.
+4. `data/profile.md` — профиль для LLM: стек, опыт, примеры писем, правила стиля.
 
-Что где править (`.env`, `config.yaml`, профиль, `SYSTEM_PROMPT.md`) — в
+Что где править (`.env`, `config.yaml`, `config.local.yaml`, профиль, `SYSTEM_PROMPT.md`) — в
 [docs/configuration.md](docs/configuration.md).
 
 ## Результат запуска

@@ -1,0 +1,38 @@
+# Шаблон личного конфига: скопируйте в config.local.yaml и заполните своими данными.
+# config.local.yaml лежит в .gitignore — в репозиторий он не попадает.
+# Значения отсюда переопределяют одноимённые ключи config.yaml.
+# Раскладка та же, что в config.yaml: search → pipeline → llm → notifications.
+
+search:
+  # Поисковые запросы: строка или список строк, поиск идёт по каждому отдельно.
+  queries:
+    - "Java developer"
+    - "Java backend developer"
+
+  # Стоп-слова в названии вакансии (без учёта регистра).
+  exclude_keywords:
+    - lead
+
+  # Компании, на вакансии которых не откликаемся (подстрока, без учёта регистра).
+  exclude_companies: []
+
+pipeline:
+  resume:
+    # Название резюме для подъёма в поиске. Пусто — подъём отключён.
+    name: "Java Developer"
+
+llm:
+  cover_letter:
+    # Подпись с контактами: дописывается в конец письма через пустую строку.
+    # Желательно одна-две строки: подпись считается в max_length.
+    signature: |
+      С уважением,
+      Имя Фамилия
+      Телеграм: @username
+      Почта: username@example.com
+
+notifications:
+  email:
+    # Адреса писем: отправитель и общий получатель отчёта и уведомлений о капче.
+    sender: "noreply@domain.com"
+    recipient: "username@domain.com"

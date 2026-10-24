@@ -9,6 +9,7 @@ from typing import Any
 
 import httpx
 import pytest
+from pydantic import SecretStr
 
 from agent.config import PROJECT_ROOT, DecisionConfig, GenerationConfig, LLMConfig
 from agent.llm import (
@@ -52,14 +53,13 @@ def make_config(
 ) -> LLMConfig:
     return LLMConfig(
         api_key="sk-aitunnel-test",
-        timeout=5.0,
+        base_url="https://api.aitunnel.ru/v1",
+        timeout_seconds=5.0,
         decision=DecisionConfig(
-            base_url="https://api.aitunnel.ru/v1",
             model="gpt-6-luna-decisions",
             threshold=threshold,
         ),
         generation=GenerationConfig(
-            base_url="https://api.aitunnel.ru/v1",
             model="gpt-6-luna-pro",
             max_tokens=1000,
             temperature=0.3,
@@ -137,7 +137,7 @@ def test_decide_accepts_noul_answer() -> None:
 
 
 def test_decide_without_api_key_raises() -> None:
-    config = dataclasses.replace(make_config(), api_key="")
+    config = make_config().model_copy(update={"api_key": SecretStr("")})
     client = LLMClient(config, transport=httpx.MockTransport(lambda request: httpx.Response(200)))
 
     with pytest.raises(LLMError, match="AITUNNEL_API_KEY"):
@@ -572,12 +572,14 @@ def test_decide_sends_criteria_from_config() -> None:
         )
 
     config = make_config()
-    config = dataclasses.replace(
-        config,
-        decision=dataclasses.replace(
-            config.decision,
-            criteria={"подходит": "МОЙ КРИТЕРИЙ", "не подходит": "МОЙ АНТИКРИТЕРИЙ"},
-        ),
+    config = config.model_copy(
+        update={
+            "decision": config.decision.model_copy(
+                update={
+                    "criteria": {"подходит": "МОЙ КРИТЕРИЙ", "не подходит": "МОЙ АНТИКРИТЕРИЙ"}
+                }
+            )
+        }
     )
 
     with LLMClient(config, transport=httpx.MockTransport(handler)) as client:

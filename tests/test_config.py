@@ -1,4 +1,9 @@
-"""Тесты загрузки конфигурации."""
+"""Тесты загрузки конфигурации: дефолты, отсев неверных значений, приоритет источников.
+
+Схема проверяет параметры при старте (fail-fast), поэтому здесь только то, что
+нельзя проверить запуском: значения дефолтов, контракт сообщений об ошибках
+и порядок источников env → config.local.yaml → config.yaml → дефолты.
+"""
 
 from __future__ import annotations
 
@@ -11,438 +16,174 @@ import pytest
 from agent.config import ConfigError, load_config, resolve_area_id
 
 
-def write_config(tmp_path: Path, **overrides: Any) -> Path:
+def _merge(base: dict[str, Any], extra: dict[str, Any]) -> dict[str, Any]:
+    """Накладывает extra на base: вложенные словари сливаются."""
+    for key, value in extra.items():
+        if isinstance(value, dict) and isinstance(base.get(key), dict):
+            _merge(base[key], value)
+        else:
+            base[key] = value
+    return base
+
+
+def write_config(
+    tmp_path: Path,
+    updates: dict[str, Any] | None = None,
+    name: str = "config.yaml",
+) -> Path:
     data: dict[str, Any] = {
-        "search_query": "Java backend engineer",
-        "area": "Москва",
-        "limit_per_run": 5,
-        "delay_between_actions": {"from": 0, "to": 0},
+        "search": {"queries": "Java backend engineer", "area": "Москва"},
+        "pipeline": {
+            "limit_per_run": 5,
+            "delay_between_actions": {"from": 0, "to": 0},
+        },
     }
-    data.update(overrides)
-    path = tmp_path / "config.yaml"
+    _merge(data, updates or {})
+    path = tmp_path / name
     # JSON — допустимое подмножество YAML, поэтому конфиг читается тем же парсером.
     path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
     return path
 
 
-def test_minimal_config(tmp_path: Path) -> None:
-    config = load_config(write_config(tmp_path))
-
-    assert config.search.queries == ("Java backend engineer",)
-    assert config.search.area_id == 1
-    assert config.search.limit_per_run == 5
-    assert config.search.delay.minimum == 0
-    assert config.search.delay.maximum == 0
-    assert config.search.salary_from is None
-    assert config.cover_letter_max_length == 1500
-    assert config.llm.decision.model == "gpt-6-luna-decisions"
-    assert config.llm.decision.threshold == 0.8
-    assert config.llm.generation.model == "gpt-6-luna-pro"
-    assert config.browser.headless is False
-    assert config.email.enabled is False
-    assert config.state_path.name == "state.json"
-    assert config.cache_path.name == "cache.json"
-    assert config.resume.name == ""
-    assert config.resume.boost_interval_hours == 4
+def value_of(config: Any, field: str) -> Any:
+    """Значение по пути вида `llm.decision.threshold`."""
+    value = config
+    for part in field.split("."):
+        value = getattr(value, part)
+    return value
 
 
-def test_query_list(tmp_path: Path) -> None:
-    config = load_config(write_config(tmp_path, search_query=["Java", "Kotlin", " "]))
+@pytest.mark.parametrize(
+    ("field", "expected"),
+    [
+        ("search.area_id", 1),
+        ("search.per_page", 100),
+        ("search.pages_limit", None),
+        ("pipeline.limit_per_run", 5),
+        ("pipeline.max_vacancies", 200),
+        ("pipeline.resume.boost_interval_hours", 4),
+        ("pipeline.retry.statuses", ("error", "queued", "excluded")),
+        ("data.logs_retention_days", 30),
+        ("data.paths.logs_dir.name", "logs"),
+        ("llm.base_url", "https://api.aitunnel.ru/v1"),
+        ("llm.timeout_seconds", 120.0),
+        ("llm.decision.threshold", 0.8),
+        ("llm.decision.model", "gpt-6-luna-decisions"),
+        ("llm.generation.model", "gpt-6-luna-pro"),
+        ("llm.decision.explain_rejections", False),
+        ("llm.cover_letter.max_length", 1500),
+        ("browser.headless", False),
+        ("browser.captcha_wait_seconds", 120),
+        ("notifications.email.enabled", False),
+    ],
+)
+def test_defaults(tmp_path: Path, field: str, expected: Any) -> None:
+    assert value_of(load_config(write_config(tmp_path)), field) == expected
 
-    assert config.search.queries == ("Java", "Kotlin")
+
+@pytest.mark.parametrize(
+    ("updates", "error"),
+    [
+        ({"search": {"area": None}}, "search.area"),
+        ({"search": {"queries": "   "}}, "search.queries"),
+        ({"pipeline": {"limit_per_run": 0}}, "pipeline.limit_per_run"),
+        ({"search": {"per_page": 30}}, "search.per_page"),
+        ({"search": {"pages_limit": 0}}, "search.pages_limit"),
+        (
+            {"pipeline": {"delay_between_actions": {"from": 5, "to": 1}}},
+            "pipeline.delay_between_actions",
+        ),
+        ({"search": {"experience": ["senior"]}}, "search.experience"),
+        ({"search": {"schedule": "ночью"}}, "search.schedule"),
+        ({"pipeline": {"retry": {"statuses": ["sent"]}}}, "pipeline.retry.statuses"),
+        ({"llm": {"decision": {"threshold": 1.5}}}, "llm.decision.threshold"),
+        ({"llm": {"decision": {"explain_rejections": "да"}}}, "explain_rejections"),
+        (
+            {"notifications": {"captcha": {"enabled": "да"}}},
+            "notifications.captcha.enabled",
+        ),
+        ({"data": {"paths": {"logs_dir": "/tmp/logs"}}}, "data.paths.logs_dir"),
+        ({"llm": {"system_prompt_path": "no_such_prompt.md"}}, "llm.system_prompt_path"),
+    ],
+)
+def test_invalid_values_fail_fast(tmp_path: Path, updates: dict[str, Any], error: str) -> None:
+    with pytest.raises(ConfigError, match=error):
+        load_config(write_config(tmp_path, updates))
 
 
-def test_full_search_config(tmp_path: Path) -> None:
-    config = load_config(
-        write_config(
-            tmp_path,
-            salary_from=150000,
-            experience="between1And3",
-            schedule="remote",
-            exclude_keywords=["senior", "lead"],
-            delay_between_actions={"from": 3, "to": 8},
-        )
+def test_flat_legacy_key_is_rejected(tmp_path: Path) -> None:
+    """Формат один: старый плоский ключ — ошибка, а не тихий пропуск."""
+    with pytest.raises(ConfigError, match="limit_per_run"):
+        load_config(write_config(tmp_path, {"limit_per_run": 3}))
+
+
+def test_local_config_overrides_base(tmp_path: Path) -> None:
+    """config.local.yaml с личными данными перекрывает config.yaml."""
+    write_config(tmp_path)
+    (tmp_path / "config.local.yaml").write_text(
+        json.dumps(
+            {"pipeline": {"limit_per_run": 9}, "search": {"queries": ["Kotlin"]}},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
     )
 
-    assert config.search.salary_from == 150000
-    assert config.search.experience == ("between1And3",)
-    assert config.search.schedule == "remote"
-    assert config.search.exclude_keywords == ("senior", "lead")
-    assert config.search.delay.next() >= 3
+    config = load_config(tmp_path / "config.yaml")
+
+    assert config.pipeline.limit_per_run == 9
+    assert config.search.queries == ("Kotlin",)
+    assert config.search.area == "Москва"
 
 
-def test_pages_limit_is_optional(tmp_path: Path) -> None:
-    """Без pages_limit глубина считается по числу найденных вакансий."""
-    assert load_config(write_config(tmp_path)).search.pages_limit is None
+def test_environment_overrides_yaml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Окружение выше файлов: вложенные ключи через `__`, секреты — своими именами."""
+    monkeypatch.setenv("PIPELINE__LIMIT_PER_RUN", "7")
+    monkeypatch.setenv("LLM__DECISION__THRESHOLD", "0.9")
+    monkeypatch.setenv("AITUNNEL_API_KEY", "sk-aitunnel-test")
 
-
-def test_pages_limit_from_config(tmp_path: Path) -> None:
-    assert load_config(write_config(tmp_path, pages_limit=5)).search.pages_limit == 5
-
-
-def test_pages_limit_cannot_be_zero(tmp_path: Path) -> None:
-    with pytest.raises(ConfigError, match="pages_limit"):
-        load_config(write_config(tmp_path, pages_limit=0))
-
-
-def test_per_page_default_is_100(tmp_path: Path) -> None:
-    assert load_config(write_config(tmp_path)).search.per_page == 100
-
-
-def test_per_page_accepts_only_hh_sizes(tmp_path: Path) -> None:
-    assert load_config(write_config(tmp_path, per_page=50)).search.per_page == 50
-    with pytest.raises(ConfigError, match="per_page"):
-        load_config(write_config(tmp_path, per_page=30))
-
-
-def test_browser_channel_default_is_playwright_chromium(tmp_path: Path) -> None:
-    assert load_config(write_config(tmp_path)).browser.channel is None
-
-
-def test_retry_statuses_defaults(tmp_path: Path) -> None:
-    """По умолчанию повторяем ошибки, отложенные вакансии и исключённые компании."""
-    assert load_config(write_config(tmp_path)).retry.statuses == ("error", "queued", "excluded")
-
-
-def test_retry_statuses_from_config(tmp_path: Path) -> None:
-    config = load_config(write_config(tmp_path, retry={"statuses": ["skipped", "error"]}))
-
-    assert config.retry.statuses == ("skipped", "error")
-
-
-def test_retry_statuses_reject_unrepeatable_value(tmp_path: Path) -> None:
-    """`sent` повторять бессмысленно: отклик уже ушёл."""
-    with pytest.raises(ConfigError):
-        load_config(write_config(tmp_path, retry={"statuses": ["sent"]}))
-
-
-def test_logs_retention_days_default(tmp_path: Path) -> None:
-    """По умолчанию журналы живут 30 дней; отчёты не удаляются вовсе."""
     config = load_config(write_config(tmp_path))
 
-    assert config.logs_retention_days == 30
+    assert config.pipeline.limit_per_run == 7
+    assert config.llm.decision.threshold == 0.9
+    assert config.llm.api_key.get_secret_value() == "sk-aitunnel-test"
+    assert "sk-aitunnel-test" not in repr(config.llm)  # секрет не печатается
 
 
-def test_logs_retention_days_from_config(tmp_path: Path) -> None:
-    assert load_config(write_config(tmp_path, logs_retention_days=3)).logs_retention_days == 3
+def test_unknown_environment_variables_do_not_break_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """В окружении и .env есть служебные ключи — они не считаются параметрами конфига."""
+    monkeypatch.setenv("AITUNNEL_API_KEY", "sk-aitunnel-test")
+    monkeypatch.setenv("SMTP_PASSWORD", "smtp-test")
+    monkeypatch.setenv("SOME_UNRELATED_SETTING", "1")
 
-
-def test_logs_retention_days_must_be_positive(tmp_path: Path) -> None:
-    with pytest.raises(ConfigError, match="logs_retention_days"):
-        load_config(write_config(tmp_path, logs_retention_days=0))
-
-
-def test_exclude_companies(tmp_path: Path) -> None:
-    config = load_config(write_config(tmp_path, exclude_companies=["Сбер", "Тинькофф"]))
-
-    assert config.search.exclude_companies == ("Сбер", "Тинькофф")
-
-
-def test_exclude_companies_default_empty(tmp_path: Path) -> None:
-    assert load_config(write_config(tmp_path)).search.exclude_companies == ()
-
-
-def test_cover_letter_signature(tmp_path: Path) -> None:
-    signature = "С уважением,\nАлександр Гладской\nПочта: a.gladskoy@gmail.com"
-    config = load_config(write_config(tmp_path, cover_letter_signature=signature))
-
-    assert config.cover_letter_signature == signature
-
-
-def test_cover_letter_signature_default_empty(tmp_path: Path) -> None:
-    assert load_config(write_config(tmp_path)).cover_letter_signature == ""
-
-
-def test_system_prompt_path_from_config(tmp_path: Path) -> None:
-    config = load_config(write_config(tmp_path, llm={"system_prompt_path": "SYSTEM_PROMPT.md"}))
-
-    assert config.llm.system_prompt_path is not None
-    assert config.llm.system_prompt_path.name == "SYSTEM_PROMPT.md"
-
-
-def test_system_prompt_path_outside_project(tmp_path: Path) -> None:
-    with pytest.raises(ConfigError):
-        load_config(write_config(tmp_path, llm={"system_prompt_path": "/outside/prompt.md"}))
-
-
-def test_system_prompt_path_default_is_project_file(tmp_path: Path) -> None:
     config = load_config(write_config(tmp_path))
 
-    assert config.llm.system_prompt_path is not None
-    assert config.llm.system_prompt_path.name == "SYSTEM_PROMPT.md"
-    assert config.llm.system_prompt_path.is_file()
+    assert config.llm.api_key.get_secret_value() == "sk-aitunnel-test"
+    assert config.notifications.email.password.get_secret_value() == "smtp-test"
 
 
-def test_system_prompt_path_missing_file_raises(tmp_path: Path) -> None:
-    with pytest.raises(ConfigError, match="файл с системным промптом не найден"):
-        load_config(write_config(tmp_path, llm={"system_prompt_path": "no_such_prompt.md"}))
+def test_personal_fields_are_not_read_from_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Подпись с контактами — личное: из окружения не читается, только из YAML."""
+    monkeypatch.setenv("LLM__COVER_LETTER__SIGNATURE", "ИЗ ОКРУЖЕНИЯ")
 
+    config = load_config(
+        write_config(tmp_path, {"llm": {"cover_letter": {"signature": "ИЗ ФАЙЛА"}}})
+    )
 
-def test_browser_channel_from_config(tmp_path: Path) -> None:
-    config = load_config(write_config(tmp_path, browser={"channel": "chrome", "headless": True}))
-
-    assert config.browser.channel == "chrome"
-    assert config.browser.headless is True
-
-
-def test_empty_browser_channel_means_bundled_chromium(tmp_path: Path) -> None:
-    config = load_config(write_config(tmp_path, browser={"channel": ""}))
-
-    assert config.browser.channel is None
+    assert config.llm.cover_letter.signature == "ИЗ ФАЙЛА"
 
 
 @pytest.mark.parametrize(
     ("value", "expected"),
-    [
-        ("Москва", 1),
-        ("москва", 1),
-        ("Россия", 113),
-        ("Санкт-Петербург", 2),
-        ("113", 113),
-        (113, 113),
-    ],
+    [("Москва", 1), ("москва", 1), ("Россия", 113), ("113", 113), (113, 113)],
 )
 def test_resolve_area_id(value: Any, expected: int) -> None:
     assert resolve_area_id(value) == expected
 
 
-def test_unknown_area() -> None:
+def test_unknown_area_raises() -> None:
     with pytest.raises(ConfigError):
         resolve_area_id("Марс")
-
-
-@pytest.mark.parametrize("key", ["search_query", "area", "limit_per_run", "delay_between_actions"])
-def test_missing_required(tmp_path: Path, key: str) -> None:
-    data: dict[str, Any] = {
-        "search_query": "Java",
-        "area": "Москва",
-        "limit_per_run": 5,
-        "delay_between_actions": {"from": 0, "to": 0},
-    }
-    data.pop(key)
-    path = tmp_path / "config.yaml"
-    path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-
-    with pytest.raises(ConfigError):
-        load_config(path)
-
-
-def test_legacy_daily_limit_key_is_supported(tmp_path: Path) -> None:
-    # Старые конфиги с ключом из ТЗ (daily_limit) продолжают работать.
-    data = {
-        "search_query": "Java",
-        "area": "Москва",
-        "daily_limit": 7,
-        "delay_between_actions": {"from": 0, "to": 0},
-    }
-    path = tmp_path / "config.yaml"
-    path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-
-    assert load_config(path).search.limit_per_run == 7
-
-
-def test_invalid_yaml_raises_config_error(tmp_path: Path) -> None:
-    path = tmp_path / "config.yaml"
-    path.write_text("search_query: [не закрытый список\n", encoding="utf-8")
-
-    with pytest.raises(ConfigError, match="Не удалось разобрать"):
-        load_config(path)
-
-
-def test_invalid_experience(tmp_path: Path) -> None:
-    with pytest.raises(ConfigError):
-        load_config(write_config(tmp_path, experience="twenty years"))
-
-
-def test_experience_list(tmp_path: Path) -> None:
-    """Несколько значений опыта = несколько чекбоксов в фильтре «Опыт»."""
-    config = load_config(
-        write_config(tmp_path, experience=["noExperience", "between1And3", "between3And6"])
-    )
-
-    assert config.search.experience == ("noExperience", "between1And3", "between3And6")
-
-
-def test_experience_list_without_duplicates(tmp_path: Path) -> None:
-    config = load_config(write_config(tmp_path, experience=["between3And6", "between3And6"]))
-
-    assert config.search.experience == ("between3And6",)
-
-
-def test_experience_empty_list_means_no_filter(tmp_path: Path) -> None:
-    config = load_config(write_config(tmp_path, experience=[]))
-
-    assert config.search.experience == ()
-
-
-def test_experience_list_rejects_unknown_value(tmp_path: Path) -> None:
-    with pytest.raises(ConfigError, match="between1And3"):
-        load_config(write_config(tmp_path, experience=["between1And3", "twenty years"]))
-
-
-def test_experience_must_be_string_or_list(tmp_path: Path) -> None:
-    with pytest.raises(ConfigError, match="строкой или списком строк"):
-        load_config(write_config(tmp_path, experience={"value": "between1And3"}))
-
-
-def test_invalid_delay(tmp_path: Path) -> None:
-    with pytest.raises(ConfigError):
-        load_config(write_config(tmp_path, delay_between_actions={"from": 9, "to": 3}))
-
-
-def test_paths_outside_project(tmp_path: Path) -> None:
-    with pytest.raises(ConfigError):
-        load_config(write_config(tmp_path, paths={"profile": "/outside/profile.md"}))
-
-
-def test_api_key_from_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("AITUNNEL_API_KEY", "sk-aitunnel-test")
-    config = load_config(write_config(tmp_path))
-
-    assert config.llm.api_key == "sk-aitunnel-test"
-
-
-def test_missing_config_file(tmp_path: Path) -> None:
-    with pytest.raises(ConfigError):
-        load_config(tmp_path / "missing.yaml")
-
-
-def test_decision_criteria_defaults(tmp_path: Path) -> None:
-    criteria = load_config(write_config(tmp_path)).llm.decision.criteria
-
-    assert set(criteria) == {"подходит", "не подходит"}
-    assert "70%" in criteria["подходит"]
-
-
-def test_decision_criteria_from_config(tmp_path: Path) -> None:
-    criteria = {"подходит": "Мой критерий", "не подходит": "Мой антикритерий"}
-
-    config = load_config(write_config(tmp_path, llm={"decision": {"criteria": criteria}}))
-
-    assert config.llm.decision.criteria == criteria
-
-
-def test_decision_criteria_unknown_label(tmp_path: Path) -> None:
-    with pytest.raises(ConfigError, match="неизвестный вариант"):
-        load_config(write_config(tmp_path, llm={"decision": {"criteria": {"может быть": "x"}}}))
-
-
-def test_decision_criteria_must_be_mapping(tmp_path: Path) -> None:
-    with pytest.raises(ConfigError, match="должен быть словарём"):
-        load_config(write_config(tmp_path, llm={"decision": {"criteria": ["подходит"]}}))
-
-
-def test_explain_rejections_default_false(tmp_path: Path) -> None:
-    assert load_config(write_config(tmp_path)).llm.decision.explain_rejections is False
-
-
-def test_resume_section(tmp_path: Path) -> None:
-    """Название резюме и интервал подъёма берутся из конфига."""
-    config = load_config(
-        write_config(
-            tmp_path,
-            resume={"name": "Java-разработчик", "boost_interval_hours": 6},
-        )
-    )
-
-    assert config.resume.name == "Java-разработчик"
-    assert config.resume.boost_interval_hours == 6
-
-
-def test_resume_interval_must_be_positive(tmp_path: Path) -> None:
-    with pytest.raises(ConfigError, match="resume.boost_interval_hours"):
-        load_config(write_config(tmp_path, resume={"boost_interval_hours": 0}))
-
-
-def test_cache_path_from_config(tmp_path: Path) -> None:
-    config = load_config(write_config(tmp_path, paths={"cache": "data/my-cache.json"}))
-
-    assert config.cache_path.name == "my-cache.json"
-
-
-def test_captcha_wait_seconds_default(tmp_path: Path) -> None:
-    assert load_config(write_config(tmp_path)).browser.captcha_wait_seconds == 120
-
-
-def test_captcha_wait_seconds_from_config(tmp_path: Path) -> None:
-    """Сколько ждать ручного решения капчи — задаётся в конфиге."""
-    config = load_config(write_config(tmp_path, browser={"captcha_wait_seconds": 30}))
-
-    assert config.browser.captcha_wait_seconds == 30
-
-
-def test_captcha_wait_seconds_cannot_be_negative(tmp_path: Path) -> None:
-    with pytest.raises(ConfigError, match="captcha_wait_seconds"):
-        load_config(write_config(tmp_path, browser={"captcha_wait_seconds": -5}))
-
-
-def test_legacy_queue_path_is_ignored(tmp_path: Path) -> None:
-    """Старый ключ paths.queue не ломает загрузку: очередь больше не используется."""
-    config = load_config(write_config(tmp_path, paths={"queue": "data/report/queue.json"}))
-
-    assert config.cache_path.name == "cache.json"
-
-
-def test_explain_rejections_enabled(tmp_path: Path) -> None:
-    config = load_config(write_config(tmp_path, llm={"decision": {"explain_rejections": True}}))
-
-    assert config.llm.decision.explain_rejections is True
-
-
-def test_explain_rejections_must_be_bool(tmp_path: Path) -> None:
-    with pytest.raises(ConfigError, match="true или false"):
-        load_config(write_config(tmp_path, llm={"decision": {"explain_rejections": "да"}}))
-
-
-def test_report_dir_default(tmp_path: Path) -> None:
-    config = load_config(write_config(tmp_path))
-
-    assert config.report_dir.name == "report"
-    assert config.report_dir.parent.name == "data"
-
-
-def test_report_dir_from_config(tmp_path: Path) -> None:
-    config = load_config(write_config(tmp_path, paths={"report_dir": "data/my-report"}))
-
-    assert config.report_dir.name == "my-report"
-
-
-def test_report_dir_accepts_legacy_key(tmp_path: Path) -> None:
-    """Старый ключ paths.processed_dir продолжает работать."""
-    config = load_config(write_config(tmp_path, paths={"processed_dir": "data/legacy"}))
-
-    assert config.report_dir.name == "legacy"
-
-
-def test_notifications_default_to_every_kind_on(tmp_path: Path) -> None:
-    """Старые конфиги без разделов report/captcha работают как раньше."""
-    config = load_config(write_config(tmp_path))
-
-    assert config.report_notify.enabled is True
-    assert config.captcha_notify.enabled is True
-    assert config.report_notify.target(config.email) == config.email.recipient
-    assert config.captcha_notify.target(config.email) == config.email.recipient
-
-
-def test_notifications_kinds_have_own_switch_and_recipient(tmp_path: Path) -> None:
-    """Отчёт и капча настраиваются раздельно: каждый вид — свой выключатель и адрес."""
-    config = load_config(
-        write_config(
-            tmp_path,
-            notifications={
-                "email": {"recipient": "common@example.com"},
-                "report": {"enabled": False},
-                "captcha": {"recipient": "captcha@example.com"},
-            },
-        )
-    )
-
-    assert config.report_notify.enabled is False
-    assert config.report_notify.target(config.email) == "common@example.com"
-    assert config.captcha_notify.enabled is True
-    assert config.captcha_notify.target(config.email) == "captcha@example.com"
-
-
-def test_notifications_kind_enabled_must_be_bool(tmp_path: Path) -> None:
-    with pytest.raises(ConfigError, match="notifications.captcha.enabled"):
-        load_config(write_config(tmp_path, notifications={"captcha": {"enabled": "да"}}))

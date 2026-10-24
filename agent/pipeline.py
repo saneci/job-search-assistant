@@ -128,9 +128,9 @@ def run(
     statuses = _retry_statuses(config, retry) if retry else ()
     processed = _open_report(config, logger)
 
-    profile = load_profile(config.profile_path)
+    profile = load_profile(config.data.paths.profile)
 
-    with BrowserSession(config.browser, config.state_path, logger) as session:
+    with BrowserSession(config.browser, config.data.paths.session_state, logger) as session:
         session.ensure_logged_in()
         page = session.new_page()
         try:
@@ -192,23 +192,23 @@ def _open_report(config: AppConfig, logger: RunLogger) -> ProcessedStore:
     для аналитики. Срок хранения есть только у журналов и скриншотов.
     """
     removed = prune_logs(
-        config.logs_dir,
-        config.logs_retention_days,
+        config.data.paths.logs_dir,
+        config.data.logs_retention_days,
         keep=[logger.events_path],
     )
     if removed:
         logger.event(
             "logs_pruned",
             count=len(removed),
-            days=config.logs_retention_days,
+            days=config.data.logs_retention_days,
             files=removed,
         )
         logger.info(
             f"Удалил старые журналы: {len(removed)} "
             f"{_plural(len(removed), 'файл', 'файла', 'файлов')} "
-            f"старше {config.logs_retention_days} дней."
+            f"старше {config.data.logs_retention_days} дней."
         )
-    processed = ProcessedStore(config.report_dir)
+    processed = ProcessedStore(config.data.paths.report_dir)
     known = processed.load()
     logger.event("processed_loaded", count=known, path=str(processed.directory))
     if processed.dropped_copies:
@@ -225,7 +225,7 @@ def _open_report(config: AppConfig, logger: RunLogger) -> ProcessedStore:
 def _retry_statuses(config: AppConfig, retry: str) -> tuple[str, ...]:
     """Статусы для повтора: набор из retry.statuses или явно указанный в CLI."""
     if retry == RETRY_ALL:
-        return config.retry.statuses
+        return config.pipeline.retry.statuses
     return (retry,)
 
 
@@ -243,7 +243,7 @@ def _process_vacancies(
     reviewed = 0
 
     for number, query in enumerate(search.queries):
-        if _should_stop(search.limit_per_run, stats, logger):
+        if _should_stop(config.pipeline.limit_per_run, stats, logger):
             break
         _check_new_day(logger, processed)
         if number:
@@ -256,7 +256,7 @@ def _process_vacancies(
         pages = search.pages_limit
         page_index = 0
         while pages is None or page_index < pages:
-            if _should_stop(search.limit_per_run, stats, logger):
+            if _should_stop(config.pipeline.limit_per_run, stats, logger):
                 break
 
             try:
@@ -333,7 +333,7 @@ def _process_vacancies(
                 )
 
             for card in cards:
-                if _should_stop(search.limit_per_run, stats, logger):
+                if _should_stop(config.pipeline.limit_per_run, stats, logger):
                     break
                 _check_new_day(logger, processed)
                 keys = vacancy_keys(card.title, card.company, card.url)
@@ -365,9 +365,9 @@ def _process_vacancies(
                     continue
 
                 reviewed += 1
-                if reviewed > search.max_vacancies:
+                if reviewed > config.pipeline.max_vacancies:
                     stats.stop_reason = (
-                        f"просмотрено максимум вакансий за запуск ({search.max_vacancies})"
+                        f"просмотрено максимум вакансий за запуск ({config.pipeline.max_vacancies})"
                     )
                     logger.info(stats.stop_reason)
                     break
@@ -409,12 +409,12 @@ def _retry_vacancies(
         f"({', '.join(statuses)}), поиск не используется."
     )
     for record in records:
-        if _should_stop(config.search.limit_per_run, stats, logger):
+        if _should_stop(config.pipeline.limit_per_run, stats, logger):
             break
         _check_new_day(logger, processed)
-        if stats.reviewed >= config.search.max_vacancies:
+        if stats.reviewed >= config.pipeline.max_vacancies:
             stats.stop_reason = (
-                f"просмотрено максимум вакансий за запуск ({config.search.max_vacancies})"
+                f"просмотрено максимум вакансий за запуск ({config.pipeline.max_vacancies})"
             )
             logger.info(stats.stop_reason)
             break
@@ -603,8 +603,8 @@ def _process_vacancy(
         _queue(stats, logger, details, details.blocker, "признак на странице вакансии")
         return
 
-    if stats.sent_count >= config.search.limit_per_run:
-        stats.stop_reason = f"достигнут лимит откликов за запуск ({config.search.limit_per_run})"
+    if stats.sent_count >= config.pipeline.limit_per_run:
+        stats.stop_reason = f"достигнут лимит откликов за запуск ({config.pipeline.limit_per_run})"
         log.info(f"лимит откликов достигнут ({stats.sent_count}), вакансия не обрабатывается")
         return
 
@@ -674,8 +674,8 @@ def _process_vacancy(
         generation = llm.generate(
             profile,
             details,
-            config.cover_letter_max_length,
-            signature=config.cover_letter_signature,
+            config.llm.cover_letter.max_length,
+            signature=config.llm.cover_letter.signature,
         )
     except LLMError as exc:
         _record_error(stats, logger, page, config, details, exc)
@@ -733,7 +733,7 @@ def _process_vacancy(
                 probability=decision.probability,
             )
         )
-        log.info(f"отклик отправлен (всего {stats.sent_count} из {config.search.limit_per_run})")
+        log.info(f"отклик отправлен (всего {stats.sent_count} из {config.pipeline.limit_per_run})")
         _pause(config, logger, "после отправки отклика")
         return
 
@@ -898,8 +898,8 @@ def _notify_captcha(
         title, company = "", ""
     try:
         sent, message = notify_captcha(
-            config.email,
-            config.captcha_notify,
+            config.notifications.email,
+            config.notifications.captcha,
             title=title,
             company=company,
             url=url,
@@ -922,7 +922,7 @@ def _save_problem_screenshot(
 
     Диагностика не должна ронять запуск: любые сбои здесь только логируются.
     """
-    path = config.logs_dir / f"{logger.run_id}-{kind}.png"
+    path = config.data.paths.logs_dir / f"{logger.run_id}-{kind}.png"
     try:
         saved = save_screenshot(page, path)
         if saved:
@@ -947,21 +947,21 @@ def _record_error(
     log.event("vacancy_error", url=card.url, title=card.title, error=message)
     log.info(f"ошибка: {message}")
 
-    screenshot = config.logs_dir / f"{logger.run_id}-error-{len(stats.errors)}.png"
+    screenshot = config.data.paths.logs_dir / f"{logger.run_id}-error-{len(stats.errors)}.png"
     if save_screenshot(page, screenshot):
         logger.event("screenshot", url=card.url, path=str(screenshot))
 
 
 def _send_report_email(config: AppConfig, report: str, stats: RunStats) -> tuple[bool, str]:
     """Письмо с отчётом: свой раздел notifications.report (вкл/адрес)."""
-    settings = config.report_notify
+    settings = config.notifications.report
     if not settings.enabled:
         return False, "письма с отчётом отключены (notifications.report.enabled: false)"
     return send_email(
-        config.email,
+        config.notifications.email,
         f"Отчёт за {stats.started_at:%Y-%m-%d %H:%M}",
         report,
-        recipient=settings.target(config.email),
+        recipient=settings.target(config.notifications.email),
     )
 
 
@@ -969,11 +969,11 @@ def _final_message(stats: RunStats, config: AppConfig) -> str:
     """Итоговое сообщение о завершении работы."""
     message = (
         f"Работа приложения завершена, отправлено откликов: "
-        f"{len(stats.sent)} из {config.search.limit_per_run}."
+        f"{len(stats.sent)} из {config.pipeline.limit_per_run}."
     )
     if stats.stop_reason:
         message += f" Причина остановки: {stats.stop_reason}."
-    message += f" Сессия сохранена в {config.state_path}."
+    message += f" Сессия сохранена в {config.data.paths.session_state}."
     return message
 
 
@@ -1110,7 +1110,7 @@ def _should_stop(limit_per_run: int, stats: RunStats, logger: RunLogger) -> bool
 
 
 def _pause(config: AppConfig, logger: RunLogger, reason: str) -> None:
-    seconds = config.search.delay.next()
+    seconds = config.pipeline.delay_between_actions.next()
     if seconds <= 0:
         return
     logger.event("pause", seconds=round(seconds, 2), reason=reason)

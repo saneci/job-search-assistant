@@ -65,7 +65,7 @@ class LLMClient:
     def __init__(self, config: LLMConfig, transport: httpx.BaseTransport | None = None) -> None:
         self.config = config
         self._system_prompt = load_system_prompt(config.system_prompt_path)
-        self._client = httpx.Client(transport=transport, timeout=config.timeout)
+        self._client = httpx.Client(transport=transport, timeout=config.timeout_seconds)
 
     def close(self) -> None:
         self._client.close()
@@ -100,7 +100,7 @@ class LLMClient:
                 }
             },
         }
-        url = _endpoint(self.config.decision.base_url, "decisions")
+        url = _endpoint(self.config.base_url, "decisions")
         data = self._post(url, payload, "Decisions API")
         probabilities = extract_probabilities(data)
         probability = probability_for(probabilities, FIT_LABEL)
@@ -187,16 +187,17 @@ class LLMClient:
         }
         if self.config.generation.json_mode:
             payload["response_format"] = {"type": "json_object"}
-        url = _endpoint(self.config.generation.base_url, "chat/completions")
+        url = _endpoint(self.config.base_url, "chat/completions")
         data = self._post(url, payload, "Chat API")
         return _chat_content(data)
 
     def _post(self, url: str, payload: Mapping[str, Any], api_name: str) -> dict[str, Any]:
-        if not self.config.api_key:
+        api_key = self.config.api_key.get_secret_value()
+        if not api_key:
             raise LLMError("Не задан API-ключ LLM: заполните AITUNNEL_API_KEY в .env")
 
         headers = {
-            "Authorization": f"Bearer {self.config.api_key}",
+            "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
         attempts = 3
@@ -459,8 +460,8 @@ def _capitalized(text: str) -> str:
 def add_signature(text: str, signature: str, limit: int = 1500) -> str:
     """Добавляет подпись с контактами через пустую строку, не превышая limit.
 
-    Подпись задаётся в config.yaml (cover_letter_signature). Если модель уже
-    добавила контакты в письмо, повторно они не дублируются.
+    Подпись задаётся в config.local.yaml (llm.cover_letter.signature). Если
+    модель уже добавила контакты в письмо, повторно они не дублируются.
     """
     text = (text or "").strip()
     signature = (signature or "").strip()

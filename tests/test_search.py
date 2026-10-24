@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from urllib.parse import parse_qs, urlparse
 
-from agent.config import DelayRange, SearchConfig
+from agent.config import SearchConfig
 from agent.hh_search import (
     HH_MAX_PAGES,
     SCROLL_EMPTY_SECONDS,
@@ -25,17 +25,13 @@ def make_search(**overrides: object) -> SearchConfig:
     base: dict[str, object] = {
         "queries": ("Java backend engineer",),
         "area": "Москва",
-        "area_id": 1,
         "salary_from": None,
         "experience": (),
         "schedule": None,
         "exclude_keywords": (),
         "exclude_companies": (),
-        "limit_per_run": 20,
-        "delay": DelayRange(3, 8),
         "pages_limit": 5,
         "per_page": 50,
-        "max_vacancies": 200,
     }
     base.update(overrides)
     return SearchConfig(**base)  # type: ignore[arg-type]
@@ -59,7 +55,7 @@ def test_build_search_url_minimal() -> None:
 
 def test_build_search_url_with_filters() -> None:
     search = make_search(
-        area_id=113,
+        area="Россия",
         salary_from=150000,
         experience=("between1And3",),
         schedule="remote",

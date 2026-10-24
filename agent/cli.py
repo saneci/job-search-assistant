@@ -53,7 +53,7 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="СТАТУС",
         help=(
             "повторить вакансии из дневных отчётов по прямой ссылке, без поиска; "
-            "без значения — статусы из retry.statuses, со значением — только он"
+            "без значения — статусы из pipeline.retry.statuses, со значением — только он"
         ),
     )
     parser.add_argument(
@@ -73,7 +73,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Ошибка конфигурации: {exc}", file=sys.stderr)
         return 2
 
-    with RunLogger(config.logs_dir) as logger:
+    with RunLogger(config.data.paths.logs_dir) as logger:
         if args.install_browser:
             return _install_browser(config)
 
@@ -82,7 +82,9 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.login:
             try:
-                with BrowserSession(config.browser, config.state_path, logger) as session:
+                with BrowserSession(
+                    config.browser, config.data.paths.session_state, logger
+                ) as session:
                     session.login_manually()
             except BrowserError as exc:
                 logger.event("login_error", error=str(exc))
@@ -90,7 +92,7 @@ def main(argv: list[str] | None = None) -> int:
                 return 1
             return 0
 
-        if not config.llm.api_key:
+        if not config.llm.api_key.get_secret_value():
             print(
                 "Не задан AITUNNEL_API_KEY. Скопируйте .env.example в .env и укажите ключ.",
                 file=sys.stderr,
@@ -113,7 +115,11 @@ def main(argv: list[str] | None = None) -> int:
 
 def _notify_test(config: AppConfig, logger: RunLogger) -> int:
     """Проверяет канал уведомлений: письмо на каждый включённый вид писем."""
-    targets = notify_test_targets(config.email, config.report_notify, config.captcha_notify)
+    targets = notify_test_targets(
+        config.notifications.email,
+        config.notifications.report,
+        config.notifications.captcha,
+    )
     if not targets:
         message = (
             "уведомления отключены: notifications.report.enabled и "
@@ -125,7 +131,7 @@ def _notify_test(config: AppConfig, logger: RunLogger) -> int:
 
     failures: list[str] = []
     for address in targets:
-        sent, message = send_test_notification(config.email, address)
+        sent, message = send_test_notification(config.notifications.email, address)
         logger.event("notify_test", sent=sent, message=message)
         if not sent and message not in failures:
             failures.append(message)

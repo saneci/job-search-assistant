@@ -7,7 +7,9 @@
 Транспорт — `notifications.email`:
 
 - `enabled: true` включает канал (без него писем не будет вообще);
-- `smtp_host`, `smtp_port`, `use_ssl`, `sender`, `recipient` — реквизиты сервера и адреса;
+- `smtp_host`, `smtp_port`, `use_ssl` — реквизиты сервера (в `config.yaml`);
+- `sender`, `recipient` — адреса, личные данные: в `config.local.yaml`
+  ([configuration.md](configuration.md));
 - `SMTP_PASSWORD` (и при необходимости `SMTP_USERNAME`) — в `.env`.
 
 Виды писем:
@@ -23,9 +25,10 @@
 
 1. Включите двухэтапную аутентификацию.
 2. Создайте «пароль приложения»: аккаунт Google → Безопасность → Пароли приложений.
-3. В `config.yaml`: `smtp_host: smtp.gmail.com`, `smtp_port: 465`, `use_ssl: true`.
-   `SMTP_PASSWORD` — пароль приложения (не пароль аккаунта), `sender` и `recipient` могут быть
-   одним и тем же адресом.
+3. В `config.yaml`, раздел `notifications.email`: `smtp_host: smtp.gmail.com`, `smtp_port: 465`,
+   `use_ssl: true`;
+   в `config.local.yaml` — `sender` и `recipient` (могут быть одним и тем же адресом),
+   в `.env` — `SMTP_PASSWORD` (пароль приложения, не пароль аккаунта).
 
 ## Письмо о капче
 

@@ -96,13 +96,13 @@ class ResumeCache:
 
 def boost_resume(page: Page, config: AppConfig, logger: RunLogger) -> str:
     """Поднимает резюме в поиске, если пришло время. Возвращает статус операции."""
-    name = config.resume.name.strip()
+    name = config.pipeline.resume.name.strip()
     if not name:
         logger.event("resume_boost_disabled")
         return STATUS_DISABLED
 
-    cache = ResumeCache(config.cache_path)
-    interval = config.resume.boost_interval_hours
+    cache = ResumeCache(config.data.paths.cache)
+    interval = config.pipeline.resume.boost_interval_hours
     last = cache.last_boost(name)
     if last is not None and not cache.due(name, interval):
         logger.event("resume_boost_fresh", resume=name, last_boost=last.isoformat())

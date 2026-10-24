@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -97,15 +96,19 @@ class FakePage:
 
 def make_config(tmp_path: Path, name: str = "Java-разработчик", hours: int = 4) -> AppConfig:
     data = {
-        "search_query": "Java",
-        "area": "Москва",
-        "limit_per_run": 1,
-        "delay_between_actions": {"from": 0, "to": 0},
-        "resume": {"name": name, "boost_interval_hours": hours},
+        "search": {"queries": "Java", "area": "Москва"},
+        "pipeline": {
+            "limit_per_run": 1,
+            "delay_between_actions": {"from": 0, "to": 0},
+            "resume": {"name": name, "boost_interval_hours": hours},
+        },
     }
     path = tmp_path / "config.yaml"
     path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-    return replace(load_config(path), cache_path=tmp_path / "cache.json")
+    config = load_config(path)
+    paths = config.data.paths.model_copy(update={"cache": tmp_path / "cache.json"})
+    data = config.data.model_copy(update={"paths": paths})
+    return config.model_copy(update={"data": data})
 
 
 def make_logger(tmp_path: Path) -> RunLogger:
@@ -167,12 +170,12 @@ def test_boost_clicks_button_and_marks_cache(tmp_path: Path) -> None:
     assert page.visited == [RESUMES_URL]
     assert page.resume_link.clicked
     assert page.boost_button.clicked
-    assert ResumeCache(config.cache_path).last_boost("Java-разработчик") is not None
+    assert ResumeCache(config.data.paths.cache).last_boost("Java-разработчик") is not None
 
 
 def test_boost_is_skipped_when_cache_is_fresh(tmp_path: Path) -> None:
     config = make_config(tmp_path)
-    ResumeCache(config.cache_path).mark("Java-разработчик", datetime.now().astimezone())
+    ResumeCache(config.data.paths.cache).mark("Java-разработчик", datetime.now().astimezone())
     page = FakePage("Java-разработчик")
 
     status = boost_resume(page, config, make_logger(tmp_path))  # type: ignore[arg-type]
@@ -189,7 +192,7 @@ def test_boost_without_button_does_not_update_cache(tmp_path: Path) -> None:
     status = boost_resume(page, config, make_logger(tmp_path))  # type: ignore[arg-type]
 
     assert status == STATUS_UNAVAILABLE
-    assert ResumeCache(config.cache_path).last_boost("Java-разработчик") is None
+    assert ResumeCache(config.data.paths.cache).last_boost("Java-разработчик") is None
 
 
 def test_boost_without_resume_link_is_unavailable(tmp_path: Path) -> None:
@@ -200,7 +203,7 @@ def test_boost_without_resume_link_is_unavailable(tmp_path: Path) -> None:
 
     assert status == STATUS_UNAVAILABLE
     assert not page.boost_button.clicked
-    assert ResumeCache(config.cache_path).last_boost("Java-разработчик") is None
+    assert ResumeCache(config.data.paths.cache).last_boost("Java-разработчик") is None
 
 
 def test_boost_survives_browser_error(tmp_path: Path) -> None:

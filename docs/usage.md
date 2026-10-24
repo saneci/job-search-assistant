@@ -19,7 +19,7 @@ sh run.sh --help    # то же в Git Bash / WSL / Linux / macOS
 | `--install-browser`        | поставить Chromium для Playwright (не нужен при `browser.channel: chrome`) |
 | `--notify-test`            | отправить тестовые письма по включённым видам и выйти                      |
 | `--retry [СТАТУС]`, `--re` | повторить вакансии из дневных отчётов по прямой ссылке, без поиска         |
-| `--excluded`               | синоним `--retry excluded`: только компании из `exclude_companies`         |
+| `--excluded`               | синоним `--retry excluded`: только компании из `search.exclude_companies` |
 
 Примеры:
 
@@ -35,17 +35,17 @@ sh run.sh --re --excluded           # то же самое: «excluded» пер�
 
 ## Как работают команды `--retry` и `--excluded`
 
-- вакансии берутся из всех дневных отчётов `data/report` со статусами `retry.statuses`
+- вакансии берутся из всех дневных отчётов `data/report` со статусами `pipeline.retry.statuses`
   (`error`, `queued`, `excluded` по умолчанию; `skipped` можно добавить в `config.yaml`)
 - поиск и выдача не открываются: приложение идёт сразу по `url` из отчёта
 - дедупликация не применяется; запись обновляется (`attempts + 1`) и переносится в файл сегодняшней даты
-- лимиты `limit_per_run` и `max_vacancies` действуют как в обычном запуске
+- лимиты `pipeline.limit_per_run` и `pipeline.max_vacancies` действуют как в обычном запуске
 - `--retry` и `--excluded` - это не подкоманды, а обычные флаги одной команды запуска `--retry`, которая принимает
 - необязательное значение статуса
 - `--excluded` — самостоятельный флаг-синоним (отдельная команда для краткости), `./run.sh --re --excluded`
   сработает, но это избыточно: результат тот же, что у `./run.sh --excluded`.
 - `--excluded` имеет смысл после того, как вакансию перестали исключать: пока стоп-слово остаётся
-  в `exclude_keywords` или компания в `exclude_companies`, вакансия снова получит статус `excluded`.
+  в `search.exclude_keywords` или компания в `search.exclude_companies`, вакансия снова получит статус `excluded`.
 
 Формат отчёта и статусы — в [logs-and-reports.md](logs-and-reports.md).
 

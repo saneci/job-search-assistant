@@ -8,4 +8,5 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .env
+config.local.yaml
 state.json

@@ -91,11 +91,12 @@ def send_email(
         return False, "отправка email отключена (notifications.email.enabled: false)"
 
     target = recipient or config.recipient
+    password = config.password.get_secret_value()
     required = {
         "notifications.email.smtp_host": config.smtp_host,
         "notifications.email.sender": config.sender,
         "notifications.email.recipient": target,
-        "SMTP_PASSWORD": config.password,
+        "SMTP_PASSWORD": password,
     }
     missing = [name for name, value in required.items() if not value]
     if missing:
@@ -118,7 +119,7 @@ def send_email(
             if not config.use_ssl:
                 server.starttls()
             if config.username:
-                server.login(config.username, config.password)
+                server.login(config.username, password)
             server.send_message(message)
     except smtplib.SMTPServerDisconnected as exc:
         # Частый случай: провайдер принимает соединение, но рвёт его на AUTH.

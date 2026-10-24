@@ -12,10 +12,11 @@ from agent.logging_setup import RunLogger
 
 def make_config(tmp_path: Path, notifications: dict | None = None):
     data = {
-        "search_query": "Java",
-        "area": "Москва",
-        "limit_per_run": 1,
-        "delay_between_actions": {"from": 0, "to": 0},
+        "search": {"queries": "Java", "area": "Москва"},
+        "pipeline": {
+            "limit_per_run": 1,
+            "delay_between_actions": {"from": 0, "to": 0},
+        },
         "notifications": notifications
         or {
             "email": {

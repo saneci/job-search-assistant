@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from dataclasses import replace
 from datetime import date, datetime
 from pathlib import Path
 
@@ -44,10 +43,11 @@ from agent.report import RunStats
 
 def make_config(tmp_path: Path) -> AppConfig:
     data = {
-        "search_query": "Java",
-        "area": "Москва",
-        "limit_per_run": 2,
-        "delay_between_actions": {"from": 0, "to": 0},
+        "search": {"queries": "Java", "area": "Москва"},
+        "pipeline": {
+            "limit_per_run": 2,
+            "delay_between_actions": {"from": 0, "to": 0},
+        },
     }
     path = tmp_path / "config.yaml"
     path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
@@ -65,7 +65,7 @@ def test_final_message_without_actions(tmp_path: Path) -> None:
 
     assert message == (
         "Работа приложения завершена, отправлено откликов: 0 из 2. "
-        f"Сессия сохранена в {config.state_path}."
+        f"Сессия сохранена в {config.data.paths.session_state}."
     )
 
 
@@ -89,7 +89,7 @@ def test_final_message_has_no_last_vacancy(tmp_path: Path) -> None:
     assert message == (
         "Работа приложения завершена, отправлено откликов: 1 из 2. "
         "Причина остановки: достигнут лимит откликов за запуск (1). "
-        f"Сессия сохранена в {config.state_path}."
+        f"Сессия сохранена в {config.data.paths.session_state}."
     )
     assert "Java" not in message
 
@@ -315,12 +315,16 @@ def test_search_plan_and_page_lines(tmp_path: Path, monkeypatch, capsys) -> None
     path.write_text(
         json.dumps(
             {
-                "search_query": "Java developer",
-                "area": "Москва",
-                "limit_per_run": 1,
-                "max_vacancies": 5,
-                "per_page": 100,
-                "delay_between_actions": {"from": 0, "to": 0},
+                "search": {
+                    "queries": "Java developer",
+                    "area": "Москва",
+                    "per_page": 100,
+                },
+                "pipeline": {
+                    "limit_per_run": 1,
+                    "max_vacancies": 5,
+                    "delay_between_actions": {"from": 0, "to": 0},
+                },
             },
             ensure_ascii=False,
         ),
@@ -397,7 +401,10 @@ def test_outcome_marks_already_responded_as_sent() -> None:
 
 def test_captcha_waiter_disabled_in_headless(tmp_path: Path) -> None:
     """В headless окна нет — ждать ручного решения капчи некому."""
-    config = replace(make_config(tmp_path), browser=replace(make_config(tmp_path).browser, headless=True))
+    base = make_config(tmp_path)
+    config = base.model_copy(
+        update={"browser": base.browser.model_copy(update={"headless": True})}
+    )
     page = _FakePage("https://hh.ru/vacancy/1")
 
     assert _captcha_waiter(page, config, RunLogger(tmp_path / "logs", run_id="h")) is None  # type: ignore[arg-type]
@@ -517,7 +524,11 @@ def test_captcha_stop_notifies_when_waiter_silent(tmp_path: Path, monkeypatch) -
 
 def test_report_email_can_be_switched_off(tmp_path: Path) -> None:
     """Отчёт и капча настраиваются раздельно: письмо с отчётом можно выключить."""
-    config = replace(make_config(tmp_path), report_notify=NotificationConfig(enabled=False))
+    config = make_config(tmp_path)
+    notifications = config.notifications.model_copy(
+        update={"report": NotificationConfig(enabled=False)}
+    )
+    config = config.model_copy(update={"notifications": notifications})
 
     sent, message = _send_report_email(config, "отчёт", make_stats())
 
@@ -526,10 +537,11 @@ def test_report_email_can_be_switched_off(tmp_path: Path) -> None:
 
 
 def test_report_email_uses_own_recipient(tmp_path: Path, monkeypatch) -> None:
-    config = replace(
-        make_config(tmp_path),
-        report_notify=NotificationConfig(recipient="report@example.com"),
+    config = make_config(tmp_path)
+    notifications = config.notifications.model_copy(
+        update={"report": NotificationConfig(recipient="report@example.com")}
     )
+    config = config.model_copy(update={"notifications": notifications})
     captured: dict[str, str] = {}
 
     def fake_send_email(channel, subject, text, recipient="", **kwargs):
@@ -678,13 +690,15 @@ def test_queue_reason_texts_match_requirements() -> None:
 
 def test_problem_screenshot_is_saved_and_logged(tmp_path: Path) -> None:
     """Скриншот капчи/ошибки сохраняется и попадает в JSONL без конфликта полей."""
-    config = replace(make_config(tmp_path), logs_dir=tmp_path / "logs")
-    logger = RunLogger(config.logs_dir, run_id="shot")
+    config = make_config(tmp_path)
+    paths = config.data.paths.model_copy(update={"logs_dir": tmp_path / "logs"})
+    config = config.model_copy(update={"data": config.data.model_copy(update={"paths": paths})})
+    logger = RunLogger(config.data.paths.logs_dir, run_id="shot")
 
     _save_problem_screenshot(_ShotPage(), config, logger, "captcha")
     logger.close()
 
-    assert (config.logs_dir / "shot-captcha.png").exists()
+    assert (config.data.paths.logs_dir / "shot-captcha.png").exists()
     events = [
         json.loads(line)
         for line in logger.events_path.read_text(encoding="utf-8").splitlines()
@@ -708,8 +722,10 @@ class _BrokenShotPage:
 
 
 def test_problem_screenshot_failure_does_not_raise(tmp_path: Path) -> None:
-    config = replace(make_config(tmp_path), logs_dir=tmp_path / "logs")
-    logger = RunLogger(config.logs_dir, run_id="broken")
+    config = make_config(tmp_path)
+    paths = config.data.paths.model_copy(update={"logs_dir": tmp_path / "logs"})
+    config = config.model_copy(update={"data": config.data.model_copy(update={"paths": paths})})
+    logger = RunLogger(config.data.paths.logs_dir, run_id="broken")
 
     _save_problem_screenshot(_BrokenShotPage(), config, logger, "captcha")
     logger.close()
@@ -815,8 +831,8 @@ def test_retry_statuses_take_config_or_explicit_value(tmp_path: Path) -> None:
     """--retry без значения берёт набор из retry.statuses, со значением — только он."""
     config = make_config(tmp_path)
 
-    assert _retry_statuses(config, "all") == config.retry.statuses
-    assert config.retry.statuses == ("error", "queued", "excluded")
+    assert _retry_statuses(config, "all") == config.pipeline.retry.statuses
+    assert config.pipeline.retry.statuses == ("error", "queued", "excluded")
     assert _retry_statuses(config, "excluded") == ("excluded",)
 
 
@@ -826,7 +842,9 @@ def test_excluded_company_gets_own_status(tmp_path: Path) -> None:
     Так её видно в отчёте отдельно и можно повторить, убрав из списка.
     """
     base = make_config(tmp_path)
-    config = replace(base, search=replace(base.search, exclude_companies=("Сбер",)))
+    config = base.model_copy(
+        update={"search": base.search.model_copy(update={"exclude_companies": ("Сбер",)})}
+    )
     stats = make_stats()
     logger = RunLogger(tmp_path / "logs", run_id="excluded")
     card = VacancyCard(title="Java", company="Сбер. IT", url="https://hh.ru/vacancy/7")
@@ -850,7 +868,9 @@ def test_excluded_company_gets_own_status(tmp_path: Path) -> None:
 def test_stop_word_gets_excluded_status(tmp_path: Path) -> None:
     """Стоп-слово в названии — статус excluded: его видно отдельно и можно повторить."""
     base = make_config(tmp_path)
-    config = replace(base, search=replace(base.search, exclude_keywords=("lead",)))
+    config = base.model_copy(
+        update={"search": base.search.model_copy(update={"exclude_keywords": ("lead",)})}
+    )
     stats = make_stats()
     logger = RunLogger(tmp_path / "logs", run_id="stop-word")
     card = VacancyCard(

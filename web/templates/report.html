@@ -683,11 +683,11 @@
                 <div class="header-filters">
                     <div class="date-filter">
                         <button class="header-select" id="dateToggle" type="button" aria-expanded="false">
-                            Дата: <span id="dateLabel">все даты</span> ▾
+                            Дата: <span id="dateLabel">за всё время</span> ▾
                         </button>
                         <div class="date-panel" id="datePanel" hidden>
                             <label class="date-option">
-                                <input type="checkbox" id="dateAll" checked> Все даты
+                                <input type="checkbox" id="dateAll" checked> Выбрать всё
                             </label>
                             <div id="dateList"></div>
                         </div>
@@ -1052,7 +1052,7 @@
 
             /* ---------- Выбор даты: под капотом это файлы дня ---------- */
             function dateLabelText() {
-                if (selectedFiles.length === 0) return 'все даты';
+                if (selectedFiles.length === 0) return 'за всё время';
                 if (selectedFiles.length === 1) {
                     const report = reportsIndex.find(item => item.name === selectedFiles[0]);
                     return report ? report.date : selectedFiles[0];

@@ -1,13 +1,35 @@
-"""Загрузка и валидация конфигурации приложения."""
+"""Загрузка и валидация конфигурации приложения.
+
+Схема описана pydantic-моделями: типы, диапазоны и обязательные поля проверяются
+при старте, а все ошибки собираются за один проход (`ConfigError` со списком).
+Раскладка `config.yaml` повторяет модели: `search`, `pipeline`, `data`, `llm`,
+`browser`, `notifications`. Источники по убыванию приоритета: аргументы,
+окружение, `.env`, `config.yaml` (структура, лежит в git) + `config.local.yaml`
+(личные данные, файл не в git), дефолты схемы.
+"""
 
 from __future__ import annotations
 
 import os
 import random
-from dataclasses import dataclass, field
+from collections.abc import Mapping, Sequence
+from contextvars import ContextVar
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Annotated, Any
 
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    SecretStr,
+    ValidationError,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
+from pydantic.fields import FieldInfo
+from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError
 
@@ -22,7 +44,21 @@ except ImportError:  # pragma: no cover - зависимость есть в req
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config.yaml"
+# Личные данные (адреса, подпись, название резюме, запросы) — в отдельном файле,
+# он в .gitignore: в репозитории остаётся только структура config.yaml.
+LOCAL_CONFIG_NAME = "config.local.yaml"
 DEFAULT_SYSTEM_PROMPT_PATH = PROJECT_ROOT / "SYSTEM_PROMPT.md"
+
+DEFAULT_PROFILE_PATH = PROJECT_ROOT / "data" / "profile.md"
+DEFAULT_STATE_PATH = PROJECT_ROOT / "data" / "state.json"
+DEFAULT_CACHE_PATH = PROJECT_ROOT / "data" / "cache.json"
+DEFAULT_LOGS_DIR = PROJECT_ROOT / "logs"
+DEFAULT_REPORT_DIR = PROJECT_ROOT / "data" / "report"
+
+DEFAULT_API_KEY_ENV = "AITUNNEL_API_KEY"
+DEFAULT_SMTP_USERNAME_ENV = "SMTP_USERNAME"
+DEFAULT_SMTP_PASSWORD_ENV = "SMTP_PASSWORD"
+DEFAULT_BASE_URL = "https://api.aitunnel.ru/v1"
 
 FIT_LABEL = "подходит"
 NOT_FIT_LABEL = "не подходит"
@@ -53,6 +89,8 @@ SCHEDULE_VALUES = frozenset({"fullDay", "shift", "flexible", "remote", "flyInFly
 # Размеры страницы выдачи, которые понимает hh.ru (параметр items_on_page).
 PER_PAGE_VALUES = frozenset({20, 50, 100})
 
+DEFAULT_RETRY_STATUSES = (STATUS_ERROR, STATUS_QUEUED, STATUS_EXCLUDED)
+
 
 class ConfigError(RuntimeError):
     """Некорректная конфигурация."""
@@ -63,152 +101,835 @@ def default_decision_criteria() -> dict[str, str]:
     return {FIT_LABEL: DEFAULT_FIT_CRITERIA, NOT_FIT_LABEL: DEFAULT_NOT_FIT_CRITERIA}
 
 
-@dataclass(frozen=True)
-class DelayRange:
+# --- Примитивы схемы ------------------------------------------------------
+# Проверки типов пишут сообщения по-русски: они попадают в консоль при старте.
+
+
+def _as_int(value: Any) -> int:
+    """Целое число; строки допускаются для переопределений из окружения."""
+    if isinstance(value, bool):
+        raise ValueError("должно быть целым числом")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip())
+    raise ValueError("должно быть целым числом")
+
+
+def _as_float(value: Any) -> float:
+    """Число; строки допускаются для переопределений из окружения."""
+    if isinstance(value, bool):
+        raise ValueError("должно быть числом")
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value.strip())
+        except ValueError:
+            raise ValueError("должно быть числом") from None
+    raise ValueError("должно быть числом")
+
+
+def _as_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value.strip().lower() in {"true", "false", "1", "0"}:
+        return value.strip().lower() in {"true", "1"}
+    raise ValueError("должно быть true или false")
+
+
+PositiveInt = Annotated[int, BeforeValidator(_as_int), Field(gt=0)]
+NonNegativeInt = Annotated[int, BeforeValidator(_as_int), Field(ge=0)]
+PositiveFloat = Annotated[float, BeforeValidator(_as_float), Field(gt=0)]
+
+
+def _optional_str(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _str(value: Any, key: str) -> str:
+    text = _optional_str(value)
+    if not text:
+        raise ValueError(f"Параметр {key} не может быть пустым")
+    return text
+
+
+def _positive_int(value: Any, key: str) -> int:
+    if isinstance(value, str) and value.strip().isdigit():
+        value = int(value.strip())  # значение из окружения приходит строкой
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"Параметр {key} должен быть целым числом")
+    if value <= 0:
+        raise ValueError(f"Параметр {key} должен быть больше нуля")
+    return value
+
+
+def _optional_positive_int(value: Any, key: str) -> int | None:
+    """Необязательное положительное число: пустое значение означает None."""
+    if value is None:
+        return None
+    return _positive_int(value, key)
+
+
+def _optional_non_negative_int(value: Any, key: str) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, str) and value.strip().isdigit():
+        value = int(value.strip())  # значение из окружения приходит строкой
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"Параметр {key} должен быть целым числом")
+    if value < 0:
+        raise ValueError(f"Параметр {key} не может быть отрицательным")
+    return value
+
+
+def _page_size(value: Any, key: str) -> int:
+    """Размер страницы выдачи: hh.ru понимает только 20, 50 и 100 карточек."""
+    size = _positive_int(value, key)
+    if size not in PER_PAGE_VALUES:
+        allowed = ", ".join(str(item) for item in sorted(PER_PAGE_VALUES))
+        raise ValueError(f"Параметр {key} должен быть одним из: {allowed}")
+    return size
+
+
+def _parse_queries(value: Any) -> tuple[str, ...]:
+    if isinstance(value, str):
+        queries = (value.strip(),)
+    elif isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
+        queries = tuple(str(item).strip() for item in value)
+    else:
+        raise ValueError("search.queries должен быть строкой или списком строк")
+    queries = tuple(query for query in queries if query)
+    if not queries:
+        raise ValueError("search.queries должен содержать хотя бы один непустой запрос")
+    return queries
+
+
+def _str_list(value: Any, key: str) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        return (value.strip(),) if value.strip() else ()
+    if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
+        return tuple(str(item).strip() for item in value if str(item).strip())
+    raise ValueError(f"Параметр {key} должен быть списком строк")
+
+
+def _filter_values(value: Any, key: str, allowed: frozenset[str]) -> tuple[str, ...]:
+    """Значения фильтра hh.ru: одна строка или список строк, без повторов.
+
+    Несколько значений означают несколько отмеченных чекбоксов в фильтре
+    на hh.ru (например, опыт «от 1 года до 3 лет» и «от 3 до 6 лет»).
+    """
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        items: list[Any] = [value]
+    elif isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
+        items = list(value)
+    else:
+        raise ValueError(f"{key} должен быть строкой или списком строк")
+
+    values: list[str] = []
+    for item in items:
+        text = _optional_str(item)
+        if not text:
+            continue
+        if text not in allowed:
+            raise ValueError(
+                f"{key}: неизвестное значение «{text}» (допустимо: "
+                + ", ".join(sorted(allowed))
+                + ")"
+            )
+        if text not in values:
+            values.append(text)
+    return tuple(values)
+
+
+def _schedule(value: Any) -> str | None:
+    schedule = _optional_str(value)
+    if schedule is not None and schedule not in SCHEDULE_VALUES:
+        raise ValueError("schedule должен быть одним из: " + ", ".join(sorted(SCHEDULE_VALUES)))
+    return schedule
+
+
+def _resolve_project_path(value: Any, key: str) -> Path:
+    text = _str(value, key)
+    path = Path(text)
+    if not path.is_absolute():
+        path = PROJECT_ROOT / path
+    resolved = path.resolve()
+    if resolved != PROJECT_ROOT and PROJECT_ROOT not in resolved.parents:
+        raise ValueError(f"{key} должен указывать внутрь каталога проекта: {resolved}")
+    return resolved
+
+
+def _area_text(value: Any) -> str:
+    if value is None:
+        raise ValueError("Обязательный параметр отсутствует: search.area")
+    return _str(value, "search.area")
+
+
+def _area_id(value: Any) -> int:
+    """id региона hh.ru; ошибка конфигурации переводится в ошибку схемы."""
+    try:
+        return resolve_area_id(value)
+    except ConfigError as exc:
+        raise ValueError(str(exc)) from None
+
+
+def _decision_criteria(value: Any) -> dict[str, str]:
+    """Критерии Decision API: значения по умолчанию, переопределённые из конфига."""
+    criteria = default_decision_criteria()
+    if value is None:
+        return criteria
+    if not isinstance(value, Mapping):
+        raise ValueError(
+            "llm.decision.criteria должен быть словарём вида "
+            f"{{{FIT_LABEL}: '...', {NOT_FIT_LABEL}: '...'}}"
+        )
+    for label, text in value.items():
+        name = str(label).strip()
+        if name not in criteria:
+            raise ValueError(
+                f"llm.decision.criteria: неизвестный вариант «{name}» "
+                f"(допустимо: {FIT_LABEL}, {NOT_FIT_LABEL})"
+            )
+        criteria[name] = _str(text, f"llm.decision.criteria.{name}")
+    return criteria
+
+
+def _drop_path(data: dict[str, Any], path: str) -> None:
+    """Удаляет вложенный ключ вида `a.b.c` из словаря источника значений."""
+    *parents, leaf = path.split(".")
+    node: Any = data
+    for part in parents:
+        child = node.get(part) if isinstance(node, Mapping) else None
+        if not isinstance(child, Mapping):
+            return
+        node[part] = dict(child)
+        node = node[part]
+    if isinstance(node, dict):
+        node.pop(leaf, None)
+
+
+# --- Модели конфигурации --------------------------------------------------
+
+
+class DelayRange(BaseModel):
     """Случайная пауза между действиями."""
+
+    model_config = ConfigDict(frozen=True)
 
     minimum: float
     maximum: float
+
+    @model_validator(mode="before")
+    @classmethod
+    def _from_config(cls, data: Any) -> Any:
+        """Принимает {from, to}, {min, max}, список из двух чисел и саму модель."""
+        if isinstance(data, DelayRange):
+            return {"minimum": data.minimum, "maximum": data.maximum}
+        if isinstance(data, Mapping):
+            raw = dict(data)
+            if "minimum" not in raw and "maximum" not in raw:
+                raw = {
+                    "minimum": raw.get("from", raw.get("min")),
+                    "maximum": raw.get("to", raw.get("max")),
+                }
+        elif isinstance(data, Sequence) and not isinstance(data, (str, bytes)) and len(data) == 2:
+            raw = {"minimum": data[0], "maximum": data[1]}
+        else:
+            raise ValueError("должен быть словарём {from, to} или списком из двух чисел")
+
+        values: dict[str, float] = {}
+        for field, source in (("minimum", "from"), ("maximum", "to")):
+            value = raw.get(field)
+            if value is None:
+                raise ValueError(f"не задано значение {source}")
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError("должен содержать числа")
+            if value < 0:
+                raise ValueError("не может содержать отрицательные значения")
+            values[field] = float(value)
+        if values["minimum"] > values["maximum"]:
+            raise ValueError("значение from больше значения to")
+        return values
 
     def next(self) -> float:
         return random.uniform(self.minimum, self.maximum)
 
 
-@dataclass(frozen=True)
-class SearchConfig:
-    """Параметры поиска вакансий."""
+class ResumeConfig(BaseModel):
+    """Подъём резюме в поиске: название резюме и минимальный интервал между подъёмами."""
+
+    model_config = ConfigDict(frozen=True)
+
+    name: str = ""
+    boost_interval_hours: PositiveInt = 4
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def _name(cls, value: Any) -> str:
+        return _optional_str(value) or ""
+
+
+class RetryConfig(BaseModel):
+    """Какие вакансии из дневных отчётов повторять при `--retry`."""
+
+    model_config = ConfigDict(frozen=True)
+
+    statuses: tuple[str, ...] = DEFAULT_RETRY_STATUSES
+
+    @field_validator("statuses", mode="before")
+    @classmethod
+    def _statuses(cls, value: Any) -> tuple[str, ...]:
+        statuses = _filter_values(value, "statuses", frozenset(RETRYABLE_STATUSES))
+        return statuses or DEFAULT_RETRY_STATUSES
+
+
+class SearchConfig(BaseModel):
+    """Параметры поиска вакансий на hh.ru."""
+
+    model_config = ConfigDict(frozen=True)
 
     queries: tuple[str, ...]
     area: str
-    area_id: int
-    salary_from: int | None
-    experience: tuple[str, ...]
-    schedule: str | None
-    exclude_keywords: tuple[str, ...]
-    exclude_companies: tuple[str, ...]
+    salary_from: int | None = None
+    experience: tuple[str, ...] = ()
+    schedule: str | None = None
+    exclude_keywords: tuple[str, ...] = ()
+    exclude_companies: tuple[str, ...] = ()
+    per_page: int = 100
+    pages_limit: int | None = None
+
+    @property
+    def area_id(self) -> int:
+        """id региона hh.ru: единственный источник — area, второго поля нет."""
+        return resolve_area_id(self.area)
+
+    @field_validator("queries", mode="before")
+    @classmethod
+    def _queries(cls, value: Any) -> tuple[str, ...]:
+        return _parse_queries(value)
+
+    @field_validator("area", mode="before")
+    @classmethod
+    def _area(cls, value: Any) -> str:
+        text = _area_text(value)
+        _area_id(text)  # регион проверяем при загрузке, а не при построении URL
+        return text
+
+    @field_validator("salary_from", mode="before")
+    @classmethod
+    def _salary(cls, value: Any) -> int | None:
+        return _optional_non_negative_int(value, "search.salary_from")
+
+    @field_validator("experience", mode="before")
+    @classmethod
+    def _experience(cls, value: Any) -> tuple[str, ...]:
+        return _filter_values(value, "search.experience", EXPERIENCE_VALUES)
+
+    @field_validator("schedule", mode="before")
+    @classmethod
+    def _schedule_value(cls, value: Any) -> str | None:
+        return _schedule(value)
+
+    @field_validator("exclude_keywords", mode="before")
+    @classmethod
+    def _exclude_keywords(cls, value: Any) -> tuple[str, ...]:
+        return _str_list(value, "search.exclude_keywords")
+
+    @field_validator("exclude_companies", mode="before")
+    @classmethod
+    def _exclude_companies(cls, value: Any) -> tuple[str, ...]:
+        return _str_list(value, "search.exclude_companies")
+
+    @field_validator("pages_limit", mode="before")
+    @classmethod
+    def _pages_limit(cls, value: Any) -> int | None:
+        return _optional_positive_int(value, "search.pages_limit")
+
+    @field_validator("per_page", mode="before")
+    @classmethod
+    def _per_page(cls, value: Any) -> int:
+        return _page_size(value, "search.per_page")
+
+
+class PipelineConfig(BaseModel):
+    """Параметры запуска: лимиты, паузы, подъём резюме и повторы."""
+
+    model_config = ConfigDict(frozen=True)
+
+    resume: ResumeConfig = Field(default_factory=ResumeConfig)
     limit_per_run: int
-    delay: DelayRange
-    pages_limit: int | None
-    per_page: int
-    max_vacancies: int
+    delay_between_actions: DelayRange
+    max_vacancies: int = 200
+    retry: RetryConfig = Field(default_factory=RetryConfig)
+
+    @field_validator("limit_per_run", mode="before")
+    @classmethod
+    def _limit_per_run(cls, value: Any) -> int:
+        return _positive_int(value, "pipeline.limit_per_run")
+
+    @field_validator("max_vacancies", mode="before")
+    @classmethod
+    def _max_vacancies(cls, value: Any) -> int:
+        return _positive_int(value, "pipeline.max_vacancies")
 
 
-@dataclass(frozen=True)
-class DecisionConfig:
+class DataPathsConfig(BaseModel):
+    """Пути к локальным данным проекта."""
+
+    model_config = ConfigDict(frozen=True)
+
+    profile: Path = DEFAULT_PROFILE_PATH
+    session_state: Path = DEFAULT_STATE_PATH
+    cache: Path = DEFAULT_CACHE_PATH
+    report_dir: Path = DEFAULT_REPORT_DIR
+    logs_dir: Path = DEFAULT_LOGS_DIR
+
+    @field_validator(
+        "profile", "session_state", "cache", "report_dir", "logs_dir", mode="before"
+    )
+    @classmethod
+    def _project_path(cls, value: Any, info: ValidationInfo) -> Path:
+        return _resolve_project_path(value, str(info.field_name))
+
+
+class DataConfig(BaseModel):
+    """Локальные данные: срок хранения логов и пути."""
+
+    model_config = ConfigDict(frozen=True)
+
+    # Журналы и скриншоты старше срока удаляются при старте.
+    # Дневные отчёты (data/report) не удаляются никогда: это история для аналитики.
+    logs_retention_days: PositiveInt = 30
+    paths: DataPathsConfig = Field(default_factory=DataPathsConfig)
+
+
+class CoverLetterConfig(BaseModel):
+    """Сопроводительное письмо: лимит длины и подпись с контактами."""
+
+    model_config = ConfigDict(frozen=True)
+
+    max_length: PositiveInt = 1500
+    # Личное поле: живёт в config.local.yaml, из окружения не читается.
+    signature: str = ""
+
+    @field_validator("signature", mode="before")
+    @classmethod
+    def _signature(cls, value: Any) -> str:
+        return str(value).strip() if value is not None else ""
+
+
+class DecisionConfig(BaseModel):
     """Параметры Decision-вызова (модель решений)."""
 
-    base_url: str
-    model: str
-    threshold: float
-    criteria: dict[str, str] = field(default_factory=dict)
+    model_config = ConfigDict(frozen=True)
+
+    model: str = "gpt-6-luna-decisions"
+    threshold: float = 0.8
+    criteria: dict[str, str] = Field(default_factory=default_decision_criteria)
     explain_rejections: bool = False
 
+    @field_validator("model", mode="before")
+    @classmethod
+    def _required_text(cls, value: Any) -> str:
+        return _str(value, "llm.decision.model")
 
-@dataclass(frozen=True)
-class GenerationConfig:
+    @field_validator("threshold", mode="before")
+    @classmethod
+    def _threshold(cls, value: Any) -> float:
+        number = _as_float(value)
+        if not 0 < number <= 1:
+            raise ValueError("llm.decision.threshold должен быть в диапазоне (0, 1]")
+        return number
+
+    @field_validator("criteria", mode="before")
+    @classmethod
+    def _criteria(cls, value: Any) -> dict[str, str]:
+        return _decision_criteria(value)
+
+    @field_validator("explain_rejections", mode="before")
+    @classmethod
+    def _explain(cls, value: Any) -> bool:
+        return _as_bool(value)
+
+
+class GenerationConfig(BaseModel):
     """Параметры Generation-вызова (чат-модель)."""
 
-    base_url: str
-    model: str
-    max_tokens: int
-    temperature: float
-    json_mode: bool
-    retry_on_invalid_json: bool
+    model_config = ConfigDict(frozen=True)
+
+    model: str = "gpt-6-luna-pro"
+    max_tokens: PositiveInt = 2000
+    temperature: PositiveFloat = 0.7
+    json_mode: bool = False
+    retry_on_invalid_json: bool = True
+
+    @field_validator("model", mode="before")
+    @classmethod
+    def _required_text(cls, value: Any) -> str:
+        return _str(value, "llm.generation.model")
+
+    @field_validator("json_mode", "retry_on_invalid_json", mode="before")
+    @classmethod
+    def _flags(cls, value: Any) -> bool:
+        return _as_bool(value)
 
 
-@dataclass(frozen=True)
-class LLMConfig:
-    """Настройки LLM-слоя."""
+class LLMConfig(BaseModel):
+    """Настройки LLM-слоя: общий транспорт и два вызова."""
 
-    api_key: str
-    timeout: float
-    decision: DecisionConfig
-    generation: GenerationConfig
-    system_prompt_path: Path | None = None
+    model_config = ConfigDict(frozen=True)
+
+    # Секрет: в конфиге хранится только имя переменной окружения с ключом.
+    api_key: SecretStr = SecretStr("")
+    api_key_env: str = DEFAULT_API_KEY_ENV
+    base_url: str = DEFAULT_BASE_URL
+    timeout_seconds: PositiveFloat = 120.0
+    system_prompt_path: Path | None = DEFAULT_SYSTEM_PROMPT_PATH
+    decision: DecisionConfig = Field(default_factory=DecisionConfig)
+    generation: GenerationConfig = Field(default_factory=GenerationConfig)
+    cover_letter: CoverLetterConfig = Field(default_factory=CoverLetterConfig)
+
+    @field_validator("api_key_env", mode="before")
+    @classmethod
+    def _api_key_env(cls, value: Any) -> str:
+        return _optional_str(value) or DEFAULT_API_KEY_ENV
+
+    @field_validator("base_url", mode="before")
+    @classmethod
+    def _base_url(cls, value: Any) -> str:
+        return _str(value, "llm.base_url")
+
+    @field_validator("system_prompt_path", mode="before")
+    @classmethod
+    def _system_prompt(cls, value: Any) -> Path:
+        """Путь к промпту: относительный считается от корня проекта, файл обязателен."""
+        if value is None or not str(value).strip():
+            return DEFAULT_SYSTEM_PROMPT_PATH
+        path = Path(str(value).strip())
+        if not path.is_absolute():
+            path = PROJECT_ROOT / path
+        path = path.resolve()
+        if not path.is_file():
+            raise ValueError(
+                "llm.system_prompt_path: файл с системным промптом не найден — "
+                f"{path}. Создайте его или укажите другой путь в config.yaml"
+            )
+        return path
 
 
-@dataclass(frozen=True)
-class BrowserConfig:
+class BrowserConfig(BaseModel):
     """Настройки браузера."""
 
-    headless: bool
-    slow_mo_ms: int
+    model_config = ConfigDict(frozen=True)
+
+    headless: bool = False
+    slow_mo_ms: NonNegativeInt = 0
     channel: str | None = None
     # Сколько секунд ждать, пока человек решит капчу в открытом окне (0 — не ждать).
-    captcha_wait_seconds: int = 120
+    captcha_wait_seconds: NonNegativeInt = 120
+
+    @field_validator("headless", mode="before")
+    @classmethod
+    def _headless(cls, value: Any) -> bool:
+        return _as_bool(value)
+
+    @field_validator("channel", mode="before")
+    @classmethod
+    def _channel(cls, value: Any) -> str | None:
+        return _optional_str(value)
 
 
-@dataclass(frozen=True)
-class EmailConfig:
+class EmailConfig(BaseModel):
     """SMTP-канал: общий транспорт для отчёта и уведомлений."""
 
-    enabled: bool
-    smtp_host: str
-    smtp_port: int
-    use_ssl: bool
-    sender: str
-    recipient: str
-    username: str
-    password: str
+    model_config = ConfigDict(frozen=True)
+
+    enabled: bool = False
+    smtp_host: str = ""
+    smtp_port: PositiveInt = 465
+    use_ssl: bool = True
+    sender: str = ""
+    recipient: str = ""
+    username: str = ""
+    # Секрет: приходит из окружения (SMTP_PASSWORD), в конфиге не хранится.
+    password: SecretStr = SecretStr("")
+
+    @field_validator("enabled", "use_ssl", mode="before")
+    @classmethod
+    def _flags(cls, value: Any) -> bool:
+        return _as_bool(value)
+
+    @field_validator("smtp_host", "sender", "recipient", "username", mode="before")
+    @classmethod
+    def _text(cls, value: Any) -> str:
+        return _optional_str(value) or ""
 
 
-@dataclass(frozen=True)
-class NotificationConfig:
+class NotificationConfig(BaseModel):
     """Один вид писем: нужен ли он и на какой адрес.
 
-    Пустой `recipient` означает «общий адрес из notifications.email.recipient»,
-    поэтому старые конфиги продолжают работать без правок.
+    Пустой `recipient` означает «общий адрес из notifications.email.recipient».
     """
+
+    model_config = ConfigDict(frozen=True)
 
     enabled: bool = True
     recipient: str = ""
+
+    @field_validator("enabled", mode="before")
+    @classmethod
+    def _enabled(cls, value: Any) -> bool:
+        return _as_bool(value)
+
+    @field_validator("recipient", mode="before")
+    @classmethod
+    def _recipient(cls, value: Any) -> str:
+        return _optional_str(value) or ""
 
     def target(self, channel: EmailConfig) -> str:
         """Адрес получателя: свой у этого вида писем или общий из канала."""
         return self.recipient or channel.recipient
 
 
-@dataclass(frozen=True)
-class ResumeConfig:
-    """Подъём резюме в поиске: название резюме и минимальный интервал между подъёмами."""
+class NotificationsConfig(BaseModel):
+    """Письма на email: общий транспорт и отдельные виды писем."""
 
-    name: str = ""
-    boost_interval_hours: int = 4
+    model_config = ConfigDict(frozen=True)
 
-
-DEFAULT_RETRY_STATUSES = (STATUS_ERROR, STATUS_QUEUED, STATUS_EXCLUDED)
-
-
-@dataclass(frozen=True)
-class RetryConfig:
-    """Какие вакансии из дневных отчётов повторять при `--retry`."""
-
-    statuses: tuple[str, ...] = DEFAULT_RETRY_STATUSES
+    email: EmailConfig = Field(default_factory=EmailConfig)
+    report: NotificationConfig = Field(default_factory=NotificationConfig)
+    captcha: NotificationConfig = Field(default_factory=NotificationConfig)
 
 
-@dataclass(frozen=True)
-class AppConfig:
-    """Полная конфигурация запуска."""
+# --- Источники значений ---------------------------------------------------
+
+
+def _load_yaml(text: str) -> Any:
+    """Разбирает YAML чистым Python-реализацией (без C-расширений и компиляции)."""
+    return YAML(typ="safe", pure=True).load(text)
+
+
+def _read_yaml(path: Path) -> dict[str, Any]:
+    """Читает YAML-файл в словарь; пустой файл — пустой словарь."""
+    try:
+        data = _load_yaml(path.read_text(encoding="utf-8")) or {}
+    except YAMLError as exc:
+        raise ConfigError(f"Не удалось разобрать {path.name}: {exc}") from exc
+    if not isinstance(data, Mapping):
+        raise ConfigError(f"{path.name}: корневой элемент должен быть словарём")
+    return dict(data)
+
+
+def _deep_merge(base: Mapping[str, Any], override: Mapping[str, Any]) -> dict[str, Any]:
+    """Накладывает override на base: словари сливаются, значения — перекрываются."""
+    merged = dict(base)
+    for key, value in override.items():
+        if isinstance(value, Mapping) and isinstance(merged.get(key), Mapping):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+# Какие файлы читать в текущем вызове load_config: путь к config.yaml и к
+# локальному файлу рядом с ним. ContextVar — потому что pydantic-settings
+# создаёт источники без параметров.
+_SOURCES: ContextVar[tuple[Path, Path | None]] = ContextVar(
+    "hh_config_sources", default=(DEFAULT_CONFIG_PATH, None)
+)
+
+
+class YamlSource(PydanticBaseSettingsSource):
+    """Слой config.yaml + config.local.yaml (личные данные поверх структуры)."""
+
+    def get_field_value(self, field: FieldInfo, field_name: str) -> tuple[Any, str, bool]:  # noqa: ARG002
+        return None, field_name, False
+
+    def __call__(self) -> dict[str, Any]:
+        base_path, local_path = _SOURCES.get()
+        data = _read_yaml(base_path)
+        if local_path is not None and local_path.exists():
+            data = _deep_merge(data, _read_yaml(local_path))
+        data["source_path"] = str(base_path)
+        return data
+
+    def __repr__(self) -> str:  # pragma: no cover - отладка
+        return "YamlSource()"
+
+
+# Личные данные из окружения не читаются: их место — config.local.yaml.
+# Иначе старый .env молча перекрывал бы файл (а переводы строк в .env
+# превращаются в литеральные «\n» и ломают подпись).
+PERSONAL_FIELDS = frozenset({"llm.cover_letter.signature"})
+
+
+class EnvSourceWithoutPersonal(PydanticBaseSettingsSource):
+    """Обёртка над источником: отбрасывает личные поля, остальное пропускает."""
+
+    def __init__(self, source: PydanticBaseSettingsSource, blocked: frozenset[str]) -> None:
+        super().__init__(source.settings_cls)
+        self._source = source
+        self._blocked = blocked
+
+    def get_field_value(self, field: FieldInfo, field_name: str) -> tuple[Any, str, bool]:
+        return self._source.get_field_value(field, field_name)
+
+    def __call__(self) -> dict[str, Any]:
+        # Оставляем только поля схемы: в окружении и .env лежат ещё секреты
+        # (AITUNNEL_API_KEY, SMTP_*) — их читает _with_secrets, а не валидатор.
+        allowed = set(self.settings_cls.model_fields)
+        data = {key: value for key, value in self._source().items() if key in allowed}
+        for path in self._blocked:
+            _drop_path(data, path)
+        return data
+
+    def __repr__(self) -> str:  # pragma: no cover - отладка
+        return f"EnvSourceWithoutPersonal({self._source!r})"
+
+
+class AppConfig(BaseSettings):
+    """Полная конфигурация запуска: разделы config.yaml и секреты из окружения."""
+
+    model_config = SettingsConfigDict(
+        env_nested_delimiter="__",
+        env_file=PROJECT_ROOT / ".env",
+        env_file_encoding="utf-8",
+        extra="forbid",
+        frozen=True,
+    )
 
     source_path: Path
     search: SearchConfig
-    llm: LLMConfig
-    browser: BrowserConfig
-    email: EmailConfig
-    profile_path: Path
-    state_path: Path
-    cache_path: Path
-    logs_dir: Path
-    report_dir: Path
-    cover_letter_max_length: int = 1500
-    cover_letter_signature: str = ""
-    # Сколько дней хранить журналы и скриншоты в logs. Дневные отчёты
-    # (data/report) не удаляются никогда: это история для аналитики.
-    logs_retention_days: int = 30
-    resume: ResumeConfig = field(default_factory=ResumeConfig)
-    retry: RetryConfig = field(default_factory=RetryConfig)
-    report_notify: NotificationConfig = field(default_factory=NotificationConfig)
-    captcha_notify: NotificationConfig = field(default_factory=NotificationConfig)
+    pipeline: PipelineConfig
+    data: DataConfig = Field(default_factory=DataConfig)
+    llm: LLMConfig = Field(default_factory=LLMConfig)
+    browser: BrowserConfig = Field(default_factory=BrowserConfig)
+    notifications: NotificationsConfig = Field(default_factory=NotificationsConfig)
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        """Приоритет: аргументы → окружение → .env → YAML → файлы секретов.
+
+        Личные поля (`PERSONAL_FIELDS`) из окружения и `.env` не читаются:
+        они живут только в config.local.yaml/config.yaml.
+        """
+        return (
+            init_settings,
+            EnvSourceWithoutPersonal(env_settings, PERSONAL_FIELDS),
+            EnvSourceWithoutPersonal(dotenv_settings, PERSONAL_FIELDS),
+            YamlSource(settings_cls),
+            file_secret_settings,
+        )
+
+
+# --- Загрузка -------------------------------------------------------------
+
+
+def load_env() -> None:
+    """Подхватывает .env из корня проекта (если он есть)."""
+    if load_dotenv is None:
+        return
+    env_path = PROJECT_ROOT / ".env"
+    if env_path.exists():
+        load_dotenv(env_path, override=False)
+
+
+_TYPE_MESSAGES = {
+    "missing": "обязательный параметр отсутствует",
+    "greater_than": "должно быть больше нуля",
+    "greater_than_equal": "не может быть отрицательным",
+    "less_than_equal": "слишком большое значение",
+    "int_type": "должно быть целым числом",
+    "int_parsing": "должно быть целым числом",
+    "float_type": "должно быть числом",
+    "float_parsing": "должно быть числом",
+    "bool_type": "должно быть true или false",
+    "string_type": "должно быть строкой",
+    "list_type": "должен быть списком",
+    "tuple_type": "должен быть списком",
+    "path_type": "должно быть путём",
+    "extra_forbidden": "неизвестный параметр — проверьте раскладку config.yaml",
+}
+
+_LOCATION_NAMES = {"source_path": "config"}
+
+
+def _error_location(error: Mapping[str, Any]) -> list[str]:
+    """Путь ошибки в терминах config.yaml."""
+    location = [str(part) for part in error["loc"]]
+    if location and location[0] in _LOCATION_NAMES:
+        location[0] = _LOCATION_NAMES[location[0]]
+    return location
+
+
+def _format_errors(exc: ValidationError) -> str:
+    """Все ошибки схемы одной строкой: «ключ: причина», по одной на строку."""
+    lines: list[str] = []
+    for error in exc.errors():
+        location = ".".join(_error_location(error)) or "config"
+        message = str(error["msg"])
+        if message.startswith("Value error, "):
+            message = message[len("Value error, ") :]
+        else:
+            message = _TYPE_MESSAGES.get(str(error["type"]), message)
+        lines.append(f"{location}: {message}")
+    if len(lines) == 1:
+        return lines[0]
+    return f"найдено ошибок: {len(lines)}\n" + "\n".join(f"  - {line}" for line in lines)
+
+
+def _with_secrets(config: AppConfig) -> AppConfig:
+    """Добавляет секреты из окружения: ключ LLM и SMTP-пароль.
+
+    В config.yaml и config.local.yaml их нет — только имена переменных.
+    """
+    api_key = os.environ.get(config.llm.api_key_env or DEFAULT_API_KEY_ENV, "").strip()
+    email = config.notifications.email
+    smtp_username = os.environ.get(DEFAULT_SMTP_USERNAME_ENV, "").strip() or email.sender
+    smtp_password = os.environ.get(DEFAULT_SMTP_PASSWORD_ENV, "")
+    llm = config.llm.model_copy(update={"api_key": SecretStr(api_key)})
+    email = email.model_copy(
+        update={"username": smtp_username, "password": SecretStr(smtp_password)}
+    )
+    notifications = config.notifications.model_copy(update={"email": email})
+    return config.model_copy(update={"llm": llm, "notifications": notifications})
+
+
+def load_config(config_path: Path | str | None = None) -> AppConfig:
+    """Читает config.yaml (+ config.local.yaml) и переменные окружения."""
+    load_env()
+
+    path = Path(config_path) if config_path is not None else DEFAULT_CONFIG_PATH
+    if not path.is_absolute():
+        path = PROJECT_ROOT / path
+    if not path.exists():
+        raise ConfigError(f"Файл конфигурации не найден: {path}")
+
+    local_path = path.with_name(LOCAL_CONFIG_NAME)
+    token = _SOURCES.set((path, local_path))
+    try:
+        config = AppConfig()  # type: ignore[call-arg]
+    except ValidationError as exc:
+        raise ConfigError(_format_errors(exc)) from None
+    finally:
+        _SOURCES.reset(token)
+
+    return _with_secrets(config)
 
 
 def resolve_area_id(value: Any) -> int:
@@ -233,412 +954,3 @@ def resolve_area_id(value: Any) -> int:
             f"или одно из названий: {', '.join(sorted(AREA_IDS))}"
         )
     raise ConfigError("Параметр area должен быть названием региона или числовым id")
-
-
-def load_config(config_path: Path | str | None = None) -> AppConfig:
-    """Читает YAML-конфигурацию и переменные окружения."""
-    load_env()
-
-    path = Path(config_path) if config_path is not None else DEFAULT_CONFIG_PATH
-    if not path.is_absolute():
-        path = PROJECT_ROOT / path
-    if not path.exists():
-        raise ConfigError(f"Файл конфигурации не найден: {path}")
-
-    try:
-        raw = _load_yaml(path.read_text(encoding="utf-8")) or {}
-    except YAMLError as exc:
-        raise ConfigError(f"Не удалось разобрать {path.name}: {exc}") from exc
-
-    if not isinstance(raw, Mapping):
-        raise ConfigError("Корневой элемент config.yaml должен быть словарём")
-
-    paths = _section(raw, "paths")
-    email = _load_email(raw)
-    return AppConfig(
-        source_path=path,
-        search=_load_search(raw),
-        llm=_load_llm(raw),
-        browser=_load_browser(raw),
-        email=email,
-        report_notify=_load_notification(raw, "report"),
-        captcha_notify=_load_notification(raw, "captcha"),
-        profile_path=_resolve_project_path(paths.get("profile", "PROFILE.md"), "paths.profile"),
-        state_path=_resolve_project_path(paths.get("session_state", "state.json"), "paths.session_state"),
-        cache_path=_resolve_project_path(paths.get("cache", "data/cache.json"), "paths.cache"),
-        logs_dir=_resolve_project_path(paths.get("logs_dir", ".logs"), "paths.logs_dir"),
-        report_dir=_resolve_project_path(
-            paths.get("report_dir") or paths.get("processed_dir") or "data/report",
-            "paths.report_dir",
-        ),
-        logs_retention_days=_positive_int(
-            raw.get("logs_retention_days", 30), "logs_retention_days"
-        ),
-        cover_letter_max_length=_positive_int(
-            raw.get("cover_letter_max_length", 1500), "cover_letter_max_length"
-        ),
-        cover_letter_signature=_optional_str(raw.get("cover_letter_signature")) or "",
-        resume=_load_resume(raw),
-        retry=_load_retry(raw),
-    )
-
-
-def _load_retry(raw: Mapping[str, Any]) -> RetryConfig:
-    """Статусы для повтора по отчётам; пусто — набор по умолчанию."""
-    section = _section(raw, "retry")
-    statuses = _filter_values(
-        section.get("statuses"),
-        "retry.statuses",
-        frozenset(RETRYABLE_STATUSES),
-    )
-    return RetryConfig(statuses=statuses or DEFAULT_RETRY_STATUSES)
-
-
-def _load_resume(raw: Mapping[str, Any]) -> ResumeConfig:
-    """Параметры подъёма резюме в поиске; пустое имя — подъём отключён."""
-    section = _section(raw, "resume")
-    return ResumeConfig(
-        name=_optional_str(section.get("name")) or "",
-        boost_interval_hours=_positive_int(
-            section.get("boost_interval_hours", 4), "resume.boost_interval_hours"
-        ),
-    )
-
-
-def _load_yaml(text: str) -> Any:
-    """Разбирает YAML чистым Python-реализацией (без C-расширений и компиляции)."""
-    return YAML(typ="safe", pure=True).load(text)
-
-
-def load_env() -> None:
-    """Подхватывает .env из корня проекта (если он есть)."""
-    if load_dotenv is None:
-        return
-    env_path = PROJECT_ROOT / ".env"
-    if env_path.exists():
-        load_dotenv(env_path, override=False)
-
-
-def _load_search(raw: Mapping[str, Any]) -> SearchConfig:
-    queries = _parse_queries(raw.get("search_query"))
-    area = _require(raw, "area", "")
-    area_id = resolve_area_id(area)
-
-    experience = _filter_values(raw.get("experience"), "experience", EXPERIENCE_VALUES)
-    schedule = _optional_str(raw.get("schedule"))
-    if schedule is not None and schedule not in SCHEDULE_VALUES:
-        raise ConfigError(
-            "schedule должен быть одним из: " + ", ".join(sorted(SCHEDULE_VALUES))
-        )
-
-    return SearchConfig(
-        queries=queries,
-        area=str(area),
-        area_id=area_id,
-        salary_from=_optional_non_negative_int(raw.get("salary_from"), "salary_from"),
-        experience=experience,
-        schedule=schedule,
-        exclude_keywords=_str_list(raw.get("exclude_keywords"), "exclude_keywords"),
-        exclude_companies=_str_list(raw.get("exclude_companies"), "exclude_companies"),
-        limit_per_run=_positive_int(_limit_per_run_value(raw), "limit_per_run"),
-        delay=_parse_delay(_require(raw, "delay_between_actions", "")),
-        pages_limit=_optional_positive_int(raw.get("pages_limit"), "pages_limit"),
-        per_page=_page_size(raw.get("per_page", 100), "per_page"),
-        max_vacancies=_positive_int(raw.get("max_vacancies", 200), "max_vacancies"),
-    )
-
-
-def _limit_per_run_value(raw: Mapping[str, Any]) -> Any:
-    """Значение лимита откликов за запуск.
-
-    Основной ключ — limit_per_run; daily_limit (ключ из ТЗ) поддерживается
-    как устаревший синоним, чтобы старые конфиги продолжали работать.
-    """
-    if raw.get("limit_per_run") is not None:
-        return raw["limit_per_run"]
-    if raw.get("daily_limit") is not None:
-        return raw["daily_limit"]
-    raise ConfigError("Обязательный параметр отсутствует: limit_per_run")
-
-
-def _load_llm(raw: Mapping[str, Any]) -> LLMConfig:
-    section = _section(raw, "llm")
-    api_key_env = _optional_str(section.get("api_key_env")) or "AITUNNEL_API_KEY"
-    api_key = os.environ.get(api_key_env, "").strip()
-
-    decision_raw = _section(section, "decision")
-    generation_raw = _section(section, "generation")
-
-    threshold = _float(decision_raw.get("threshold", 0.8), "llm.decision.threshold")
-    if not 0 < threshold <= 1:
-        raise ConfigError("llm.decision.threshold должен быть в диапазоне (0, 1]")
-
-    criteria = _load_decision_criteria(decision_raw.get("criteria"))
-
-    system_prompt_path = (
-        _optional_project_path(section.get("system_prompt_path"), "llm.system_prompt_path")
-        or DEFAULT_SYSTEM_PROMPT_PATH
-    )
-    if not system_prompt_path.is_file():
-        raise ConfigError(
-            "llm.system_prompt_path: файл с системным промптом не найден — "
-            f"{system_prompt_path}. Создайте его или укажите другой путь в config.yaml"
-        )
-
-    return LLMConfig(
-        api_key=api_key,
-        timeout=float(_positive_int(section.get("timeout_seconds", 120), "llm.timeout_seconds")),
-        system_prompt_path=system_prompt_path,
-        decision=DecisionConfig(
-            base_url=_str(decision_raw.get("base_url", "https://api.aitunnel.ru/v1"), "llm.decision.base_url"),
-            model=_str(decision_raw.get("model", "gpt-6-luna-decisions"), "llm.decision.model"),
-            threshold=threshold,
-            criteria=criteria,
-            explain_rejections=_bool(
-                decision_raw.get("explain_rejections", False), "llm.decision.explain_rejections"
-            ),
-        ),
-        generation=GenerationConfig(
-            base_url=_str(
-                generation_raw.get("base_url", "https://api.aitunnel.ru/v1"),
-                "llm.generation.base_url",
-            ),
-            model=_str(generation_raw.get("model", "gpt-6-luna-pro"), "llm.generation.model"),
-            max_tokens=_positive_int(generation_raw.get("max_tokens", 2000), "llm.generation.max_tokens"),
-            temperature=_float(generation_raw.get("temperature", 0.7), "llm.generation.temperature"),
-            json_mode=bool(generation_raw.get("json_mode", False)),
-            retry_on_invalid_json=bool(generation_raw.get("retry_on_invalid_json", True)),
-        ),
-    )
-
-
-def _load_browser(raw: Mapping[str, Any]) -> BrowserConfig:
-    section = _section(raw, "browser")
-    slow_mo = _optional_non_negative_int(section.get("slow_mo_ms"), "browser.slow_mo_ms")
-    captcha_wait = _optional_non_negative_int(
-        section.get("captcha_wait_seconds"), "browser.captcha_wait_seconds"
-    )
-    return BrowserConfig(
-        headless=bool(section.get("headless", False)),
-        slow_mo_ms=slow_mo or 0,
-        channel=_optional_str(section.get("channel")),
-        captcha_wait_seconds=captcha_wait if captcha_wait is not None else 120,
-    )
-
-
-def _load_email(raw: Mapping[str, Any]) -> EmailConfig:
-    notifications = _section(raw, "notifications")
-    section = _section(notifications, "email")
-    sender = _optional_str(section.get("sender")) or ""
-    username = os.environ.get("SMTP_USERNAME", "").strip() or sender
-    return EmailConfig(
-        enabled=bool(section.get("enabled", False)),
-        smtp_host=_optional_str(section.get("smtp_host")) or "",
-        smtp_port=_positive_int(section.get("smtp_port", 465), "notifications.email.smtp_port"),
-        use_ssl=bool(section.get("use_ssl", True)),
-        sender=sender,
-        recipient=_optional_str(section.get("recipient")) or "",
-        username=username,
-        password=os.environ.get("SMTP_PASSWORD", ""),
-    )
-
-
-def _load_notification(raw: Mapping[str, Any], key: str) -> NotificationConfig:
-    """Раздел notifications.<вид>: включён ли вид писем и на какой адрес.
-
-    Раздела нет — вид включён и пишет на общий notifications.email.recipient
-    (обратная совместимость со старыми конфигами).
-    """
-    notifications = _section(raw, "notifications")
-    section = _section(notifications, key)
-    return NotificationConfig(
-        enabled=_bool(section.get("enabled", True), f"notifications.{key}.enabled"),
-        recipient=_optional_str(section.get("recipient")) or "",
-    )
-
-
-def _section(raw: Mapping[str, Any], key: str) -> Mapping[str, Any]:
-    value = raw.get(key)
-    if value is None:
-        return {}
-    if not isinstance(value, Mapping):
-        raise ConfigError(f"Раздел {key} должен быть словарём")
-    return value
-
-
-def _require(raw: Mapping[str, Any], key: str, section: str) -> Any:
-    if key not in raw or raw[key] is None:
-        name = f"{section}.{key}" if section else key
-        raise ConfigError(f"Обязательный параметр отсутствует: {name}")
-    return raw[key]
-
-
-def _parse_queries(value: Any) -> tuple[str, ...]:
-    if isinstance(value, str):
-        queries = (value.strip(),)
-    elif isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
-        queries = tuple(str(item).strip() for item in value)
-    else:
-        raise ConfigError("Обязательный параметр отсутствует или некорректен: search_query")
-    queries = tuple(query for query in queries if query)
-    if not queries:
-        raise ConfigError("search_query должен содержать хотя бы один непустой запрос")
-    return queries
-
-
-def _str_list(value: Any, key: str) -> tuple[str, ...]:
-    if value is None:
-        return ()
-    if isinstance(value, str):
-        return (value.strip(),) if value.strip() else ()
-    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
-        return tuple(str(item).strip() for item in value if str(item).strip())
-    raise ConfigError(f"Параметр {key} должен быть списком строк")
-
-
-def _parse_delay(value: Any) -> DelayRange:
-    if isinstance(value, Mapping):
-        raw_minimum = value.get("from", value.get("min"))
-        raw_maximum = value.get("to", value.get("max"))
-    elif isinstance(value, Sequence) and not isinstance(value, (str, bytes)) and len(value) == 2:
-        raw_minimum, raw_maximum = value[0], value[1]
-    else:
-        raise ConfigError(
-            "delay_between_actions должен быть словарём {from, to} или списком из двух чисел"
-        )
-    minimum = _float(raw_minimum, "delay_between_actions.from")
-    maximum = _float(raw_maximum, "delay_between_actions.to")
-    if minimum < 0 or maximum < 0:
-        raise ConfigError("delay_between_actions не может содержать отрицательные значения")
-    if minimum > maximum:
-        raise ConfigError("delay_between_actions: значение from больше значения to")
-    return DelayRange(minimum=minimum, maximum=maximum)
-
-
-def _load_decision_criteria(value: Any) -> dict[str, str]:
-    """Критерии Decision API: значения по умолчанию, переопределённые из конфига."""
-    criteria = default_decision_criteria()
-    if value is None:
-        return criteria
-    if not isinstance(value, Mapping):
-        raise ConfigError(
-            "llm.decision.criteria должен быть словарём вида "
-            f"{{{FIT_LABEL}: '...', {NOT_FIT_LABEL}: '...'}}"
-        )
-    for label, text in value.items():
-        name = str(label).strip()
-        if name not in criteria:
-            raise ConfigError(
-                f"llm.decision.criteria: неизвестный вариант «{name}» "
-                f"(допустимо: {FIT_LABEL}, {NOT_FIT_LABEL})"
-            )
-        criteria[name] = _str(text, f"llm.decision.criteria.{name}")
-    return criteria
-
-
-def _positive_int(value: Any, key: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise ConfigError(f"Параметр {key} должен быть целым числом")
-    if value <= 0:
-        raise ConfigError(f"Параметр {key} должен быть больше нуля")
-    return value
-
-
-def _optional_positive_int(value: Any, key: str) -> int | None:
-    """Необязательное положительное число: пустое значение означает None."""
-    if value is None:
-        return None
-    return _positive_int(value, key)
-
-
-def _page_size(value: Any, key: str) -> int:
-    """Размер страницы выдачи: hh.ru понимает только 20, 50 и 100 карточек."""
-    size = _positive_int(value, key)
-    if size not in PER_PAGE_VALUES:
-        allowed = ", ".join(str(item) for item in sorted(PER_PAGE_VALUES))
-        raise ConfigError(f"Параметр {key} должен быть одним из: {allowed}")
-    return size
-
-
-def _optional_non_negative_int(value: Any, key: str) -> int | None:
-    if value is None:
-        return None
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise ConfigError(f"Параметр {key} должен быть целым числом")
-    if value < 0:
-        raise ConfigError(f"Параметр {key} не может быть отрицательным")
-    return value
-
-
-def _float(value: Any, key: str) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ConfigError(f"Параметр {key} должен быть числом")
-    return float(value)
-
-
-def _bool(value: Any, key: str) -> bool:
-    if isinstance(value, bool):
-        return value
-    raise ConfigError(f"Параметр {key} должен быть true или false")
-
-
-def _str(value: Any, key: str) -> str:
-    text = _optional_str(value)
-    if not text:
-        raise ConfigError(f"Параметр {key} не может быть пустым")
-    return text
-
-
-def _filter_values(value: Any, key: str, allowed: frozenset[str]) -> tuple[str, ...]:
-    """Значения фильтра hh.ru: одна строка или список строк, без повторов.
-
-    Несколько значений означают несколько отмеченных чекбоксов в фильтре
-    на hh.ru (например, опыт «от 1 года до 3 лет» и «от 3 до 6 лет»).
-    """
-    if value is None:
-        return ()
-    if isinstance(value, str):
-        items: list[Any] = [value]
-    elif isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
-        items = list(value)
-    else:
-        raise ConfigError(f"{key} должен быть строкой или списком строк")
-
-    values: list[str] = []
-    for item in items:
-        text = _optional_str(item)
-        if not text:
-            continue
-        if text not in allowed:
-            raise ConfigError(
-                f"{key}: неизвестное значение «{text}» (допустимо: "
-                + ", ".join(sorted(allowed))
-                + ")"
-            )
-        if text not in values:
-            values.append(text)
-    return tuple(values)
-
-
-def _optional_str(value: Any) -> str | None:
-    if value is None:
-        return None
-    text = str(value).strip()
-    return text or None
-
-
-def _resolve_project_path(value: Any, key: str) -> Path:
-    text = _str(value, key)
-    path = Path(text)
-    if not path.is_absolute():
-        path = PROJECT_ROOT / path
-    resolved = path.resolve()
-    if resolved != PROJECT_ROOT and PROJECT_ROOT not in resolved.parents:
-        raise ConfigError(f"{key} должен указывать внутрь каталога проекта: {resolved}")
-    return resolved
-
-
-def _optional_project_path(value: Any, key: str) -> Path | None:
-    if value is None or not str(value).strip():
-        return None
-    return _resolve_project_path(value, key)
