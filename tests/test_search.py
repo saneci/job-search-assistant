@@ -7,8 +7,11 @@ from urllib.parse import parse_qs, urlparse
 from agent.config import DelayRange, SearchConfig
 from agent.hh_search import (
     HH_MAX_PAGES,
+    SCROLL_EMPTY_SECONDS,
+    SCROLL_STABLE_SECONDS,
     _needs_scroll,
     build_search_url,
+    expected_cards,
     is_company_excluded,
     is_excluded,
     pages_plan,
@@ -190,8 +193,28 @@ def test_pages_plan_keeps_safety_cap() -> None:
 
 def test_needs_scroll_until_page_is_full() -> None:
     """Карточки догружаются прокруткой, пока их не станет столько, сколько заказали."""
-    assert _needs_scroll(20, 100, 0) is True
-    assert _needs_scroll(100, 100, 0) is False
-    assert _needs_scroll(20, 100, 2) is True
-    assert _needs_scroll(20, 100, 3) is False
-    assert _needs_scroll(100, 20, 0) is False
+    assert _needs_scroll(20, 100, 0.0) is True
+    assert _needs_scroll(100, 100, 0.0) is False
+    # Прирост был только что — ждём дальше, даже если карточек пока 20.
+    assert _needs_scroll(20, 100, SCROLL_STABLE_SECONDS / 2) is True
+    # Дольше SCROLL_STABLE_SECONDS прироста нет — страница кончилась.
+    assert _needs_scroll(20, 100, SCROLL_STABLE_SECONDS) is False
+    assert _needs_scroll(100, 20, 0.0) is False
+
+
+def test_expected_cards_counts_last_page_rest() -> None:
+    """350 найденных при per_page 100 — это 100, 100, 100 и 50 карточек."""
+    assert [expected_cards(350, 100, index) for index in range(4)] == [100, 100, 100, 50]
+
+
+def test_expected_cards_without_total_and_out_of_range() -> None:
+    """Без «Найдено N» ждём полный per_page; за пределами выдачи — ноль."""
+    assert expected_cards(None, 100, 0) == 100
+    assert expected_cards(0, 100, 0) == 0
+    assert expected_cards(50, 100, 2) == 0
+
+
+def test_needs_scroll_gives_up_on_empty_page_sooner() -> None:
+    """Пустая страница не должна держать запуск: ждём её пару секунд."""
+    assert _needs_scroll(0, 100, SCROLL_EMPTY_SECONDS / 2) is True
+    assert _needs_scroll(0, 100, SCROLL_EMPTY_SECONDS) is False

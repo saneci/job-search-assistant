@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import time
 from typing import Sequence
 from urllib.parse import urlencode, urljoin
 
@@ -21,11 +22,16 @@ HH_BASE_URL = "https://hh.ru"
 HH_MAX_PAGES = 50
 
 # hh.ru рисует карточки по мере прокрутки: в DOM сразу появляется первая
-# двадцатка, остальные из items_on_page подгружаются при скролле.
-SCROLL_PAUSE_MS = 400
-SCROLL_ROUNDS = 40
-# Сколько прокруток подряд без прироста карточек считаем концом страницы.
-SCROLL_STABLE_ROUNDS = 3
+# двадцатка, остальные из items_on_page подгружаются порциями по 20.
+SCROLL_PAUSE_MS = 500
+# Сколько секунд ждём прироста карточек, прежде чем считать, что выдача этой
+# страницы закончилась. Порция приходит не мгновенно: при ожидании в 1,2 с
+# (3 прокрутки по 400 мс) медленная страница обрезалась до 20 карточек.
+SCROLL_STABLE_SECONDS = 8.0
+# Предохранитель на всю страницу: даже если карточки всё приходят и приходят.
+SCROLL_TIMEOUT_SECONDS = 90.0
+# Пустая страница: ждать нечего, но пару секунд на «а вдруг отрисуется» даём.
+SCROLL_EMPTY_SECONDS = 2.0
 
 TITLE_SELECTOR = "a[data-qa='serp-item__title'], a[data-qa='vacancy-serp__vacancy-title']"
 
@@ -150,8 +156,22 @@ def open_search_page(
     if detect_captcha(page):
         raise CaptchaError("hh.ru показал капчу на странице поиска")
     _wait_for_results(page)
-    _load_all_cards(page, search.per_page)
-    return collect_cards(page), read_total(page)
+    # «Найдено N» читаем из шапки до прокрутки: на последней странице карточек
+    # меньше per_page, и ждать полный per_page там бессмысленно.
+    total = read_total(page)
+    _load_all_cards(page, expected_cards(total, search.per_page, page_index))
+    return collect_cards(page), total
+
+
+def expected_cards(total: int | None, per_page: int, page_index: int) -> int:
+    """Сколько карточек ждём на странице: per_page, а на последней — остаток.
+
+    Пример: 350 найденных при per_page 100 — это 100, 100, 100 и 50 карточек.
+    """
+    if total is None:
+        return per_page
+    left = total - page_index * per_page
+    return max(min(per_page, left), 0)
 
 
 TOTAL_RE = re.compile(r"Найден[оа]\s+([\d\s\u00a0]+)\s+ваканс")
@@ -227,31 +247,68 @@ def _load_all_cards(page: Page, expected: int) -> None:
     """Догружает карточки прокруткой страницы выдачи.
 
     hh.ru отдаёт за страницу 20, 50 или 100 вакансий, но в DOM сначала
-    появляется первая двадцатка — остальные рисуются по мере прокрутки.
-    Прокручиваем до конца документа, пока карточек не станет столько, сколько
-    заказали, или пока список не перестанет расти (страница кончилась).
+    появляется первая двадцатка — остальные приходят порциями по 20 по мере
+    прокрутки. Порция приходит не мгновенно, поэтому ждём прироста
+    `SCROLL_STABLE_SECONDS`: если список не растёт дольше, считаем, что
+    выдача этой страницы закончилась.
     """
+    deadline = time.monotonic() + SCROLL_TIMEOUT_SECONDS
     previous = -1
-    stable = 0
-    for _ in range(SCROLL_ROUNDS):
-        try:
-            count = page.locator(TITLE_SELECTOR).count()
-        except PlaywrightError:
+    quiet_since = time.monotonic()
+    while time.monotonic() < deadline:
+        count = _count_cards(page)
+        if count is None:
             return
-        stable = stable + 1 if count == previous else 0
-        if not _needs_scroll(count, expected, stable):
+        if count != previous:
+            previous = count
+            quiet_since = time.monotonic()
+        if not _needs_scroll(count, expected, time.monotonic() - quiet_since):
             return
-        previous = count
-        try:
-            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-        except PlaywrightError:
-            return
+        _scroll_to_bottom(page)
         page.wait_for_timeout(SCROLL_PAUSE_MS)
 
 
-def _needs_scroll(count: int, expected: int, stable: int) -> bool:
-    """Нужно ли прокрутить выдачу ещё раз, чтобы догрузить карточки."""
-    return count < expected and stable < SCROLL_STABLE_ROUNDS
+def _count_cards(page: Page) -> int | None:
+    """Сколько карточек сейчас в DOM; None — страница уже недоступна."""
+    try:
+        return page.locator(TITLE_SELECTOR).count()
+    except PlaywrightError:
+        return None
+
+
+def _scroll_to_bottom(page: Page) -> None:
+    """Прокручивает выдачу вниз, чтобы hh.ru догрузил следующую порцию карточек.
+
+    Крутим и окно, и внутренние контейнеры с прокруткой: у hh.ru бывает и то,
+    и другое, а от события scroll зависит ленивая отрисовка. Небольшой отскок
+    вверх нужен, чтобы событие точно возникло, даже если страница уже в низу.
+    """
+    try:
+        page.evaluate(
+            """() => {
+                window.scrollBy(0, -400);
+                window.scrollTo(0, document.body.scrollHeight);
+                for (const node of document.querySelectorAll('div, main, section')) {
+                    const overflow = node.scrollHeight - node.clientHeight;
+                    if (overflow > 200 && node.clientHeight > 300) {
+                        node.scrollTop = node.scrollHeight;
+                    }
+                }
+            }"""
+        )
+    except PlaywrightError:
+        return
+
+
+def _needs_scroll(count: int, expected: int, quiet_seconds: float) -> bool:
+    """Нужно ли прокрутить выдачу ещё раз, чтобы догрузить карточки.
+
+    `quiet_seconds` — сколько секунд карточки не прибавлялись: если дольше
+    `SCROLL_STABLE_SECONDS`, считаем, что карточки этой страницы кончились.
+    Пустую страницу ждём меньше (`SCROLL_EMPTY_SECONDS`): там нечего грузить.
+    """
+    limit = SCROLL_STABLE_SECONDS if count else SCROLL_EMPTY_SECONDS
+    return count < expected and quiet_seconds < limit
 
 
 def _card_container(link: Locator) -> Locator | None:

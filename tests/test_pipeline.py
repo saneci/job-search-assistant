@@ -364,6 +364,11 @@ def test_search_plan_and_page_lines(tmp_path: Path, monkeypatch, capsys) -> None
     assert plan in messages
     assert page in messages
 
+    # Карточек пришло меньше, чем ждали: обрыв догрузки видно в JSONL.
+    short = [item for item in events if item["event"] == "search_page_short"]
+    assert short[0]["cards"] == 1
+    assert short[0]["expected"] == 100
+
 
 def test_outcome_detects_sent() -> None:
     assert _outcome((0, 0, 0, 0, 0, 0, 0), (1, 0, 0, 0, 0, 0, 0)) == OUTCOME_SENT

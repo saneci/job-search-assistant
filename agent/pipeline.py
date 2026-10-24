@@ -18,6 +18,7 @@ from .browser import (
 )
 from .config import FIT_LABEL, NOT_FIT_LABEL, AppConfig
 from .hh_search import (
+    expected_cards,
     is_company_excluded,
     is_excluded,
     open_search_page,
@@ -300,6 +301,23 @@ def _process_vacancies(
                 f"{_plural(len(cards), 'вакансия', 'вакансии', 'вакансий')} "
                 f"из результата запроса «{query}»: страница {page_index + 1} из {pages}"
             )
+
+            # hh.ru отдаёт карточки лениво: если догрузка не удалась, часть
+            # вакансий страницы молча терялась бы — пишем это в лог.
+            expected = expected_cards(total, search.per_page, page_index)
+            if cards and len(cards) < expected:
+                logger.event(
+                    "search_page_short",
+                    query=query,
+                    page=page_index,
+                    cards=len(cards),
+                    expected=expected,
+                )
+                logger.info(
+                    f"hh.ru отдал {len(cards)} "
+                    f"{_plural(len(cards), 'карточку', 'карточки', 'карточек')} "
+                    f"вместо {expected}: часть вакансий страницы не догрузилась"
+                )
 
             for card in cards:
                 if _should_stop(search.limit_per_run, stats, logger):
