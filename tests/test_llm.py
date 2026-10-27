@@ -11,7 +11,13 @@ import httpx
 import pytest
 from pydantic import SecretStr
 
-from agent.config import PROJECT_ROOT, DecisionConfig, GenerationConfig, LLMConfig
+from agent.config import (
+    PROJECT_ROOT,
+    CoverLetterConfig,
+    DecisionConfig,
+    GenerationConfig,
+    LLMConfig,
+)
 from agent.llm import (
     FIT_LABEL,
     LLMClient,
@@ -50,6 +56,7 @@ def make_config(
     threshold: float = 0.8,
     retry: bool = True,
     system_prompt_path: Path | None = None,
+    pet_projects: tuple[str, ...] = (),
 ) -> LLMConfig:
     return LLMConfig(
         api_key="sk-aitunnel-test",
@@ -67,6 +74,7 @@ def make_config(
             retry_on_invalid_json=retry,
         ),
         system_prompt_path=system_prompt_path,
+        cover_letter=CoverLetterConfig(pet_projects=pet_projects),
     )
 
 
@@ -639,3 +647,34 @@ def test_system_prompt_has_no_threshold_numbers() -> None:
 
     assert "70%" not in prompt
     assert "1500" not in prompt
+
+
+def test_generate_passes_pet_projects_when_vacancy_requests_links() -> None:
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["payload"] = json.loads(request.content)
+        return chat_response(
+            json.dumps(
+                {"verdict": "подходит", "reason": "ok", "cover_letter": "Здравствуйте! Текст."},
+                ensure_ascii=False,
+            )
+        )
+
+    vacancy = VacancyDetails(
+        url="https://hh.ru/vacancy/138836233",
+        title="Java-разработчик",
+        company="ППК",
+        salary="",
+        description="Приложите ссылку на ваши проекты в письме.",
+    )
+
+    with make_client(
+        handler, pet_projects=("https://github.com/user/project",)
+    ) as client:
+        client.generate(PROFILE, vacancy, signature="")
+
+    prompt = captured["payload"]["messages"][1]["content"]
+    assert "ТРЕБОВАНИЕ ВАКАНСИИ К ПРОЕКТАМ" in prompt
+    assert "https://github.com/user/project" in prompt
+

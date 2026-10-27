@@ -5,9 +5,11 @@ from __future__ import annotations
 from typing import Any
 
 from agent.hh_vacancy import (
+    ResponseResult,
     _has_success,
     detect_page_blocker,
     detect_response_blocker,
+    response_notice,
     response_state,
 )
 
@@ -217,3 +219,80 @@ def test_response_state_has_page_url_and_no_letter() -> None:
     state = response_state(FakeTextPage())  # type: ignore[arg-type]
 
     assert state == {"page_url": "https://hh.ru/vacancy/1"}
+
+
+class FakeNoticeList:
+    """Список элементов модалки с доступным `.first`."""
+
+    def __init__(self, items: list[FakeElement]) -> None:
+        self._items = items
+
+    @property
+    def first(self) -> Any:
+        return self._items[0] if self._items else _Hidden()
+
+    def count(self) -> int:
+        return len(self._items)
+
+    def nth(self, index: int) -> FakeElement:
+        return self._items[index]
+
+
+class FakeNoticeModal(FakeElement):
+    """Модалка формы отклика: отдаёт текстовые блоки по селектору."""
+
+    def __init__(self, blocks: dict[str, list[FakeElement]]) -> None:
+        super().__init__("")
+        self._blocks = blocks
+
+    def locator(self, selector: str) -> FakeNoticeList:
+        return FakeNoticeList(self._blocks.get(selector, []))
+
+
+class FakeNoticePage:
+    """Страница с видимой модалкой отклика."""
+
+    def __init__(self, modal: FakeNoticeModal) -> None:
+        self.url = "https://hh.ru/vacancy/137974891"
+        self._modal = modal
+
+    def locator(self, selector: str) -> FakeNoticeList:
+        if selector in ("[data-qa='modal-content']", "[role='dialog']"):
+            return FakeNoticeList([self._modal])
+        return FakeNoticeList([])
+
+    def get_by_text(self, text: str, exact: bool = False) -> FakeTextList:
+        return FakeTextList([])
+
+    def get_by_role(self, role: str, name: Any = None) -> FakeTextList:
+        return FakeTextList([])
+
+
+def test_response_notice_reads_visibility_hint() -> None:
+    """Текст в модалке — реальная причина, её пишем в отчёт вместо заглушки."""
+    notice = (
+        "Чтобы откликнуться на эту вакансию, поменяйте видимость резюме на "
+        "«Видно всем работодателям, зарегистрированным на hh.ru»"
+    )
+    page = FakeNoticePage(FakeNoticeModal({"p": [FakeElement(notice)]}))
+
+    assert response_notice(page) == notice  # type: ignore[arg-type]
+
+
+def test_response_notice_skips_ui_labels() -> None:
+    """Подписи формы и заголовки — не причина отказа."""
+    page = FakeNoticePage(
+        FakeNoticeModal(
+            {
+                "p": [FakeElement("Сопроводительное письмо")],
+                "div": [FakeElement("Отклик на вакансию")],
+            }
+        )
+    )
+
+    assert response_notice(page) == ""  # type: ignore[arg-type]
+
+
+def test_response_result_reason_is_optional() -> None:
+    assert ResponseResult(status="sent").reason == ""
+

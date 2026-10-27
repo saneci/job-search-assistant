@@ -107,6 +107,20 @@ def report_path(report_name: str) -> Path:
         raise HTTPException(status_code=404, detail="Отчёт не найден")
     return path
 
+def current_report_path() -> Path:
+    """Файл отчёта текущей даты."""
+    return REPORTS_DIR / f"{date.today().isoformat()}.json"
+
+
+def find_vacancy(url: str) -> dict[str, Any] | None:
+    """Первая запись вакансии по URL во всех отчётах."""
+    for path in report_files():
+        for vacancy in read_report(path)["vacancies"]:
+            if isinstance(vacancy, dict) and str(vacancy.get("url", "")) == url:
+                return vacancy
+    return None
+
+
 
 def read_report(path: Path) -> dict[str, Any]:
     """Читает файл дня; чужой формат — ошибка, а не пустая страница."""
@@ -378,59 +392,70 @@ async def get_metrics(files: str = "", period: str = "") -> dict[str, Any]:
 
 @app.post("/api/v1/update-status")
 async def update_status(update: StatusUpdate) -> dict[str, Any]:
-    """Меняет статус вакансии, не переписывая остальную запись.
+    """Меняет статус вакансии и переносит её в отчёт текущей даты.
 
-    Набор полей зависит от статуса:
-
-    * `rejected` — отказ работодателя: пишем только `status`, `reason`
-      («По отклику пришёл отказ») и `processed_at`; попытки не считаем;
-    * `offer` — оффер: то же самое, причина «По отклику пришёл оффер»;
-      поставить его можно только из статуса `sent`;
-    * остальные статусы — `status`, `attempts` (+1) и `processed_at`,
-      причина остаётся прежней.
-
-    `rejected` и `offer` — терминальные: из них статус больше не меняется.
-
-    Итоги в шапке пересчитываем по самим записям, чтобы цифры наверху
-    сходились с таблицей.
+    В отчётах одна запись на URL: вакансия удаляется из всех файлов, а
+    обновлённая запись попадает в файл сегодняшней даты. `rejected` и `offer`
+    терминальны, `offer` ставится только из `sent`.
     """
     if update.status not in STATUSES:
         raise HTTPException(status_code=422, detail=f"Неизвестный статус: {update.status}")
-    path = report_path(update.report_name)
-    data = read_report(path)
-    for vacancy in data["vacancies"]:
-        if not isinstance(vacancy, dict) or str(vacancy.get("url", "")) != update.url:
-            continue
-        current_status = str(vacancy.get("status", ""))
-        if current_status in TERMINAL_STATUSES:
-            label = "Отказ" if current_status == STATUS_REJECTED else "Оффер"
-            raise HTTPException(
-                status_code=409,
-                detail=f"Статус «{label}» терминальный: изменить его нельзя",
-            )
-        if update.status == STATUS_OFFER and current_status != STATUS_SENT:
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    "Оффер можно поставить только после статуса «Отправлено» "
-                    f"(сейчас: {current_status or 'нет статуса'})"
-                ),
-            )
-        vacancy["status"] = update.status
-        vacancy["processed_at"] = now()
-        if update.status in TERMINAL_STATUSES:
-            vacancy["reason"] = (
-                REJECTED_REASON if update.status == STATUS_REJECTED else OFFER_REASON
-            )
-        else:
-            vacancy["attempts"] = int(vacancy.get("attempts", 0)) + 1
-        write_report(path, data)
-        return {
-            "ok": True,
-            "report_name": path.name,
-            "summary": data["summary"],
-            "attempts": vacancy.get("attempts", 0),
-            "reason": str(vacancy.get("reason", "")),
-            "processed_at": vacancy["processed_at"],
-        }
-    raise HTTPException(status_code=404, detail="Вакансия не найдена в отчёте")
+    report_path(update.report_name)
+    vacancy = find_vacancy(update.url)
+    if vacancy is None:
+        raise HTTPException(status_code=404, detail="Вакансия не найдена в отчётах")
+    vacancy = dict(vacancy)
+
+    current_status = str(vacancy.get("status", ""))
+    if current_status in TERMINAL_STATUSES:
+        label = "Отказ" if current_status == STATUS_REJECTED else "Оффер"
+        raise HTTPException(
+            status_code=409,
+            detail=f"Статус «{label}» терминальный: изменить его нельзя",
+        )
+    if update.status == STATUS_OFFER and current_status != STATUS_SENT:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Оффер можно поставить только после статуса «Отправлено» "
+                f"(сейчас: {current_status or 'нет статуса'})"
+            ),
+        )
+
+    vacancy["status"] = update.status
+    vacancy["processed_at"] = now()
+    if update.status in TERMINAL_STATUSES:
+        vacancy["reason"] = (
+            REJECTED_REASON if update.status == STATUS_REJECTED else OFFER_REASON
+        )
+    else:
+        vacancy["attempts"] = int(vacancy.get("attempts", 0)) + 1
+
+    for path in report_files():
+        data = read_report(path)
+        rows = [
+            row
+            for row in data["vacancies"]
+            if not isinstance(row, dict) or str(row.get("url", "")) != update.url
+        ]
+        if len(rows) != len(data["vacancies"]):
+            data["vacancies"] = rows
+            write_report(path, data)
+
+    today = current_report_path()
+    if today.exists():
+        data = read_report(today)
+    else:
+        data = {"date": today.stem, "updated_at": now(), "summary": summarize([]), "vacancies": []}
+    data["vacancies"].append(vacancy)
+    write_report(today, data)
+
+    summary = summarize(dedupe_vacancies(all_vacancies(report_files())))
+    return {
+        "ok": True,
+        "report_name": today.name,
+        "summary": summary,
+        "attempts": vacancy.get("attempts", 0),
+        "reason": str(vacancy.get("reason", "")),
+        "processed_at": vacancy["processed_at"],
+    }

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 from datetime import date, datetime
 from pathlib import Path
@@ -56,6 +57,7 @@ from .models import (
 )
 from .notify import notify_captcha
 from .profile import Profile, load_profile
+from .prompts import requires_project_links
 from .processed import ProcessedError, ProcessedStore
 from .report import RunStats, build_report, send_email
 from .resume import boost_resume
@@ -71,12 +73,83 @@ RETRY_ALL = "all"
 # Вакансии, на которые нельзя откликнуться автоматически: что писать в отчёте за день.
 QUEUE_REASON_TEXTS: dict[str, str] = {
     "empty_cover_letter": "Нужно заполнить сопроводительное письмо вручную",
+    "project_links": "В вакансии требуется ссылка на проекты в письме",
+
     "test": "Для отклика на вакансию необходимо пройти тестирование",
     "questionnaire": "Для отклика на вакансию необходимо заполнить анкету",
     "external_form": "Отклик нужно отправить на сайте работодателя",
     "captcha": "hh.ru просит пройти капчу: откликнитесь вручную",
+    "no_form": "hh.ru не показал форму отклика — проверьте вакансию вручную",
     "unknown": "hh.ru не подтвердил отправку отклика — проверьте вакансию вручную",
 }
+
+# Вводная часть обоснования Generation: вердикт и общие слова о совпадении.
+# В отчёт идёт только причина, без этой «шапки».
+_VERDICT_PREFIX_RE = re.compile(
+    r"^\s*(?:вердикт\s*[:—–-]\s*)?(?:не\s+подходит|подходит)\s*[.:;—–-]?\s*",
+    re.IGNORECASE,
+)
+_CONTRAST_RE = re.compile(
+    r"(?:^|[.!?]\s+)\s*(?:но|однако|при этом|тем не менее|вместе с тем)\b"
+    r"\s*[,:—–-]?\s*",
+    re.IGNORECASE,
+)
+_INLINE_CONTRAST_RE = re.compile(r",\s*(?:но|однако)\s+", re.IGNORECASE)
+_POSITIVE_FIRST_RE = re.compile(
+    r"профил\w*\s+(?:хорошо\s+)?(?:совпадает|соответствует|подходит)|"
+    r"ваканси\w*\s+(?:хорошо\s+)?(?:подходит|соответствует)|"
+    r"опыт\w*\s+(?:хорошо\s+)?совпадает",
+    re.IGNORECASE,
+)
+_TRAILING_VERDICT_RE = re.compile(
+    r"\s*(?:поэтому\s+)?вердикт\s*[:—–-]?\s*не\s+подходит\.?\s*$",
+    re.IGNORECASE,
+)
+MIN_MEANINGFUL_REASON = 12
+
+
+def _generation_reason_text(reason: str) -> str:
+    """Оставляет от обоснования Generation саму причину, без вводного вердикта.
+
+    Модель часто пишет «по Java профиль совпадает. Но для задачи нужен опыт X»:
+    в отчёт нужна вторая часть — по ней видно, что именно не сошлось.
+    Короткие технические ответы вроде «ok» причиной не считаются.
+    """
+    text = " ".join((reason or "").split())
+    text = _TRAILING_VERDICT_RE.sub("", text)
+    text = _VERDICT_PREFIX_RE.sub("", text)
+    match = _CONTRAST_RE.search(text) or _INLINE_CONTRAST_RE.search(text)
+    if match:
+        text = text[match.end():]
+    else:
+        sentences = [part for part in re.split(r"(?<=[.!?])\s+", text) if part]
+        if len(sentences) > 1 and _POSITIVE_FIRST_RE.search(sentences[0]):
+            text = " ".join(sentences[1:])
+    text = text.strip()
+    if text:
+        text = text.lstrip(",;:—- ") 
+    if len(text) < MIN_MEANINGFUL_REASON:
+        return ""
+    return text[0].upper() + text[1:]
+
+
+
+_PROJECT_URL_RE = re.compile(r"https?://[^\s<>()]+", re.IGNORECASE)
+
+
+def _letter_has_project_link(letter: str, links: tuple[str, ...]) -> bool:
+    """Есть ли в письме ссылка на проект: URL или ссылка из конфига."""
+    if _PROJECT_URL_RE.search(letter or ""):
+        return True
+    text = (letter or "").lower().replace(" ", "")
+    for link in links:
+        normalized = link.strip().lower().rstrip("/")
+        if not normalized:
+            continue
+        if normalized in text or re.sub(r"^https?://", "", normalized) in text:
+            return True
+    return False
+
 
 
 # Состояния страницы вакансии, при которых отклик не нужен: код → (статус
@@ -90,10 +163,10 @@ PAGE_STATUS_REASONS: dict[str, tuple[str, str]] = {
 
 
 class _VacancyLog:
-    """Строки журнала по вакансии: «[id] Название — Компания: событие».
+    """Строки журнала по вакансии: «Название — Компания: событие».
 
-    В JSONL поле `vacancy` остаётся без номера, номер идёт отдельным полем
-    `vacancy_id` — так отчёт читаем, а данные не дублируются.
+    В JSONL номер вакансии идёт отдельным полем `vacancy_id` и не дублируется
+    в тексте сообщения: его видно в поле, а не в каждой строке.
     """
 
     def __init__(
@@ -108,10 +181,13 @@ class _VacancyLog:
         self.company = company
         self.label = f"{title} — {company}" if company else title
         self.id = vacancy_id(url) or ""
-        self.prefix = f"[{self.id}] {self.label}" if self.id else self.label
 
     def info(self, message: str) -> None:
-        self._logger.info(f"{self.prefix}: {message}")
+        """Пишет сообщение в JSONL без номера, а в консоль — с номером вакансии."""
+        extra = {"vacancy_id": self.id} if self.id else {}
+        text = f"{self.label}: {message}"
+        console = f"[{self.id}] {text}" if self.id else text
+        self._logger.info(text, console_message=console, vacancy=self.label, **extra)
 
     def event(self, name: str, **fields: object) -> None:
         extra = {"vacancy_id": self.id} if self.id else {}
@@ -211,14 +287,6 @@ def _open_report(config: AppConfig, logger: RunLogger) -> ProcessedStore:
     processed = ProcessedStore(config.data.paths.report_dir)
     known = processed.load()
     logger.event("processed_loaded", count=known, path=str(processed.directory))
-    if processed.dropped_copies:
-        # В старых файлах оставались копии записи, которая уже есть в свежем:
-        # одна вакансия — одна запись, копии сняли при загрузке истории.
-        logger.event("processed_copies_dropped", count=processed.dropped_copies)
-        logger.info(
-            f"Убрал копии записей из старых файлов отчёта: {processed.dropped_copies}. "
-            "Вакансия остаётся только в файле последней обработки."
-        )
     return processed
 
 
@@ -525,7 +593,7 @@ def _process_vacancy(
             card,
             "Капча на странице вакансии. Запуск остановлен — откликнитесь вручную.",
         )
-        logger.info("hh.ru показал капчу на странице вакансии, запуск остановлен.")
+        log.info("hh.ru показал капчу на странице вакансии, запуск остановлен.")
         return
     except (VacancyParseError, PageLoadError, PlaywrightError) as exc:
         _record_error(stats, logger, page, config, card, exc)
@@ -670,6 +738,8 @@ def _process_vacancy(
         log.info(f"вакансия не подошла: {llm_reason}")
         return
 
+    needs_project_links = requires_project_links(details)
+
     try:
         generation = llm.generate(
             profile,
@@ -692,7 +762,25 @@ def _process_vacancy(
         )
 
     if not generation.cover_letter:
-        _queue(stats, logger, details, "empty_cover_letter", generation.reason)
+        cause = _generation_reason_text(generation.reason)
+        _queue(stats, logger, details, "empty_cover_letter", generation.reason, reason=cause)
+        return
+
+
+    if needs_project_links and not _letter_has_project_link(
+        generation.cover_letter, config.llm.cover_letter.pet_projects
+    ):
+        if config.llm.cover_letter.pet_projects:
+            reason = (
+                "В вакансии требуется ссылка на проекты в письме, но ни одна ссылка "
+                "из llm.cover_letter.pet-projects в письмо не попала"
+            )
+        else:
+            reason = (
+                "В вакансии требуется ссылка на проекты в письме, "
+                "но llm.cover_letter.pet-projects не задан"
+            )
+        _queue(stats, logger, details, "project_links", generation.reason, reason=reason)
         return
 
     log.event(
@@ -717,12 +805,13 @@ def _process_vacancy(
 
     captcha_waiter = _captcha_waiter(page, config, logger, details)
     try:
-        status = respond(page, generation.cover_letter, captcha_waiter=captcha_waiter)
+        result = respond(page, generation.cover_letter, captcha_waiter=captcha_waiter)
     except PlaywrightError as exc:
         _record_error(stats, logger, page, config, details, exc)
         return
 
-    log.event("respond", url=details.url, status=status)
+    status = result.status
+    log.event("respond", url=details.url, status=status, reason=result.reason)
 
     if status == STATUS_SENT:
         stats.sent.append(
@@ -757,7 +846,7 @@ def _process_vacancy(
         _queue(stats, logger, details, "captcha", "капча в форме отклика")
         stats.stop_reason = "Капча при отправке отклика — откликнитесь вручную"
         _notify_captcha_stop(config, logger, details, captcha_waiter)
-        logger.info("hh.ru показал капчу при отправке отклика, запуск остановлен.")
+        log.info("hh.ru показал капчу при отправке отклика, запуск остановлен.")
         return
 
     if status in ("test", "questionnaire", "external_form"):
@@ -766,15 +855,43 @@ def _process_vacancy(
 
     if status == STATUS_NO_FORM:
         _save_problem_screenshot(page, config, logger, "respond-no-form")
-        logger.event("respond_state", url=details.url, status=status, **response_state(page))
-        _queue(stats, logger, details, "unknown", "не найдена форма отклика")
+        logger.event(
+            "respond_state",
+            url=details.url,
+            vacancy_id=vacancy_id(details.url),
+            status=status,
+            reason=result.reason,
+            **response_state(page),
+        )
+        _queue(
+            stats,
+            logger,
+            details,
+            "no_form",
+            "не найдена форма отклика",
+            reason=result.reason,
+        )
         return
 
     if status == STATUS_UNKNOWN:
         _save_problem_screenshot(page, config, logger, "respond-unknown")
         # Что именно показал hh.ru — без письма и персональных данных.
-        logger.event("respond_state", url=details.url, status=status, **response_state(page))
-    _queue(stats, logger, details, "unknown", f"статус отклика: {status or STATUS_UNKNOWN}")
+        logger.event(
+            "respond_state",
+            url=details.url,
+            vacancy_id=vacancy_id(details.url),
+            status=status,
+            reason=result.reason,
+            **response_state(page),
+        )
+    _queue(
+        stats,
+        logger,
+        details,
+        "unknown",
+        f"статус отклика: {status or STATUS_UNKNOWN}",
+        reason=result.reason,
+    )
 
 
 def _queue(
@@ -783,21 +900,27 @@ def _queue(
     card: VacancyCard | VacancyDetails,
     code: str,
     note: str = "",
+    *,
+    reason: str = "",
 ) -> None:
-    """Отмечает вакансию как отложенную: отклик нужно отправить вручную."""
-    reason = QUEUE_REASON_TEXTS.get(code, QUEUE_REASON_TEXTS["unknown"])
+    """Отмечает вакансию как отложенную: отклик нужно отправить вручную.
+
+    `reason` — реальная причина, которую показал hh.ru. Она важнее общей
+    формулировки для кода: если сайт объяснил отказ, в отчёт идёт его текст.
+    """
+    text = reason.strip() or QUEUE_REASON_TEXTS.get(code, QUEUE_REASON_TEXTS["unknown"])
     log = _VacancyLog(logger, card.title, card.company, card.url)
     stats.queued.append(
         {
             "url": card.url,
             "title": card.title,
             "company": card.company,
-            "reason": reason,
+            "reason": text,
             "queued_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         }
     )
-    log.event("queued", url=card.url, title=card.title, code=code, reason=reason, note=note)
-    log.info(f"отложено, нужен ручной отклик: {reason.lower()}")
+    log.event("queued", url=card.url, title=card.title, code=code, reason=text, note=note)
+    log.info(f"отложено, нужен ручной отклик: {text}")
 
 
 class _CaptchaWaiter:
@@ -818,13 +941,28 @@ class _CaptchaWaiter:
         self._config = config
         self._logger = logger
         self._card = card
+        self._log = (
+            _VacancyLog(logger, card.title, card.company, card.url) if card is not None else None
+        )
         self.seconds = config.browser.captcha_wait_seconds
         self.notified = False
 
+    def _event(self, name: str, **fields: object) -> None:
+        if self._log is not None:
+            self._log.event(name, url=self._page.url, **fields)
+        else:
+            self._logger.event(name, url=self._page.url, **fields)
+
+    def _info(self, message: str) -> None:
+        if self._log is not None:
+            self._log.info(message)
+        else:
+            self._logger.info(message)
+
     def __call__(self) -> bool:
         seconds = self.seconds
-        self._logger.event("captcha_wait", seconds=seconds, url=self._page.url)
-        self._logger.info(
+        self._event("captcha_wait", seconds=seconds)
+        self._info(
             "hh.ru просит пройти капчу: введите текст с картинки в открытом окне браузера "
             f"и нажмите «Отправить», жду до {seconds} с."
         )
@@ -839,11 +977,11 @@ class _CaptchaWaiter:
             )
             self.notified = True
         solved = wait_for_captcha_solved(self._page, seconds)
-        self._logger.event("captcha_solved" if solved else "captcha_timeout", seconds=seconds)
+        self._event("captcha_solved" if solved else "captcha_timeout", seconds=seconds)
         if solved:
-            self._logger.info("Капча пройдена, продолжаю отклик.")
+            self._info("Капча пройдена, продолжаю отклик.")
         else:
-            self._logger.info("Капча не пройдена за отведённое время, отклик отложен.")
+            self._info("Капча не пройдена за отведённое время, отклик отложен.")
         return solved
 
 
@@ -907,9 +1045,14 @@ def _notify_captcha(
         )
     except Exception as exc:  # noqa: BLE001 - уведомление не должно ронять запуск
         sent, message = False, f"{type(exc).__name__}: {exc}"
-    logger.event("email_notify", kind="captcha", sent=sent, message=message)
+    vid = vacancy_id(url)
+    extra = {"vacancy_id": vid} if vid else {}
+    logger.event("email_notify", kind="captcha", sent=sent, message=message, **extra)
     if not sent:
-        logger.info(f"Письмо о капче не отправлено: {message}")
+        text = f"Письмо о капче не отправлено: {message}"
+        label = f"{title} — {company}" if company else title
+        console = f"[{vid}] {label}: {text}" if vid and label else None
+        logger.info(text, console_message=console, **extra)
 
 
 def _save_problem_screenshot(
@@ -949,7 +1092,9 @@ def _record_error(
 
     screenshot = config.data.paths.logs_dir / f"{logger.run_id}-error-{len(stats.errors)}.png"
     if save_screenshot(page, screenshot):
-        logger.event("screenshot", url=card.url, path=str(screenshot))
+        vid = vacancy_id(card.url)
+        extra = {"vacancy_id": vid} if vid else {}
+        logger.event("screenshot", url=card.url, path=str(screenshot), **extra)
 
 
 def _send_report_email(config: AppConfig, report: str, stats: RunStats) -> tuple[bool, str]:
@@ -1067,8 +1212,13 @@ def _remember_processing(
             reason=reason,
         )
     except ProcessedError as exc:
-        logger.event("processed_error", url=card.url, error=str(exc))
-        logger.info(f"Не удалось сохранить память об обработанной вакансии: {exc}")
+        vid = vacancy_id(card.url)
+        extra = {"vacancy_id": vid} if vid else {}
+        logger.event("processed_error", url=card.url, error=str(exc), **extra)
+        text = f"Не удалось сохранить память об обработанной вакансии: {exc}"
+        label = f"{card.title} — {card.company}" if card.company else card.title
+        console = f"[{vid}] {label}: {text}" if vid and label else None
+        logger.info(text, console_message=console, **extra)
 
 
 def _check_new_day(logger: RunLogger, processed: ProcessedStore) -> None:

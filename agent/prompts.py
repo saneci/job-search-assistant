@@ -45,6 +45,28 @@ OPENING_HINT_TEMPLATE = """ТРЕБОВАНИЕ ВАКАНСИИ К НАЧАЛУ
 Первым идёт «{opening}» дословно, сразу после него - «Здравствуйте!», затем обычный текст письма.
 """
 
+# Подсказка для случая, когда вакансия просит приложить ссылки на проекты.
+PROJECT_LINKS_HINT_TEMPLATE = """ТРЕБОВАНИЕ ВАКАНСИИ К ПРОЕКТАМ:
+В вакансии просят приложить ссылки на проекты в сопроводительном письме.
+{links}
+Не придумывай ссылки: используй только профиль и список выше.
+"""
+
+# Фразы, которыми вакансии просят ссылки на проекты в письме.
+_PROJECT_LINKS_RE = re.compile(
+    r"ссылк\w*\s+(?:на|к)\s+(?:ваш\w*\s+)?"
+    r"(?:проект\w*|портфолио|github|gitlab|репозитори\w*)"
+    r"|(?:приложите|приложить|пришлите|укажите|указать|добавьте|добавить|"
+    r"оставьте|оставить)\s+(?:ссылк\w*|портфолио)",
+    re.IGNORECASE,
+)
+
+
+def requires_project_links(vacancy: VacancyDetails) -> bool:
+    """Просит ли вакансия приложить к письму ссылки на проекты."""
+    return bool(_PROJECT_LINKS_RE.search(vacancy.description or ""))
+
+
 # Фразы, которыми вакансии задают обязательное начало письма:
 # «Начните сопроводительное письмо со слова 3PL», «Письмо должно начинаться с фразы «...»».
 _OPENING_TRIGGER_RE = re.compile(
@@ -110,7 +132,13 @@ def build_rejection_prompt(
 
 
 
-def build_user_prompt(profile: Profile, vacancy: VacancyDetails, opening: str = "") -> str:
+def build_user_prompt(
+    profile: Profile,
+    vacancy: VacancyDetails,
+    opening: str = "",
+    pet_projects: tuple[str, ...] = (),
+    needs_project_links: bool = False,
+) -> str:
     """Подставляет данные профиля и вакансии в шаблон user prompt.
 
     `opening` — обязательное начало письма из текста вакансии (если есть):
@@ -129,6 +157,19 @@ def build_user_prompt(profile: Profile, vacancy: VacancyDetails, opening: str = 
     prompt = USER_PROMPT_TEMPLATE
     for placeholder, value in values.items():
         prompt = prompt.replace(placeholder, str(value))
+    links = tuple(str(link).strip() for link in pet_projects if str(link).strip())
+    if needs_project_links:
+        if links:
+            listing = "\n".join(f"- {link}" for link in links)
+            hint = PROJECT_LINKS_HINT_TEMPLATE.format(
+                links=f"Ссылки пользователя:\n{listing}"
+            )
+        else:
+            hint = PROJECT_LINKS_HINT_TEMPLATE.format(
+                links="Ссылок в профиле и конфиге нет: не придумывай их."
+            )
+        prompt = prompt.replace("\nОцени вакансию", f"\n{hint}\nОцени вакансию", 1)
+
     return prompt
 
 

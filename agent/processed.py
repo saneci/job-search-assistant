@@ -29,9 +29,8 @@ class ProcessedStore:
     вакансия не будет обработана повторно ни завтра, ни через месяц. Прочие
     файлы каталога (не вида «ГГГГ-ММ-ДД.json») игнорируются.
 
-    Одна вакансия — одна запись: при повторе запись переносится в файл
-    сегодняшней даты, а копии, оставшиеся в старших файлах, снимаются при
-    загрузке истории (актуальной считается самая свежая запись).
+    Одна вакансия — одна запись по URL. При загрузке старые файлы не
+    переписываются, а при обновлении запись переносится в отчёт текущей даты.
     """
 
     def __init__(self, directory: Path, today: date | None = None) -> None:
@@ -39,7 +38,7 @@ class ProcessedStore:
         self.today = today or date.today()
         self._seen: dict[str, str] = {}
         self._records: dict[str, tuple[Path, dict[str, Any]]] = {}
-        # Сколько копий снято при последней загрузке истории (событие в логе).
+        # Сколько копий пропущено в памяти при загрузке истории (файлы не меняются).
         self.dropped_copies = 0
 
     @property
@@ -61,9 +60,9 @@ class ProcessedStore:
     def load(self) -> int:
         """Читает историю из всех файлов дат; возвращает число ключей.
 
-        Файлы читаются от свежих к старым, поэтому одна вакансия оставляет за
-        собой только самую новую запись: копии из старших файлов удаляются при
-        загрузке. Так история остаётся переносом записи, а не набором копий.
+        Файлы читаются от свежих к старым, поэтому для поиска и повторов
+        используется самая новая запись вакансии. Старые файлы остаются
+        историей и не переписываются.
         """
         self._seen.clear()
         self._records.clear()
@@ -74,8 +73,6 @@ class ProcessedStore:
             day = _file_date(file)
             if day is None:
                 continue
-            kept: list[dict[str, Any]] = []
-            dropped = False
             for record in _read(file):
                 keys = vacancy_keys(
                     str(record.get("title", "")),
@@ -83,15 +80,11 @@ class ProcessedStore:
                     str(record.get("url", "")),
                 )
                 if keys and any(key in self._records for key in keys):
-                    dropped = True
                     self.dropped_copies += 1
                     continue
-                kept.append(record)
                 for key in keys:
                     self._seen.setdefault(key, day.strftime(DATE_FORMAT))
                     self._records[key] = (file, record)
-            if dropped:
-                _write(file, kept)
         return len(self._seen)
 
     def find(self, title: str, company: str, url: str) -> str | None:
@@ -136,7 +129,7 @@ class ProcessedStore:
             return False
         known = next((self._records[key] for key in keys if key in self._records), None)
         if known is not None:
-            return self._update(known[0], known[1], status=status, reason=reason)
+            return self._update(known[1], status=status, reason=reason)
 
         item: dict[str, Any] = {
             "url": url,
@@ -159,11 +152,11 @@ class ProcessedStore:
             self._records.setdefault(key, (self.path, item))
         return True
 
-    def _update(self, path: Path, item: dict[str, Any], *, status: str, reason: str) -> bool:
+    def _update(self, item: dict[str, Any], *, status: str, reason: str) -> bool:
         """Обновляет запись о вакансии: повтор увеличивает счётчик попыток.
 
-        Запись переносится в отчёт сегодняшней даты, чтобы по файлу дня было
-        видно, что сделали сегодня, а старший файл оставался историей.
+        По URL должна остаться одна запись. Поэтому вакансия удаляется из всех
+        дневных файлов, а обновлённая запись попадает в отчёт сегодняшней даты.
         """
         item["status"] = status
         item["attempts"] = int(item.get("attempts", 1)) + 1
@@ -173,27 +166,26 @@ class ProcessedStore:
         else:
             item.pop("reason", None)
 
-        if path == self.path:
-            # Замена ровно одной строки: если в файле оказались копии, лишние
-            # убираем — в отчёте на вакансию всегда одна запись.
-            rows: list[dict[str, Any]] = []
-            replaced = False
-            for row in _read(path):
-                if _same_vacancy(row, item):
-                    if not replaced:
-                        rows.append(item)
-                        replaced = True
-                    continue
-                rows.append(row)
-            _write(path, rows)
-        else:
-            # Перенос, а не копия: из старого файла запись убираем, в файл
-            # сегодняшней даты кладём ровно одну строку (даже если там уже
-            # была такая же — иначе в отчёте появится дубль).
-            _write(path, [row for row in _read(path) if not _same_vacancy(row, item)])
-            today = [row for row in _read(self.path) if not _same_vacancy(row, item)]
+        for file in self.directory.glob("*.json"):
+            if file == self.path:
+                continue
+            rows = _read(file)
+            kept = [row for row in rows if not _same_vacancy(row, item)]
+            if len(kept) != len(rows):
+                _write(file, kept)
+
+        today: list[dict[str, Any]] = []
+        replaced = False
+        for row in _read(self.path):
+            if _same_vacancy(row, item):
+                if not replaced:
+                    today.append(item)
+                    replaced = True
+                continue
+            today.append(row)
+        if not replaced:
             today.append(item)
-            _write(self.path, today)
+        _write(self.path, today)
 
         for key in vacancy_keys(
             str(item.get("title", "")),

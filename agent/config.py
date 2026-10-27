@@ -19,6 +19,7 @@ from typing import Annotated, Any
 
 from pydantic import (
     BaseModel,
+    AliasChoices,
     BeforeValidator,
     ConfigDict,
     Field,
@@ -29,7 +30,7 @@ from pydantic import (
     model_validator,
 )
 from pydantic.fields import FieldInfo
-from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, PydanticBaseSettingsSource, SettingsConfigDict
 from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError
 
@@ -519,11 +520,36 @@ class CoverLetterConfig(BaseModel):
     max_length: PositiveInt = 1500
     # Личное поле: живёт в config.local.yaml, из окружения не читается.
     signature: str = ""
+    # Ссылки на проекты: нужны, если вакансия просит приложить их в письме.
+    pet_projects: Annotated[tuple[str, ...], NoDecode] = Field(
+        default_factory=tuple,
+        validation_alias=AliasChoices("pet-projects", "pet_projects"),
+    )
+
 
     @field_validator("signature", mode="before")
     @classmethod
     def _signature(cls, value: Any) -> str:
         return str(value).strip() if value is not None else ""
+
+    @field_validator("pet_projects", mode="before")
+    @classmethod
+    def _pet_projects(cls, value: Any) -> tuple[str, ...]:
+        if value is None:
+            return ()
+        if isinstance(value, str):
+            items: Sequence[Any] = (value,)
+        elif isinstance(value, Sequence):
+            items = value
+        else:
+            raise ValueError("llm.cover_letter.pet-projects должен быть списком ссылок")
+        result: list[str] = []
+        for item in items:
+            text = str(item).strip()
+            if text and text not in result:
+                result.append(text)
+        return tuple(result)
+
 
 
 class DecisionConfig(BaseModel):
@@ -768,7 +794,10 @@ class YamlSource(PydanticBaseSettingsSource):
 # Личные данные из окружения не читаются: их место — config.local.yaml.
 # Иначе старый .env молча перекрывал бы файл (а переводы строк в .env
 # превращаются в литеральные «\n» и ломают подпись).
-PERSONAL_FIELDS = frozenset({"llm.cover_letter.signature"})
+PERSONAL_FIELDS = frozenset({
+    "llm.cover_letter.signature",
+    "llm.cover_letter.pet_projects",
+})
 
 
 class EnvSourceWithoutPersonal(PydanticBaseSettingsSource):

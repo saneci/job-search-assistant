@@ -7,6 +7,7 @@ from datetime import date, datetime
 from pathlib import Path
 
 from agent.config import AppConfig, NotificationConfig, load_config
+from agent.llm import DecisionResult, GenerationResult
 from agent.logging_setup import RunLogger
 from agent.models import SentVacancy, SkippedVacancy, VacancyCard, VacancyDetails
 from agent.pipeline import (
@@ -21,6 +22,8 @@ from agent.pipeline import (
     _check_new_day,
     _counters,
     _final_message,
+    _generation_reason_text,
+    _letter_has_project_link,
     _notify_captcha,
     _notify_captcha_stop,
     _outcome,
@@ -108,7 +111,8 @@ def test_vacancy_log_prefixes_lines_and_events(tmp_path: Path) -> None:
     ]
 
     assert events[0]["event"] == "info"
-    assert events[0]["message"] == "[777] Java-разработчик — Ozon: открываю вакансию"
+    assert events[0]["message"] == "Java-разработчик — Ozon: открываю вакансию"
+    assert events[0]["vacancy_id"] == "777"
     assert events[1]["event"] == "respond"
     assert events[1]["vacancy"] == "Java-разработчик — Ozon"
     assert events[1]["vacancy_id"] == "777"
@@ -685,6 +689,9 @@ def test_queue_reason_texts_match_requirements() -> None:
     assert QUEUE_REASON_TEXTS["unknown"] == (
         "hh.ru не подтвердил отправку отклика — проверьте вакансию вручную"
     )
+    assert QUEUE_REASON_TEXTS["no_form"] == (
+        "hh.ru не показал форму отклика — проверьте вакансию вручную"
+    )
     assert QUEUE_REASON_TEXTS["captcha"] == "hh.ru просит пройти капчу: откликнитесь вручную"
 
 
@@ -744,17 +751,42 @@ def test_queue_records_human_reason(tmp_path: Path) -> None:
     assert stats.queued[0]["queued_at"]
 
 
-def test_queue_unknown_code_gets_generic_reason(tmp_path: Path) -> None:
+def test_queue_no_form_gets_specific_reason(tmp_path: Path) -> None:
     stats = make_stats()
     card = VacancyCard(title="Java", company="Ozon", url="https://hh.ru/vacancy/6")
-    logger = RunLogger(tmp_path / "logs", run_id="queued-unknown")
+    logger = RunLogger(tmp_path / "logs", run_id="queued-no-form")
 
     _queue(stats, logger, card, "no_form")
     logger.close()
 
     assert stats.queued[0]["reason"] == (
-        "hh.ru не подтвердил отправку отклика — проверьте вакансию вручную"
+        "hh.ru не показал форму отклика — проверьте вакансию вручную"
     )
+
+
+def test_queue_uses_reason_from_site(tmp_path: Path) -> None:
+    """Реальная причина от hh.ru важнее общей формулировки для кода."""
+    stats = make_stats()
+    card = VacancyCard(title="Java", company="Финтех", url="https://hh.ru/vacancy/137974891")
+    logger = RunLogger(tmp_path / "logs", run_id="queued-notice")
+    notice = (
+        "Чтобы откликнуться на эту вакансию, поменяйте видимость резюме на "
+        "«Видно всем работодателям, зарегистрированным на hh.ru»"
+    )
+
+    _queue(stats, logger, card, "no_form", reason=notice)
+    logger.close()
+
+    assert stats.queued[0]["reason"] == notice
+    events = [
+        json.loads(line) for line in logger.events_path.read_text(encoding="utf-8").splitlines()
+    ]
+    queued = [item for item in events if item["event"] == "queued"][0]
+    assert queued["reason"] == notice
+    assert queued["vacancy_id"] == "137974891"
+    info = [item for item in events if item["event"] == "info"][0]
+    assert info["vacancy_id"] == "137974891"
+    assert notice in info["message"]
 
 
 def test_remember_processing_writes_reason_to_day_report(tmp_path: Path) -> None:
@@ -950,3 +982,121 @@ def test_retry_goes_by_url_from_report(tmp_path: Path, monkeypatch) -> None:
         json.loads(line) for line in logger.events_path.read_text(encoding="utf-8").splitlines()
     ]
     assert [item["count"] for item in events if item["event"] == "retry_selected"] == [1]
+
+
+def test_generation_reason_strips_positive_intro() -> None:
+    """В отчёт идёт причина, а не вводное «профиль совпадает»."""
+    reason = (
+        "По Java, Spring, PostgreSQL, микросервисам, Kafka и Camunda профиль хорошо "
+        "совпадает с вакансией. Но для основной задачи — разработки серверных "
+        "приложений на Kotlin — требуется от двух лет опыта, а профиль подтверждает "
+        "только работу с Kotlin-утилитами и библиотеками без указания срока и "
+        "серверной разработки."
+    )
+
+    assert _generation_reason_text(reason) == (
+        "Для основной задачи — разработки серверных приложений на Kotlin — требуется "
+        "от двух лет опыта, а профиль подтверждает только работу с Kotlin-утилитами "
+        "и библиотеками без указания срока и серверной разработки."
+    )
+
+
+def test_generation_reason_keeps_plain_explanation() -> None:
+    reason = "Профиль не соответствует: нет опыта с Kotlin от двух лет."
+
+    assert _generation_reason_text(reason) == reason
+
+
+def test_generation_reason_handles_inline_contrast() -> None:
+    reason = "Java и Spring совпадают, но нет опыта с Kotlin от двух лет."
+
+    assert _generation_reason_text(reason) == "Нет опыта с Kotlin от двух лет."
+
+
+def test_generation_reason_drops_final_verdict() -> None:
+    reason = "Для задачи нужен опыт с Kotlin от двух лет. Поэтому вердикт: не подходит."
+
+    assert _generation_reason_text(reason) == "Для задачи нужен опыт с Kotlin от двух лет."
+
+
+def test_generation_reason_ignores_short_technical_text() -> None:
+    assert _generation_reason_text("ok") == ""
+    assert _generation_reason_text("") == ""
+
+
+
+def test_letter_has_project_link() -> None:
+    assert _letter_has_project_link("Ссылка: https://github.com/user/project", ())
+    assert _letter_has_project_link(
+        "Мой GitHub: github.com/user/project",
+        ("https://github.com/user/project",),
+    )
+    assert not _letter_has_project_link(
+        "Здравствуйте! Готов обсудить вакансию.",
+        ("https://github.com/user/project",),
+    )
+
+
+def test_required_project_link_blocks_send(tmp_path: Path, monkeypatch) -> None:
+    """Вакансия требует ссылки на проекты, а в письме их нет — не отправляем."""
+    base = make_config(tmp_path)
+    cover = base.llm.cover_letter.model_copy(
+        update={"pet_projects": ("https://github.com/user/project",)}
+    )
+    config = base.model_copy(
+        update={"llm": base.llm.model_copy(update={"cover_letter": cover})}
+    )
+    details = VacancyDetails(
+        url="https://hh.ru/vacancy/138836233",
+        title="Java-разработчик",
+        company="ППК",
+        salary="",
+        description=(
+            "P. S. Пожалуйста, приложите к отклику в сопроводительном письме "
+            "ссылку на ваши проекты (например, на GitHub)."
+        ),
+    )
+    monkeypatch.setattr("agent.pipeline.open_vacancy", lambda page, vacancy: details)
+
+    class FakeLLM:
+        def decide(self, profile, vacancy):
+            return DecisionResult(
+                fits=True,
+                probability=0.95,
+                threshold=0.8,
+                probabilities={"подходит": 0.95, "не подходит": 0.05},
+                chosen="подходит",
+            )
+
+        def generate(self, profile, vacancy, max_length=1500, signature=""):
+            return GenerationResult(
+                verdict="подходит",
+                reason="ok",
+                cover_letter="Здравствуйте! Готов обсудить вакансию.",
+            )
+
+    stats = make_stats()
+    logger = RunLogger(tmp_path / "logs", run_id="project-links")
+    card = VacancyCard(title="Java-разработчик", company="ППК", url=details.url)
+
+    _process_vacancy(
+        _FakePage("https://hh.ru/vacancy/138836233"),
+        config,
+        Profile(text="Java", examples="", style_rules=""),
+        FakeLLM(),
+        stats,
+        logger,
+        card,
+    )
+    logger.close()
+
+    assert stats.sent == []
+    assert stats.queued[0]["reason"] == (
+        "В вакансии требуется ссылка на проекты в письме, но ни одна ссылка "
+        "из llm.cover_letter.pet-projects в письмо не попала"
+    )
+    events = [
+        json.loads(line) for line in logger.events_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert [item["code"] for item in events if item["event"] == "queued"] == ["project_links"]
+
