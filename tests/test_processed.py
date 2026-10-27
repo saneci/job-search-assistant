@@ -5,6 +5,7 @@ import json
 from datetime import date
 from pathlib import Path
 
+import agent.processed as processed_module
 from agent.processed import ProcessedStore
 
 
@@ -47,7 +48,9 @@ def test_file_has_header_with_summary(tmp_path: Path) -> None:
     assert payload["vacancies"][0]["title"] == "Java-разработчик"
     assert payload["vacancies"][0]["status"] == "sent"
     assert payload["vacancies"][0]["attempts"] == 1
-    assert "processed_at" in payload["vacancies"][0]
+    assert payload["vacancies"][0]["profile"] == ""
+    assert payload["vacancies"][0]["created_at"]
+    assert payload["vacancies"][0]["updated_at"]
 
 
 def test_roll_to_switches_report_file(tmp_path: Path) -> None:
@@ -119,7 +122,8 @@ def test_copied_rows_collapse_when_updated(tmp_path: Path) -> None:
         "company": "Ozon",
         "status": "queued",
         "attempts": 1,
-        "processed_at": "2026-10-21T10:00:00+03:00",
+        "created_at": "2026-10-21T10:00:00+03:00",
+        "updated_at": "2026-10-21T10:00:00+03:00",
     }
     write_day(tmp_path, "2026-10-21", [dict(row)])
     write_day(tmp_path, "2026-10-22", [dict(row), dict(row)])
@@ -142,10 +146,15 @@ def test_pending_takes_newest_copy(tmp_path: Path) -> None:
         "company": "Ozon",
         "status": "error",
         "attempts": 1,
-        "processed_at": "2026-10-20T10:00:00+03:00",
+        "created_at": "2026-10-20T10:00:00+03:00",
+        "updated_at": "2026-10-20T10:00:00+03:00",
     }
     write_day(tmp_path, "2026-10-20", [dict(row)])
-    write_day(tmp_path, "2026-10-21", [{**row, "attempts": 2, "processed_at": "2026-10-21T10:00:00+03:00"}])
+    write_day(
+        tmp_path,
+        "2026-10-21",
+        [{**row, "attempts": 2, "updated_at": "2026-10-21T10:00:00+03:00"}],
+    )
 
     store = ProcessedStore(tmp_path, today=date(2026, 10, 22))
     store.load()
@@ -374,4 +383,127 @@ def test_error_record_keeps_message(tmp_path: Path) -> None:
 
     assert payload["vacancies"][0]["reason"] == "TimeoutError: timeout"
     assert payload["summary"]["error"] == 1
+
+
+def test_new_record_has_created_and_updated_at(tmp_path: Path) -> None:
+    """Новая запись сразу получает дату создания и дату последнего изменения."""
+    store = ProcessedStore(tmp_path, today=date(2026, 10, 21))
+    store.record(
+        url="https://hh.ru/vacancy/1",
+        title="Java",
+        company="Ozon",
+        status="sent",
+    )
+
+    row = read_day(tmp_path, "2026-10-21")["vacancies"][0]
+
+    assert row["created_at"] == row["updated_at"]
+
+
+def test_profile_is_written_and_preserved_on_update(tmp_path: Path) -> None:
+    """Резюме попадает в отчёт и не теряется при обновлении без profile."""
+    store = ProcessedStore(tmp_path, today=date(2026, 10, 21))
+    store.record(
+        url="https://hh.ru/vacancy/1",
+        title="Java",
+        company="Ozon",
+        status="error",
+        profile="Java Developer",
+    )
+
+    row = read_day(tmp_path, "2026-10-21")["vacancies"][0]
+    assert row["profile"] == "Java Developer"
+
+    store.record(
+        url="https://hh.ru/vacancy/1",
+        title="Java",
+        company="Ozon",
+        status="sent",
+    )
+
+    row = read_day(tmp_path, "2026-10-21")["vacancies"][0]
+    assert row["profile"] == "Java Developer"
+
+
+def test_created_at_survives_move_and_update(tmp_path: Path) -> None:
+    """При переносе в другой файл дата создания не меняется, дата изменения — да."""
+    store = ProcessedStore(tmp_path, today=date(2026, 10, 21))
+    store.record(
+        url="https://hh.ru/vacancy/1",
+        title="Java",
+        company="Ozon",
+        status="error",
+    )
+    created_at = read_day(tmp_path, "2026-10-21")["vacancies"][0]["created_at"]
+
+    store.roll_to(date(2026, 10, 22))
+    store.record(
+        url="https://hh.ru/vacancy/1",
+        title="Java",
+        company="Ozon",
+        status="sent",
+    )
+
+    row = read_day(tmp_path, "2026-10-22")["vacancies"][0]
+
+    assert row["created_at"] == created_at
+    assert row["updated_at"]
+
+
+def test_legacy_record_gets_created_at_from_processing_date(tmp_path: Path) -> None:
+    """У старой записи без created_at датой создания становится дата обработки."""
+    processing_date = "2026-10-20T00:00:00+03:00"
+    write_day(
+        tmp_path,
+        "2026-10-20",
+        [
+            {
+                "url": "https://hh.ru/vacancy/1",
+                "title": "Java",
+                "company": "Ozon",
+                "status": "error",
+                "attempts": 1,
+                "updated_at": processing_date,
+            }
+        ],
+    )
+
+    store = ProcessedStore(tmp_path, today=date(2026, 10, 21))
+    store.load()
+    store.record(
+        url="https://hh.ru/vacancy/1",
+        title="Java",
+        company="Ozon",
+        status="sent",
+    )
+
+    row = read_day(tmp_path, "2026-10-21")["vacancies"][0]
+
+    assert row["created_at"] == processing_date
+    assert row["updated_at"]
+
+
+def test_report_updated_at_changes_on_rewrite(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Дата обновления шапки меняется при каждой перезаписи файла отчёта."""
+    times = iter(
+        [
+            "2026-10-21T10:00:00+03:00",
+            "2026-10-21T10:00:01+03:00",
+            "2026-10-21T10:00:02+03:00",
+            "2026-10-21T10:00:03+03:00",
+        ]
+    )
+    monkeypatch.setattr(processed_module, "_now", lambda: next(times))
+    store = ProcessedStore(tmp_path, today=date(2026, 10, 21))
+
+    store.record(url="https://hh.ru/vacancy/1", title="Java", company="Ozon", status="error")
+    first = read_day(tmp_path, "2026-10-21")["updated_at"]
+
+    store.record(url="https://hh.ru/vacancy/1", title="Java", company="Ozon", status="sent")
+    second = read_day(tmp_path, "2026-10-21")["updated_at"]
+
+    assert first == "2026-10-21T10:00:01+03:00"
+    assert second == "2026-10-21T10:00:03+03:00"
 

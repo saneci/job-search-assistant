@@ -804,6 +804,28 @@ def test_remember_processing_writes_reason_to_day_report(tmp_path: Path) -> None
     assert records["vacancies"][0]["reason"] == "Стоп-слово в названии: 1С"
 
 
+def test_remember_processing_writes_profile(tmp_path: Path) -> None:
+    """В отчёт попадает резюме, с которым обрабатывалась вакансия."""
+    logger = RunLogger(tmp_path / "logs", run_id="profile")
+    store = ProcessedStore(tmp_path / "report", today=date(2026, 10, 21))
+    card = VacancyCard(title="Java", company="Ozon", url="https://hh.ru/vacancy/1")
+
+    _remember_processing(
+        store,
+        logger,
+        card,
+        OUTCOME_SKIPPED,
+        "Стоп-слово в названии: 1С",
+        "Java Developer",
+    )
+    logger.close()
+
+    report_path = tmp_path / "report" / "2026-10-21.json"
+    records = json.loads(report_path.read_text(encoding="utf-8"))
+
+    assert records["vacancies"][0]["profile"] == "Java Developer"
+
+
 def test_loop_chain_records_skip_reason(tmp_path: Path) -> None:
     """Цепочка как в цикле: счётчики -> _outcome -> _outcome_reason -> файл дня."""
     stats = RunStats(started_at=datetime(2026, 10, 21, 9, 0))

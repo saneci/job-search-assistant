@@ -160,7 +160,10 @@ def all_vacancies(paths: list[Path]) -> list[dict[str, Any]]:
         for vacancy in read_report(path)["vacancies"]:
             if isinstance(vacancy, dict):
                 items.append({**vacancy, "report_name": path.name})
-    items.sort(key=lambda item: str(item.get("processed_at", "")), reverse=True)
+    items.sort(
+        key=lambda item: str(item.get("updated_at") or item.get("created_at") or ""),
+        reverse=True,
+    )
     return items
 
 
@@ -198,18 +201,24 @@ def period_bounds(period: str, anchor: date) -> tuple[date, date]:
 
 
 def record_date(record: dict[str, Any]) -> date | None:
-    """Дата обработки записи; без валидного processed_at записи в период не попадают."""
-    value = str(record.get("processed_at", "")).strip()
-    if not value:
-        return None
-    try:
-        return datetime.fromisoformat(value).date()
-    except ValueError:
-        return None
+    """Дата создания записи для периода воронки.
+
+    Для старых отчётов, где `created_at` ещё нет, берётся `updated_at`:
+    другой даты в файле не сохранилось.
+    """
+    for field in ("created_at", "updated_at"):
+        value = str(record.get(field, "")).strip()
+        if not value:
+            continue
+        try:
+            return datetime.fromisoformat(value).date()
+        except ValueError:
+            continue
+    return None
 
 
 def latest_record_date(records: list[dict[str, Any]]) -> date | None:
-    """Самая свежая дата обработки — опора для календарных периодов."""
+    """Самая свежая дата создания — опора для календарных периодов."""
     dates = [value for record in records if (value := record_date(record))]
     return max(dates) if dates else None
 
@@ -217,7 +226,7 @@ def latest_record_date(records: list[dict[str, Any]]) -> date | None:
 def filter_by_period(
     records: list[dict[str, Any]], start: date, end: date
 ) -> list[dict[str, Any]]:
-    """Оставляет записи, обработанные в указанном календарном диапазоне."""
+    """Оставляет записи, созданные в указанном календарном диапазоне."""
     result: list[dict[str, Any]] = []
     for record in records:
         value = record_date(record)
@@ -257,8 +266,9 @@ def current_metrics(
     """Метрики по выбранным файлам (по умолчанию — по всем отчётам).
 
     Без `period` считаются все отчёты. С периодом записи фильтруются по
-    `processed_at`; точкой отсчёта служит последняя дата в данных, чтобы
-    воронка не оказалась пустой только из-за давно не обновлявшегося отчёта.
+    `created_at`: вакансия остаётся в когорте даты создания, даже если статус
+    изменился позже. Точкой отсчёта служит последняя дата создания в данных,
+    чтобы воронка не оказалась пустой из-за давно не обновлявшегося отчёта.
     """
     selected = report_files() if paths is None else paths
     items = dedupe_vacancies(all_vacancies(selected))
@@ -301,7 +311,7 @@ def current_metrics(
 
 
 def now() -> str:
-    """Локальное время в ISO-виде — как поле processed_at в отчёте."""
+    """Локальное время в ISO-виде для updated_at в отчёте."""
     return datetime.now().astimezone().isoformat(timespec="seconds")
 
 
@@ -395,7 +405,8 @@ async def update_status(update: StatusUpdate) -> dict[str, Any]:
     """Меняет статус вакансии и переносит её в отчёт текущей даты.
 
     В отчётах одна запись на URL: вакансия удаляется из всех файлов, а
-    обновлённая запись попадает в файл сегодняшней даты. `rejected` и `offer`
+    обновлённая запись попадает в файл сегодняшней даты. `created_at` при этом
+    не меняется, `updated_at` становится временем правки. `rejected` и `offer`
     терминальны, `offer` ставится только из `sent`.
     """
     if update.status not in STATUSES:
@@ -422,8 +433,14 @@ async def update_status(update: StatusUpdate) -> dict[str, Any]:
             ),
         )
 
+    changed_at = now()
+    # Дата создания не меняется при смене статуса и переносе между отчётами.
+    vacancy["created_at"] = str(
+        vacancy.get("created_at") or vacancy.get("updated_at") or changed_at
+    )
+    vacancy["profile"] = str(vacancy.get("profile") or "")
     vacancy["status"] = update.status
-    vacancy["processed_at"] = now()
+    vacancy["updated_at"] = changed_at
     if update.status in TERMINAL_STATUSES:
         vacancy["reason"] = (
             REJECTED_REASON if update.status == STATUS_REJECTED else OFFER_REASON
@@ -457,5 +474,7 @@ async def update_status(update: StatusUpdate) -> dict[str, Any]:
         "summary": summary,
         "attempts": vacancy.get("attempts", 0),
         "reason": str(vacancy.get("reason", "")),
-        "processed_at": vacancy["processed_at"],
+        "profile": vacancy["profile"],
+        "created_at": vacancy["created_at"],
+        "updated_at": vacancy["updated_at"],
     }
