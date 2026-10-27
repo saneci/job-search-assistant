@@ -72,6 +72,7 @@ def value_of(config: Any, field: str) -> Any:
         ("llm.generation.model", "gpt-6-luna-pro"),
         ("llm.decision.explain_rejections", False),
         ("llm.cover_letter.max_length", 1500),
+        ("llm.cover_letter.pet_projects", ()),
         ("browser.headless", False),
         ("browser.captcha_wait_seconds", 120),
         ("notifications.email.enabled", False),
@@ -187,3 +188,42 @@ def test_resolve_area_id(value: Any, expected: int) -> None:
 def test_unknown_area_raises() -> None:
     with pytest.raises(ConfigError):
         resolve_area_id("Марс")
+
+
+def test_pet_projects_from_config(tmp_path: Path) -> None:
+    config = load_config(
+        write_config(
+            tmp_path,
+            {
+                "llm": {
+                    "cover_letter": {
+                        "pet-projects": [
+                            " https://github.com/a/b ",
+                            "https://github.com/a/b",
+                            "",
+                        ]
+                    }
+                }
+            },
+        )
+    )
+
+    assert config.llm.cover_letter.pet_projects == ("https://github.com/a/b",)
+
+
+def test_pet_projects_must_be_list(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="pet-projects"):
+        load_config(
+            write_config(tmp_path, {"llm": {"cover_letter": {"pet-projects": 42}}})
+        )
+
+
+def test_pet_projects_are_not_read_from_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("LLM__COVER_LETTER__PET_PROJECTS", "https://github.com/env")
+
+    config = load_config(write_config(tmp_path))
+
+    assert config.llm.cover_letter.pet_projects == ()
+

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import time
+from dataclasses import dataclass
 from typing import Callable, Sequence
 from urllib.parse import urlparse
 
@@ -46,6 +47,61 @@ LETTER_TEXTAREA_SELECTORS = (
     "textarea",
 )
 MODAL_SELECTORS = ("[data-qa='modal-content']", "[role='dialog']")
+
+# Информационные сообщения формы отклика. hh.ru объясняет в них, почему отклик
+# нельзя отправить (например, резюме скрыто от работодателей).
+NOTICE_SELECTORS = (
+    "[data-qa='vacancy-response-popup-form-notice']",
+    "[data-qa='vacancy-response-notice']",
+    "[data-qa*='visibility']",
+    "[data-qa*='hint']",
+    "[data-qa*='notice']",
+    "[data-qa*='alert']",
+    "[role='alert']",
+)
+# Сообщения, которые видно на странице после неудачной отправки.
+PAGE_NOTICE_SELECTORS = (
+    "[data-qa*='error']",
+    "[data-qa*='notice']",
+    "[data-qa*='alert']",
+    "[data-qa*='notification']",
+    "[role='alert']",
+    "div[class*='notification']",
+    "div[class*='toast']",
+)
+NOTICE_MIN_LENGTH = 20
+NOTICE_MAX_LENGTH = 400
+# Интерфейсные подписи формы: это не причина, их в отчёт не пишем.
+UI_TEXT_RE = re.compile(
+    r"^(отклик на вакансию|сопроводительное письмо|откликнуться|сгенерировать|"
+    r"видно всем работодателям|видно только выбранным работодателям)\s*$",
+    re.IGNORECASE,
+)
+UI_CLOSEST_SELECTOR = (
+    "button, [role='button'], h1, h2, h3, h4, h5, h6, [role='heading'], "
+    "label, select, option, [role='combobox'], [role='listbox'], [role='option'], "
+    "[contenteditable], textarea, [data-qa='vacancy-description'], .vacancy-description"
+)
+# Признаки объяснения причины: по ним отличаем сообщение от названия резюме.
+CAUSE_TEXT_RE = re.compile(
+    r"чтобы|нельзя|невозможн|поменяйте|измените|заполните|укажите|"
+    r"требует|необходим|должн|доступн|видимост|отклик",
+    re.IGNORECASE,
+)
+# Текст контейнера формы: если он попал целиком, это обёртка, а не причина.
+CONTAINER_TEXT_RE = re.compile(
+    r"сопроводительное письмо|отклик на вакансию|сгенерировать",
+    re.IGNORECASE,
+)
+# Только прямые текстовые узлы элемента: обёртка с вложенными блоками даёт пусто.
+DIRECT_TEXT_SCRIPT = (
+    "el => Array.from(el.childNodes)"
+    ".filter(node => node.nodeType === 3)"
+    ".map(node => node.textContent || '')"
+    ".join(' ')"
+    ".replace(/\\s+/g, ' ')"
+    ".trim()"
+)
 
 STATUS_SENT = "sent"
 STATUS_ALREADY_RESPONDED = "already_responded"
@@ -122,6 +178,19 @@ LETTER_SETTLE_MS = 1000
 
 class VacancyParseError(RuntimeError):
     """Не удалось разобрать страницу вакансии."""
+
+
+@dataclass(frozen=True)
+class ResponseResult:
+    """Итог попытки отклика: статус и причина, которую показал hh.ru.
+
+    `reason` — дословный текст информационного сообщения hh.ru (например,
+    требование изменить видимость резюме). Пустая строка значит, что сайт
+    причину не объяснил, и в отчёт идёт общий текст для статуса.
+    """
+
+    status: str
+    reason: str = ""
 
 
 def open_vacancy(page: Page, card: VacancyCard) -> VacancyDetails:
@@ -260,39 +329,47 @@ def respond(
     page: Page,
     letter: str,
     captcha_waiter: Callable[[], bool] | None = None,
-) -> str:
-    """Отправляет отклик с сопроводительным письмом. Возвращает статус.
+) -> ResponseResult:
+    """Отправляет отклик с сопроводительным письмом.
 
     `captcha_waiter` вызывается, когда hh.ru просит капчу: приложение только ждёт
     ручного решения и продолжает, если человек её прошёл.
+
+    Вместе со статусом возвращаем причину, которую hh.ru показал в форме:
+    без неё непонятно, почему отклик не ушёл (например, резюме скрыто).
     """
     if detect_captcha(page) and not _solve_captcha(captcha_waiter):
-        return STATUS_CAPTCHA
+        return _result(STATUS_CAPTCHA)
 
     button = _find_action(page, RESPOND_BUTTON_SELECTORS, RESPOND_RE)
     if button is None:
-        return STATUS_ALREADY_RESPONDED if _is_already_responded(page) else STATUS_NO_FORM
+        if _is_already_responded(page):
+            return _result(STATUS_ALREADY_RESPONDED)
+        return _result(STATUS_NO_FORM, page)
 
     try:
         button.click()
     except PlaywrightError:
-        return STATUS_UNKNOWN
+        return _result(STATUS_UNKNOWN, page)
 
     ui = _wait_for_response_ui(page, captcha_waiter)
     if ui == STATUS_CAPTCHA:
-        return STATUS_CAPTCHA
+        return _result(STATUS_CAPTCHA)
     if ui in ("test", "questionnaire", "external_form"):
+        reason = response_notice(page)
         _dismiss(page)
-        return ui
+        return _result(ui, reason=reason)
     if ui != "ready":
+        reason = response_notice(page)
         _dismiss(page)
-        return STATUS_NO_FORM
+        return _result(STATUS_NO_FORM, reason=reason)
 
     scope = _response_scope(page)
     blocker = detect_response_blocker(scope)
     if blocker:
+        reason = response_notice(page)
         _dismiss(page)
-        return blocker
+        return _result(blocker, reason=reason)
 
     # Письмо вставляем, если форма позволяет (по ТЗ).
     if _fill_letter(page, scope, letter):
@@ -301,18 +378,21 @@ def respond(
     submit = _find_action(scope, SUBMIT_SELECTORS, RESPOND_RE)
     if submit is None:
         blocker = detect_response_blocker(scope)
+        reason = response_notice(page)
         _dismiss(page)
-        return blocker or STATUS_NO_FORM
+        return _result(blocker or STATUS_NO_FORM, reason=reason)
     if not _is_enabled(submit):
-        # Кнопка заблокирована (например, резюме скрыто): жать её бессмысленно.
+        # Кнопка заблокирована (например, резюме скрыто): жать её бессмысленно,
+        # а причину hh.ru пишет информационным сообщением в самой форме.
         blocker = detect_response_blocker(scope)
+        reason = response_notice(page)
         _dismiss(page)
-        return blocker or STATUS_NO_FORM
+        return _result(blocker or STATUS_NO_FORM, reason=reason)
 
     try:
         submit.click()
     except PlaywrightError:
-        return STATUS_UNKNOWN
+        return _result(STATUS_UNKNOWN, page)
 
     result = _wait_for_response_result(page, captcha_waiter)
 
@@ -327,9 +407,97 @@ def respond(
             else:
                 result = _wait_for_response_result(page, captcha_waiter)
 
+    reason = response_notice(page) if result != STATUS_SENT else ""
     if result in ("test", "questionnaire", "external_form"):
         _dismiss(page)
-    return result
+    return _result(result, reason=reason)
+
+
+def _result(status: str, page: Page | None = None, *, reason: str = "") -> ResponseResult:
+    """Собирает итог отклика: статус и причину со страницы, если она есть."""
+    if not reason and page is not None:
+        reason = response_notice(page)
+    return ResponseResult(status=status, reason=reason)
+
+
+def response_notice(page: Page) -> str:
+    """Возвращает информационное сообщение формы отклика — реальную причину.
+
+    Сначала смотрим явные подсказки/уведомления, затем абзацы внутри модалки.
+    Текст описания вакансии и подписи интерфейса не попадают: нужен только
+    текст, которым hh.ru объясняет, почему отклик недоступен или не ушёл.
+    """
+    scope = _response_scope(page)
+    if _modal_hidden(page):
+        raw = _first_text(page, PAGE_NOTICE_SELECTORS)
+        return _clean_notice(raw) if len(raw) <= NOTICE_MAX_LENGTH else ""
+    raw = _first_text(scope, NOTICE_SELECTORS)
+    if raw and len(raw) <= NOTICE_MAX_LENGTH and _looks_like_notice(_clean_notice(raw)):
+        return _clean_notice(raw)
+    return _notice_from_text_blocks(scope)
+
+
+def _notice_from_text_blocks(scope: Locator | Page) -> str:
+    """Ищет абзац-объяснение в модалке, пропуская кнопки, подписи и заголовки."""
+    for selector in ("p", "div", "span"):
+        try:
+            items = scope.locator(selector)
+            total = min(items.count(), 50)
+        except PlaywrightError:
+            continue
+        for index in range(total):
+            try:
+                item = items.nth(index)
+                if not item.is_visible() or _inside_ui(item):
+                    continue
+                raw = item.inner_text() if selector == "p" else _direct_text(item)
+                raw = " ".join(raw.split())
+            except PlaywrightError:
+                continue
+            # Длинный блок — это обёртка со всем содержимым формы, а не причина.
+            if len(raw) > NOTICE_MAX_LENGTH:
+                continue
+            text = _clean_notice(raw)
+            if not _looks_like_notice(text):
+                continue
+            if selector != "p" and not CAUSE_TEXT_RE.search(text):
+                continue
+            return text
+    return ""
+
+
+def _inside_ui(locator: Locator) -> bool:
+    """Элемент — часть интерфейса формы, а не текст с причиной."""
+    try:
+        return bool(locator.evaluate(f"el => !!el.closest({UI_CLOSEST_SELECTOR!r})"))
+    except PlaywrightError:
+        return False
+
+
+def _direct_text(locator: Locator) -> str:
+    """Текст самого элемента без вложенных блоков."""
+    try:
+        text = locator.evaluate(DIRECT_TEXT_SCRIPT)
+    except PlaywrightError:
+        return ""
+    return text if isinstance(text, str) else ""
+
+
+def _clean_notice(text: str) -> str:
+    """Приводит сообщение к одной строке пригодной длины."""
+    cleaned = " ".join((text or "").split())
+    if len(cleaned) > NOTICE_MAX_LENGTH:
+        cleaned = cleaned[:NOTICE_MAX_LENGTH].rstrip() + "…"
+    return cleaned
+
+
+def _looks_like_notice(text: str) -> bool:
+    """Похоже ли сообщение на объяснение причины, а не на подпись формы."""
+    if len(text) < NOTICE_MIN_LENGTH or UI_TEXT_RE.match(text):
+        return False
+    if CONTAINER_TEXT_RE.search(text):
+        return False
+    return any(char.isalpha() for char in text)
 
 
 def _solve_captcha(captcha_waiter: Callable[[], bool] | None) -> bool:

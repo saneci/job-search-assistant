@@ -88,14 +88,17 @@ class RunLogger:
         self._file.write(json.dumps(record, ensure_ascii=False) + "\n")
         self._file.flush()
 
-    def info(self, message: str) -> None:
+    def info(self, message: str, *, console_message: str | None = None, **fields: Any) -> None:
         """Печатает сообщение пользователю и дублирует его в лог.
 
         В консоль строка выводится с меткой времени в локальной зоне
         ([2026-10-21 16:02:37]); в JSONL время уже есть в поле ts.
+        `console_message` позволяет показать человеку более полную строку
+        (например, с номером вакансии), не дублируя её в поле `message`.
+        Дополнительные поля (например, `vacancy_id`) попадают в запись события.
         """
-        self.event("info", message=message)
-        print(self._stamped(message), flush=True)
+        self.event("info", message=message, **fields)
+        print(self._stamped(console_message or message), flush=True)
 
     def info_plain(self, message: str) -> None:
         """Печатает многострочный блок (например, отчёт) без меток времени."""

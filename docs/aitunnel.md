@@ -2,14 +2,15 @@
 
 AITUNNEL — единый OpenAI-совместимый API для доступа к ведущим ИИ-моделям из России: OpenAI, Anthropic, Google,
 DeepSeek, Qwen, Moonshot и другим. Один ключ, один формат запросов, оплата в рублях, VPN не нужен.
+Актуальная документация: [docs.md](https://aitunnel.ru/docs.md).
 
 ## Ключевые параметры
 
 - Base URL: `https://api.aitunnel.ru/v1`
 - Заголовок авторизации: `Authorization: Bearer sk-aitunnel-xxx`
-- Формат ключа: `sk-aitunnel-…` 
+- Формат ключа: `sk-aitunnel-…`
 - Формат запросов: OpenAI Chat Completions API
-- Актуальный список моделей и цены: [models.md](models.md])
+- Актуальный список моделей и цены: [models.md](https://aitunnel.ru/docs/models.md)
 
 Если запрос отправляется с сервера за пределами России, ответ вернётся ещё быстрее — без дополнительных прокси.
 
@@ -63,86 +64,6 @@ chat_result = client.chat.completions.create(
 print(chat_result.choices[0].message)
 ```
 
-### JavaScript
-
-```javascript
-import OpenAI from "openai";
-
-const client = new OpenAI({
-    apiKey: "sk-aitunnel-xxx", // ключ из личного кабинета
-    baseURL: "https://api.aitunnel.ru/v1/",
-});
-
-const chatResult = await client.chat.completions.create({
-    messages: [{role: "user", content: "Скажи интересный факт"}],
-    model: "deepseek-v4-pro",
-    max_tokens: 50000, // указывайте для точного расчёта цены
-});
-
-console.log(chatResult.choices[0]?.message);
-```
-
-### Go
-
-```go
-package main
-
-import (
-  "context"
-  "fmt"
-  "log"
-
-  openai "github.com/sashabaranov/go-openai"
-)
-
-func main() {
-  client := openai.NewClientWithConfig(openai.ClientConfig{
-    APIKey:  "sk-aitunnel-xxx",
-    BaseURL: "https://api.aitunnel.ru/v1/",
-  })
-
-  resp, err := client.CreateChatCompletion(context.Background(), openai.ChatCompletionRequest{
-    Model:     "deepseek-v4-pro",
-    MaxTokens: 50000,
-    Messages: []openai.ChatCompletionMessage{
-      {Role: "user", Content: "Скажи интересный факт"},
-    },
-  })
-  if err != nil {
-    log.Fatal(err)
-  }
-
-  fmt.Println(resp.Choices[0].Message.Content)
-}
-```
-
-### PHP
-
-```php
-<?php
-$api_key = 'sk-aitunnel-xxx';
-$api_url = 'https://api.aitunnel.ru/v1/chat/completions';
-
-$payload = [
-    'model' => 'deepseek-v4-pro',
-    'max_tokens' => 50000,
-    'messages' => [
-        ['role' => 'user', 'content' => 'Скажи интересный факт'],
-    ],
-];
-
-$ch = curl_init($api_url);
-curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-curl_setopt($ch, CURLOPT_HTTPHEADER, [
-    'Content-Type: application/json',
-    'Authorization: Bearer ' . $api_key,
-]);
-curl_setopt($ch, CURLOPT_POST, true);
-curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($payload));
-
-echo curl_exec($ch);
-```
-
 Указывайте `max_tokens`: по этому значению резервируется стоимость запроса, а после ответа списывается фактический
 расход.
 
@@ -150,29 +71,29 @@ echo curl_exec($ch);
 
 - Чат с моделями — `POST /chat/completions`. Текстовые запросы к 100+ моделям: GPT, Claude, Gemini, DeepSeek, Qwen, Kimi
   и другим.
-- [Генерация изображений](https://aitunnel.ru/docs/images) — `POST /images/generations`. GPT Image, Flux, Seedream —
+- [Генерация изображений](https://aitunnel.ru/docs/images.md) — `POST /images/generations`. GPT Image, Flux, Seedream —
   генерация и редактирование по референсным изображениям.
-- [Генерация видео](https://aitunnel.ru/docs/videos) — `POST /videos`. Veo, Seedance, Wan через асинхронный эндпоинт с
+- [Генерация видео](https://aitunnel.ru/docs/videos.md) — `POST /videos`. Veo, Seedance, Wan через асинхронный эндпоинт с
   опросом статуса задачи.
-- [Аудио в чате](https://aitunnel.ru/docs/audio) — `POST /chat/completions`. Аудиофайл на вход (input_audio) и голосовой
+- [Аудио в чате](https://aitunnel.ru/docs/audio.md) — `POST /chat/completions`. Аудиофайл на вход (input_audio) и голосовой
   ответ модели (modalities, audio).
-- [Озвучка текста](https://aitunnel.ru/docs/text-to-speech) — `POST /audio/speech`. Text-to-Speech с выбором голоса и
+- [Озвучка текста](https://aitunnel.ru/docs/text-to-speech.md) — `POST /audio/speech`. Text-to-Speech с выбором голоса и
   формата аудио.
-- [Распознавание речи](https://aitunnel.ru/docs/speech-to-text) — `POST /audio/transcriptions`. Whisper, GPT-4o
+- [Распознавание речи](https://aitunnel.ru/docs/speech-to-text.md) — `POST /audio/transcriptions`. Whisper, GPT-4o
   Transcribe, Voxtral, Qwen3-ASR, Chirp 3 — транскрипция аудио.
-- [Эмбеддинги](https://aitunnel.ru/docs/embeddings) — `POST /embeddings`. Векторные представления текста для поиска и
+- [Эмбеддинги](https://aitunnel.ru/docs/embeddings.md) — `POST /embeddings`. Векторные представления текста для поиска и
   RAG.
-- [Модерация](https://aitunnel.ru/docs/moderation) — `POST /moderations`. Проверка контента перед отправкой в модель или
+- [Модерация](https://aitunnel.ru/docs/moderation.md) — `POST /moderations`. Проверка контента перед отправкой в модель или
   публикацией.
-- [Ранжирование](https://aitunnel.ru/docs/rerank) — `POST /rerank`. Перестановка документов по релевантности запросу —
+- [Ранжирование](https://aitunnel.ru/docs/rerank.md) — `POST /rerank`. Перестановка документов по релевантности запросу —
   второй шаг RAG после эмбеддингов.
-- [Решения](https://aitunnel.ru/docs/decisions) — `POST /decisions`. Ответы да/нет, выбор варианта и оценка по шкале с
+- [Решения](https://aitunnel.ru/docs/decisions.md) — `POST /decisions`. Ответы да/нет, выбор варианта и оценка по шкале с
   вероятностями — для роутинга, классификации и проверки действий агента.
-- [RAG](https://aitunnel.ru/docs/rag) — `POST /embeddings · /rerank`. Поиск по своей базе и ответ модели по найденному
+- [RAG](https://aitunnel.ru/docs/rag.md) — `POST /embeddings · /rerank`. Поиск по своей базе и ответ модели по найденному
   контексту — эмбеддинги, rerank, чат.
 - Другие форматы API — `POST /messages · /responses`. Нативный Claude Messages API и Responses API OpenAI — те же ключ и
   base URL.
-- [Пакетные запросы](https://aitunnel.ru/docs/batch) — `POST /batches`. Много запросов одним пакетом со скидкой на
+- [Пакетные запросы](https://aitunnel.ru/docs/batch.md) — `POST /batches`. Много запросов одним пакетом со скидкой на
   токены. Результаты забираете позже.
 
 ## Модель auto
@@ -209,83 +130,6 @@ chat_result = client.chat.completions.create(
     model="auto",
 )
 print(chat_result.choices[0].message)
-```
-
-### JavaScript
-
-```javascript
-import OpenAI from "openai";
-
-const client = new OpenAI({
-    apiKey: "sk-aitunnel-xxx",
-    baseURL: "https://api.aitunnel.ru/v1/",
-});
-
-const chatResult = await client.chat.completions.create({
-    messages: [{role: "user", content: "Скажи интересный факт"}],
-    model: "auto",
-});
-
-console.log(chatResult.choices[0]?.message);
-```
-
-### Go
-
-```go
-package main
-
-import (
-  "context"
-  "fmt"
-  "log"
-
-  openai "github.com/sashabaranov/go-openai"
-)
-
-func main() {
-  client := openai.NewClientWithConfig(openai.ClientConfig{
-    APIKey:  "sk-aitunnel-xxx",
-    BaseURL: "https://api.aitunnel.ru/v1/",
-  })
-
-  resp, err := client.CreateChatCompletion(context.Background(), openai.ChatCompletionRequest{
-    Model: "auto",
-    Messages: []openai.ChatCompletionMessage{
-      {Role: "user", Content: "Скажи интересный факт"},
-    },
-  })
-  if err != nil {
-    log.Fatal(err)
-  }
-
-  fmt.Println(resp.Choices[0].Message.Content)
-}
-```
-
-### PHP
-
-```php
-<?php
-$api_key = 'sk-aitunnel-xxx';
-$api_url = 'https://api.aitunnel.ru/v1/chat/completions';
-
-$payload = [
-    'model' => 'auto',
-    'messages' => [
-        ['role' => 'user', 'content' => 'Скажи интересный факт'],
-    ],
-];
-
-$ch = curl_init($api_url);
-curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-curl_setopt($ch, CURLOPT_HTTPHEADER, [
-    'Content-Type: application/json',
-    'Authorization: Bearer ' . $api_key,
-]);
-curl_setopt($ch, CURLOPT_POST, true);
-curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($payload));
-
-echo curl_exec($ch);
 ```
 
 Оплата идёт по фактически выбранной модели, её точное название возвращается в поле `model` ответа. Работает в

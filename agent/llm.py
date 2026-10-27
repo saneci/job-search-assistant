@@ -21,6 +21,7 @@ from .prompts import (
     build_rejection_prompt,
     build_user_prompt,
     detect_required_opening,
+    requires_project_links,
     load_system_prompt,
 )
 
@@ -127,7 +128,13 @@ class LLMClient:
         opening = detect_required_opening(vacancy)
         messages: list[dict[str, str]] = [
             {"role": "system", "content": self._system_prompt},
-            {"role": "user", "content": build_user_prompt(profile, vacancy, opening)},
+            {"role": "user", "content": build_user_prompt(
+                profile,
+                vacancy,
+                opening,
+                self.config.cover_letter.pet_projects,
+                requires_project_links(vacancy),
+            )},
         ]
         attempts = 2 if self.config.generation.retry_on_invalid_json else 1
         last_error: LLMResponseError | None = None

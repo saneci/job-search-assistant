@@ -958,13 +958,16 @@
                             }
                             const result = await resp.json();
 
-                            // Обновляем локальные данные
-                            const vac = allVacancies.find(x => x.url === url && x.report_name === reportName);
+                            // Запись перенесена в отчёт текущей даты: обновляем строку и убираем копии.
+                            const vac = allVacancies.find(x => x.url === url && x.report_name === reportName)
+                                || allVacancies.find(x => x.url === url);
                             if (vac) {
                                 vac.status = newStatus;
+                                if (result.report_name) vac.report_name = result.report_name;
                                 if (result.attempts !== undefined) vac.attempts = result.attempts;
                                 if (result.reason !== undefined) vac.reason = result.reason;
                                 if (result.processed_at) vac.processed_at = result.processed_at;
+                                allVacancies = allVacancies.filter(x => x.url !== url || x === vac);
                             }
 
                             // Обновляем сводку из ответа сервера
