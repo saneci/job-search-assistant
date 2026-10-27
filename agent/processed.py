@@ -31,6 +31,11 @@ class ProcessedStore:
 
     Одна вакансия — одна запись по URL. При загрузке старые файлы не
     переписываются, а при обновлении запись переносится в отчёт текущей даты.
+
+    У записи две даты: `created_at` — дата обработки вакансии, она не меняется
+    при переносах между файлами и сменах статуса, и `updated_at` — когда запись
+    последний раз менялась. Для старых записей без `created_at` используется
+    дата обработки, сохранённая в самой записи.
     """
 
     def __init__(self, directory: Path, today: date | None = None) -> None:
@@ -106,7 +111,7 @@ class ProcessedStore:
             seen.add(id(record))
             if str(record.get("status", "")) in wanted:
                 found.append(record)
-        found.sort(key=lambda item: str(item.get("processed_at", "")), reverse=True)
+        found.sort(key=_record_time, reverse=True)
         return found
 
 
@@ -118,9 +123,11 @@ class ProcessedStore:
         company: str,
         status: str,
         reason: str = "",
+        profile: str | None = None,
     ) -> bool:
         """Записывает вакансию в отчёт дня; известную запись обновляет (повтор).
 
+        `profile` — название резюме, с которым обрабатывалась вакансия.
         Возвращает False, если вакансию нечем опознать при следующем запуске:
         нет ни ссылки, ни названия с компанией.
         """
@@ -129,15 +136,20 @@ class ProcessedStore:
             return False
         known = next((self._records[key] for key in keys if key in self._records), None)
         if known is not None:
-            return self._update(known[1], status=status, reason=reason)
+            return self._update(
+                known[1], status=status, reason=reason, profile=profile
+            )
 
+        now = _now()
         item: dict[str, Any] = {
             "url": url,
             "title": title,
             "company": company,
             "status": status,
             "attempts": 1,
-            "processed_at": _now(),
+            "profile": profile or "",
+            "created_at": now,
+            "updated_at": now,
         }
         if reason:
             item["reason"] = reason
@@ -152,15 +164,30 @@ class ProcessedStore:
             self._records.setdefault(key, (self.path, item))
         return True
 
-    def _update(self, item: dict[str, Any], *, status: str, reason: str) -> bool:
+    def _update(
+        self,
+        item: dict[str, Any],
+        *,
+        status: str,
+        reason: str,
+        profile: str | None = None,
+    ) -> bool:
         """Обновляет запись о вакансии: повтор увеличивает счётчик попыток.
 
         По URL должна остаться одна запись. Поэтому вакансия удаляется из всех
         дневных файлов, а обновлённая запись попадает в отчёт сегодняшней даты.
         """
+        now = _now()
+        if profile is not None:
+            item["profile"] = profile
+        # Дата создания фиксируется один раз. Для старых записей без неё берём
+        # дату обработки из самой записи, а не дату файла.
+        item["created_at"] = str(
+            item.get("created_at") or item.get("updated_at") or now
+        )
         item["status"] = status
         item["attempts"] = int(item.get("attempts", 1)) + 1
-        item["processed_at"] = _now()
+        item["updated_at"] = now
         if reason:
             item["reason"] = reason
         else:
@@ -223,14 +250,33 @@ def _summary(items: list[dict[str, Any]]) -> dict[str, int]:
     return counts
 
 
+def _normalize_times(item: dict[str, Any], now: str) -> dict[str, Any]:
+    """Дополняет старую запись датами, не меняя уже известные значения."""
+    normalized = dict(item)
+    created_at = str(
+        normalized.get("created_at") or normalized.get("updated_at") or now
+    )
+    updated_at = str(normalized.get("updated_at") or created_at)
+    normalized["created_at"] = created_at
+    normalized["updated_at"] = updated_at
+    return normalized
+
+
+def _record_time(item: dict[str, Any]) -> str:
+    """Время последнего изменения записи для сортировки и повторов."""
+    return str(item.get("updated_at") or item.get("created_at") or "")
+
+
 def _write(path: Path, items: list[dict[str, Any]]) -> None:
     """Пишет файл дня: шапка с итогами и плоский список вакансий."""
     day = _file_date(path)
+    now = _now()
+    normalized = [_normalize_times(item, now) for item in items]
     payload: dict[str, Any] = {
         "date": day.strftime(DATE_FORMAT) if day else path.stem,
-        "updated_at": _now(),
-        "summary": _summary(items),
-        "vacancies": items,
+        "updated_at": now,
+        "summary": _summary(normalized),
+        "vacancies": normalized,
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_suffix(path.suffix + ".tmp")
@@ -242,7 +288,7 @@ def _write(path: Path, items: list[dict[str, Any]]) -> None:
 
 
 def _now() -> str:
-    """Локальное время в ISO-виде — как в поле processed_at."""
+    """Локальное время в ISO-виде для created_at и updated_at."""
     return datetime.now().astimezone().isoformat(timespec="seconds")
 
 

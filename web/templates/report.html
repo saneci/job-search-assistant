@@ -966,7 +966,8 @@
                                 if (result.report_name) vac.report_name = result.report_name;
                                 if (result.attempts !== undefined) vac.attempts = result.attempts;
                                 if (result.reason !== undefined) vac.reason = result.reason;
-                                if (result.processed_at) vac.processed_at = result.processed_at;
+                                if (result.created_at) vac.created_at = result.created_at;
+                                if (result.updated_at) vac.updated_at = result.updated_at;
                                 allVacancies = allVacancies.filter(x => x.url !== url || x === vac);
                             }
 
@@ -996,7 +997,7 @@
                     // Дата и время
                     const tdTime = document.createElement('td');
                     tdTime.className = 'time-cell';
-                    tdTime.textContent = formatDateTime(v.processed_at);
+                    tdTime.textContent = formatDateTime(v.updated_at);
                     tr.appendChild(tdTime);
 
                     frag.appendChild(tr);

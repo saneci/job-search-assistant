@@ -3,7 +3,7 @@
 Модуль не зависит от FastAPI: на вход идут записи `vacancies` из файлов дня,
 на выходе — готовые числа для шаблона. Одна вакансия учитывается один раз:
 при повторах запись переносится между файлами, поэтому перед подсчётом
-выбирается самая свежая запись по ссылке (или названию и компании).
+выбирается самая свежая запись по `updated_at` (или названию и компании).
 """
 
 from __future__ import annotations
@@ -51,15 +51,17 @@ def _vacancy_key(record: Mapping[str, Any], index: int) -> tuple[str, ...]:
     return ("row", str(index))
 
 
-def _processed_key(record: Mapping[str, Any]) -> tuple[float, str]:
-    """Время обработки для выбора самой свежей записи о вакансии."""
-    value = str(record.get("processed_at", "")).strip()
-    if not value:
-        return 0.0, ""
-    try:
-        return datetime.fromisoformat(value).timestamp(), value
-    except ValueError:
-        return 0.0, value
+def _updated_key(record: Mapping[str, Any]) -> tuple[float, str]:
+    """Время последнего изменения для выбора самой свежей записи о вакансии."""
+    for field in ("updated_at", "created_at"):
+        value = str(record.get(field, "")).strip()
+        if not value:
+            continue
+        try:
+            return datetime.fromisoformat(value).timestamp(), value
+        except ValueError:
+            continue
+    return 0.0, ""
 
 
 def dedupe_vacancies(records: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
@@ -69,7 +71,7 @@ def dedupe_vacancies(records: Iterable[Mapping[str, Any]]) -> list[dict[str, Any
         item = dict(record)
         key = _vacancy_key(item, index)
         previous = best.get(key)
-        if previous is None or _processed_key(item) >= _processed_key(previous):
+        if previous is None or _updated_key(item) >= _updated_key(previous):
             best[key] = item
     return list(best.values())
 

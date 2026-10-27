@@ -425,7 +425,7 @@ def _process_vacancies(
                         "skipped_processed",
                         url=card.url,
                         title=card.title,
-                        processed_at=previous,
+                        seen_on=previous,
                     )
                     _VacancyLog(logger, card.title, card.company, card.url).info(
                         f"уже обрабатывалась {previous}, пропускаю"
@@ -520,6 +520,7 @@ def _process_and_remember(
             card,
             outcome,
             _outcome_reason(stats, counters, outcome),
+            config.pipeline.resume.name,
         )
 
 
@@ -1191,6 +1192,7 @@ def _remember_processing(
     card: VacancyCard,
     outcome: str,
     reason: str = "",
+    profile: str | None = None,
 ) -> None:
     """Записывает вакансию в дневной отчёт, чтобы не проходить её снова.
 
@@ -1210,6 +1212,7 @@ def _remember_processing(
             company=card.company,
             status=outcome,
             reason=reason,
+            profile=profile,
         )
     except ProcessedError as exc:
         vid = vacancy_id(card.url)

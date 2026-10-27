@@ -9,13 +9,14 @@ import pytest
 from web.metrics import build_metrics, dedupe_vacancies
 
 
-def row(url: str, status: str, processed_at: str = "") -> dict[str, Any]:
+def row(url: str, status: str, updated_at: str = "") -> dict[str, Any]:
     return {
         "url": f"https://hh.ru/vacancy/{url}",
         "title": f"Вакансия {url}",
         "company": "Компания",
         "status": status,
-        "processed_at": processed_at,
+        "created_at": updated_at,
+        "updated_at": updated_at,
     }
 
 
@@ -112,6 +113,29 @@ def test_dedupe_keeps_latest_record() -> None:
 
     assert len(unique) == 1
     assert unique[0]["status"] == "rejected"
+
+
+def test_dedupe_uses_updated_at() -> None:
+    """Самая свежая запись определяется по updated_at, а не по старому полю."""
+    rows = [
+        {
+            "url": "https://hh.ru/vacancy/1",
+            "status": "sent",
+            "created_at": "2026-09-30T10:00:00+03:00",
+            "updated_at": "2026-09-30T10:00:00+03:00",
+        },
+        {
+            "url": "https://hh.ru/vacancy/1",
+            "status": "offer",
+            "created_at": "2026-09-30T10:00:00+03:00",
+            "updated_at": "2026-10-24T11:00:00+03:00",
+        },
+    ]
+
+    unique = dedupe_vacancies(rows)
+
+    assert len(unique) == 1
+    assert unique[0]["status"] == "offer"
 
 
 def test_empty_report_has_no_fake_percent() -> None:

@@ -32,13 +32,24 @@ def vacancy(url: str, status: str) -> dict[str, Any]:
         "company": "Компания",
         "status": status,
         "attempts": 1,
-        "processed_at": "2026-10-24T10:00:00+03:00",
+        "created_at": "2026-10-24T10:00:00+03:00",
+        "updated_at": "2026-10-24T10:00:00+03:00",
     }
 
 
-def vacancy_at(url: str, status: str, processed_at: str) -> dict[str, Any]:
+def vacancy_at(url: str, status: str, at: str) -> dict[str, Any]:
     item = vacancy(url, status)
-    item["processed_at"] = processed_at
+    item["created_at"] = at
+    item["updated_at"] = at
+    return item
+
+
+def vacancy_with_dates(
+    url: str, status: str, created_at: str, updated_at: str
+) -> dict[str, Any]:
+    item = vacancy(url, status)
+    item["created_at"] = created_at
+    item["updated_at"] = updated_at
     return item
 
 
@@ -130,6 +141,14 @@ def test_metrics_page_has_period_filter(client: TestClient) -> None:
     assert "filter-btn active" in response.text
 
 
+def test_metrics_page_explains_period_basis(client: TestClient) -> None:
+    """Пользователь видит, по какой дате считается период воронки."""
+    response = client.get("/metrics")
+
+    assert response.status_code == 200
+    assert "Период воронки считается по дате первой обработки вакансии в приложением." in response.text
+
+
 def test_metrics_api_filters_by_period(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -159,6 +178,38 @@ def test_metrics_api_filters_by_period(
 
     assert client.get("/api/v1/metrics?period=decade").status_code == 422
     assert client.get("/metrics?period=decade").status_code == 422
+
+
+def test_metrics_period_uses_creation_date(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ответ по старому отклику остаётся в когорте месяца создания."""
+    monkeypatch.setattr(web_main, "REPORTS_DIR", tmp_path)
+    write_report(
+        tmp_path,
+        "2026-10-24.json",
+        [
+            vacancy_with_dates(
+                "1",
+                "offer",
+                "2026-09-30T10:00:00+03:00",
+                "2026-10-24T10:00:00+03:00",
+            ),
+            vacancy_with_dates(
+                "2",
+                "sent",
+                "2026-10-24T10:00:00+03:00",
+                "2026-10-24T10:00:00+03:00",
+            ),
+        ],
+    )
+    client = TestClient(web_main.app)
+
+    metrics = client.get("/api/v1/metrics?period=month").json()
+
+    assert metrics["total"] == 1
+    assert metrics["responses"] == 1
+    assert metrics["offers"] == 0
 
 
 def test_metrics_header_shows_date_like_report(client: TestClient) -> None:
@@ -196,6 +247,71 @@ def test_report_page_warns_about_terminal_status(client: TestClient) -> None:
     assert 'id="terminalDialog"' in response.text
     assert "необратимая операция" in response.text
     assert "TERMINAL_STATUSES" in response.text
+
+
+def test_update_status_keeps_created_at(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ручная смена статуса не переписывает дату создания записи."""
+    monkeypatch.setattr(web_main, "REPORTS_DIR", tmp_path)
+    today = tmp_path / "today.json"
+    monkeypatch.setattr(web_main, "current_report_path", lambda: today)
+    created_at = "2026-09-30T10:00:00+03:00"
+    write_report(
+        tmp_path,
+        "2026-10-24.json",
+        [vacancy_with_dates("1", "sent", created_at, created_at)],
+    )
+    client = TestClient(web_main.app)
+
+    response = client.post(
+        "/api/v1/update-status",
+        json={
+            "report_name": "2026-10-24.json",
+            "url": "https://hh.ru/vacancy/1",
+            "status": "offer",
+        },
+    )
+
+    assert response.status_code == 200
+    result = response.json()
+    assert result["created_at"] == created_at
+    assert result["updated_at"] != created_at
+
+    data = json.loads(today.read_text(encoding="utf-8"))
+    row = data["vacancies"][0]
+    assert row["created_at"] == created_at
+    assert row["updated_at"] == result["updated_at"]
+
+
+def test_update_status_preserves_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ручная смена статуса не теряет резюме, с которым шёл отклик."""
+    monkeypatch.setattr(web_main, "REPORTS_DIR", tmp_path)
+    today = tmp_path / "today.json"
+    monkeypatch.setattr(web_main, "current_report_path", lambda: today)
+    item = vacancy_with_dates(
+        "1", "sent", "2026-10-24T10:00:00+03:00", "2026-10-24T10:00:00+03:00"
+    )
+    item["profile"] = "Java Developer"
+    write_report(tmp_path, "2026-10-24.json", [item])
+    client = TestClient(web_main.app)
+
+    response = client.post(
+        "/api/v1/update-status",
+        json={
+            "report_name": "2026-10-24.json",
+            "url": "https://hh.ru/vacancy/1",
+            "status": "offer",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["profile"] == "Java Developer"
+
+    data = json.loads(today.read_text(encoding="utf-8"))
+    assert data["vacancies"][0]["profile"] == "Java Developer"
 
 
 def test_offer_status_can_be_set_manually(client: TestClient) -> None:
