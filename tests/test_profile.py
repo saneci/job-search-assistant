@@ -1,92 +1,84 @@
-"""Тесты разбора PROFILE.md."""
+"""Тесты обезличивания профиля: персональные данные не попадают в промпт."""
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
-from agent.profile import ProfileError, load_profile, split_style_section
+from agent.profile import (
+    BIRTHDAY_REPLACEMENT,
+    CONTACT_REPLACEMENT,
+    DOCUMENT_REPLACEMENT,
+    EMAIL_REPLACEMENT,
+    PHONE_REPLACEMENT,
+    Profile,
+    normalize_text,
+    scrub_personal_data,
+)
 
-SAMPLE_PROFILE = """# PROFILE: Тестовый пользователь
-
-## Краткое описание
-
-Java-разработчик с опытом микросервисов.
-
-## Стиль написания сопроводительных писем
-
-* **Тон:** Уверенный, без лести.
-* **Правила:**
-    * Не использовать шаблонные фразы.
-    * Подкреплять утверждения примерами.
-* **Примеры (для few-shot):**
-    * «Здравствуйте! Мой опыт в Kafka подходит вакансии.»
-    * «Добрый день. Разрабатывал кредитный конвейер.»
-
-## Контакты
-
-* Email: test@example.com
+RESUME_TEXT = """Java-разработчик
+Опыт работы
+ООО «Ромашка», ведущий разработчик, 2021-2026
+Почта: ivan.petrov@example.com
+Телефон: +7 (999) 123-45-67
+Телеграм: @ivan_petrov, https://t.me/ivan_petrov
+Дата рождения: 1 января 1990
+СНИЛС: 123-456-789 00
+Навыки: Java, Spring Boot, Kafka, PostgreSQL
 """
 
 
-def test_split_style_and_examples() -> None:
-    style_rules, examples = split_style_section(SAMPLE_PROFILE)
+@pytest.mark.parametrize(
+    ("text", "marker", "secret"),
+    [
+        ("Пишите на ivan.petrov@example.com", EMAIL_REPLACEMENT, "ivan.petrov@example.com"),
+        ("Телефон +7 (999) 123-45-67", PHONE_REPLACEMENT, "123-45-67"),
+        ("Телефон 8 999 123 45 67", PHONE_REPLACEMENT, "123 45 67"),
+        ("Телеграм @ivan_petrov", CONTACT_REPLACEMENT, "@ivan_petrov"),
+        ("Профиль https://t.me/ivan_petrov", CONTACT_REPLACEMENT, "ivan_petrov"),
+        ("Дата рождения: 1 января 1990", BIRTHDAY_REPLACEMENT, "1990"),
+        ("СНИЛС 123-456-789 00", DOCUMENT_REPLACEMENT, "123-456-789"),
+        ("ИНН: 771234567890", DOCUMENT_REPLACEMENT, "771234567890"),
+    ],
+)
+def test_personal_data_is_replaced(text: str, marker: str, secret: str) -> None:
+    """Контакты и номера заменяются метками, а не остаются в тексте."""
+    scrubbed = scrub_personal_data(text)
 
-    assert "Тон" in style_rules
-    assert "шаблонные фразы" in style_rules
-    assert "Примеры" not in style_rules
-    assert "Kafka" in examples
-    assert "кредитный конвейер" in examples
-    assert "Контакты" not in examples
-
-
-def test_missing_style_section() -> None:
-    assert split_style_section("# PROFILE\n\n## Опыт\n\nJava") == ("", "")
-
-
-def test_examples_heading_is_not_confused_with_word_naprimer() -> None:
-    text = """## Стиль написания сопроводительных писем
-
-* **Правила:**
-    * Подкреплять примерами (например, «внедрил Prometheus»).
-* **Примеры (для few-shot):**
-    * «Первый пример письма,
-      продолжение первого примера.»
-    * «Второй пример письма.»
-
-## Контакты
-"""
-
-    style_rules, examples = split_style_section(text)
-
-    assert "например" in style_rules
-    assert "Примеры (для few-shot)" not in style_rules
-    assert examples == (
-        "- «Первый пример письма, продолжение первого примера.»\n"
-        "- «Второй пример письма.»"
-    )
+    assert marker in scrubbed
+    assert secret not in scrubbed
 
 
-def test_load_profile(tmp_path: Path) -> None:
-    path = tmp_path / "PROFILE.md"
-    path.write_text(SAMPLE_PROFILE, encoding="utf-8")
+def test_professional_facts_survive_scrubbing() -> None:
+    """Профессиональная часть резюме не страдает от обезличивания."""
+    scrubbed = scrub_personal_data(RESUME_TEXT)
 
-    profile = load_profile(path)
-
-    assert profile.text == SAMPLE_PROFILE
-    assert "Уверенный" in profile.style_rules
-    assert "Здравствуйте" in profile.examples
-
-
-def test_load_profile_without_style_raises(tmp_path: Path) -> None:
-    path = tmp_path / "PROFILE.md"
-    path.write_text("# PROFILE\n\n## Опыт\n\nJava", encoding="utf-8")
-
-    with pytest.raises(ProfileError):
-        load_profile(path)
+    assert "Java" in scrubbed
+    assert "Spring Boot" in scrubbed
+    assert "Kafka" in scrubbed
+    assert "ООО «Ромашка»" in scrubbed
+    assert "ivan.petrov@example.com" not in scrubbed
+    assert "+7 (999) 123-45-67" not in scrubbed
+    assert "ivan_petrov" not in scrubbed
 
 
-def test_load_profile_missing_file(tmp_path: Path) -> None:
-    with pytest.raises(ProfileError):
-        load_profile(tmp_path / "PROFILE.md")
+def test_nbsp_and_extra_spaces_are_normalized() -> None:
+    """hh.ru отдаёт NBSP: без нормализации ломаются заголовки и дедупликация."""
+    text = "Опыт\u00a0работы\n\n  Java\u00a021  \n\u200b\n"
+
+    assert normalize_text(text) == "Опыт работы\nJava 21"
+
+
+def test_technical_annotation_is_not_a_contact() -> None:
+    """Аннотации в стеке (@Override, @Autowired) — факт о кандидате, а не контакт."""
+    text = "Spring: @Override, @Autowired, @Transactional, @GetMapping"
+
+    assert scrub_personal_data(text) == text
+
+
+def test_profile_keeps_only_text() -> None:
+    """Стиль живёт в SYSTEM_PROMPT.md: в профиле остаются только факты."""
+    profile = Profile(text="Java")
+
+    assert profile.text == "Java"
+    assert not hasattr(profile, "examples")
+    assert not hasattr(profile, "style_rules")

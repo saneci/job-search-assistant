@@ -160,6 +160,43 @@ def test_boost_without_resume_name_is_disabled(tmp_path: Path) -> None:
     assert not (tmp_path / "cache.json").exists()
 
 
+def test_boost_disabled_reports_reason(tmp_path: Path) -> None:
+    """Причина отключения подъёма видна в журнале: пустое название резюме."""
+    config = make_config(tmp_path, name="")
+    logger = make_logger(tmp_path)
+
+    status = boost_resume(FakePage("Java"), config, logger)  # type: ignore[arg-type]
+    logger.close()
+
+    events = [
+        json.loads(line) for line in logger.events_path.read_text(encoding="utf-8").splitlines()
+    ]
+
+    assert status == STATUS_DISABLED
+    assert events[-1]["event"] == "resume_boost_disabled"
+    assert events[-1]["reason"] == "pipeline.resume.name не задан"
+
+
+def test_boost_disabled_by_flag_reports_reason(tmp_path: Path) -> None:
+    """Причина отключения подъёма видна в журнале: флаг resume.boost."""
+    base = make_config(tmp_path)
+    resume = base.pipeline.resume.model_copy(update={"boost": False})
+    config = base.model_copy(
+        update={"pipeline": base.pipeline.model_copy(update={"resume": resume})}
+    )
+    logger = make_logger(tmp_path)
+
+    status = boost_resume(FakePage("Java-разработчик"), config, logger)  # type: ignore[arg-type]
+    logger.close()
+
+    events = [
+        json.loads(line) for line in logger.events_path.read_text(encoding="utf-8").splitlines()
+    ]
+
+    assert status == STATUS_DISABLED
+    assert events[-1]["reason"] == "boost: false"
+
+
 def test_boost_clicks_button_and_marks_cache(tmp_path: Path) -> None:
     config = make_config(tmp_path)
     page = FakePage("Java-разработчик")

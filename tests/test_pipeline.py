@@ -1136,7 +1136,7 @@ def test_retry_does_not_wait_between_records(tmp_path: Path, monkeypatch) -> Non
     _retry_vacancies(
         _FakePage("https://hh.ru/vacancy/1"),
         config,
-        Profile(text="Java", examples="", style_rules=""),
+        Profile(text="Java"),
         None,  # type: ignore[arg-type]
         stats,
         logger,
@@ -1186,7 +1186,7 @@ def test_llm_skip_does_not_wait_pause(tmp_path: Path, monkeypatch) -> None:
     _process_vacancy(
         _FakePage(details.url),
         config,
-        Profile(text="Java", examples="", style_rules=""),
+        Profile(text="Java"),
         FakeLLM(),
         stats,
         logger,
@@ -1245,7 +1245,7 @@ def test_pause_happens_before_response(tmp_path: Path, monkeypatch) -> None:
     _process_vacancy(
         _FakePage(details.url),
         config,
-        Profile(text="Java", examples="", style_rules=""),
+        Profile(text="Java"),
         FakeLLM(),
         stats,
         logger,
@@ -1299,7 +1299,7 @@ def test_respond_rejected_marks_vacancy_rejected(tmp_path: Path, monkeypatch) ->
     _process_vacancy(
         _FakePage(details.url),
         config,
-        Profile(text="Java", examples="", style_rules=""),
+        Profile(text="Java"),
         FakeLLM(),
         stats,
         logger,
@@ -1366,7 +1366,7 @@ def test_retry_pauses_before_response(tmp_path: Path, monkeypatch) -> None:
     _retry_vacancies(
         _FakePage(details.url),
         config,
-        Profile(text="Java", examples="", style_rules=""),
+        Profile(text="Java"),
         FakeLLM(),
         stats,
         logger,
@@ -1403,7 +1403,7 @@ def test_excluded_company_gets_own_status(tmp_path: Path) -> None:
     _process_vacancy(
         _FakePage("https://hh.ru/search/vacancy"),
         config,
-        Profile(text="Java", examples="", style_rules=""),
+        Profile(text="Java"),
         None,  # type: ignore[arg-type]
         stats,
         logger,
@@ -1433,7 +1433,7 @@ def test_stop_word_gets_excluded_status(tmp_path: Path) -> None:
     _process_vacancy(
         _FakePage("https://hh.ru/search/vacancy"),
         config,
-        Profile(text="Java", examples="", style_rules=""),
+        Profile(text="Java"),
         None,  # type: ignore[arg-type]
         stats,
         logger,
@@ -1483,7 +1483,7 @@ def test_retry_goes_by_url_from_report(tmp_path: Path, monkeypatch) -> None:
     _retry_vacancies(
         _FakePage("https://hh.ru/vacancy/1"),
         config,
-        Profile(text="Java", examples="", style_rules=""),
+        Profile(text="Java"),
         None,  # type: ignore[arg-type]
         stats,
         logger,
@@ -1601,7 +1601,7 @@ def test_required_project_link_blocks_send(tmp_path: Path, monkeypatch) -> None:
     _process_vacancy(
         _FakePage("https://hh.ru/vacancy/138836233"),
         config,
-        Profile(text="Java", examples="", style_rules=""),
+        Profile(text="Java"),
         FakeLLM(),
         stats,
         logger,
@@ -1663,7 +1663,7 @@ def test_resume_not_found_is_logged_and_stops_run(tmp_path: Path, monkeypatch) -
         _process_vacancy(
             _FakePage(details.url),
             config,
-            Profile(text="Java", examples="", style_rules=""),
+            Profile(text="Java"),
             FakeLLM(),
             stats,
             logger,

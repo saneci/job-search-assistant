@@ -50,7 +50,6 @@ DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config.yaml"
 LOCAL_CONFIG_NAME = "config.local.yaml"
 DEFAULT_SYSTEM_PROMPT_PATH = PROJECT_ROOT / "SYSTEM_PROMPT.md"
 
-DEFAULT_PROFILE_PATH = PROJECT_ROOT / "data" / "profile.md"
 # Файлы сессии раздельные: cookie hh.ru и career.habr.com не мешают друг другу.
 DEFAULT_STATE_PATH = PROJECT_ROOT / "data" / "hh-state.json"
 DEFAULT_HABR_STATE_PATH = PROJECT_ROOT / "data" / "habr-state.json"
@@ -381,11 +380,14 @@ class DelayRange(BaseModel):
 
 
 class ResumeConfig(BaseModel):
-    """Подъём резюме в поиске: название резюме и минимальный интервал между подъёмами."""
+    """Резюме на hh.ru: источник профиля, подъём в поиске и интервал между подъёмами."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
+    # Источник профиля для LLM: название резюме в списке резюме hh.ru.
     name: str = ""
+    # Подъём резюме в поиске. false — не поднимать, профиль всё равно собирается.
+    boost: bool = True
     boost_interval_hours: PositiveInt = 4
 
     @field_validator("name", mode="before")
@@ -525,7 +527,6 @@ class DataPathsConfig(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    profile: Path = DEFAULT_PROFILE_PATH
     # Сессия hh.ru: имя ключа прежнее, изменился только файл по умолчанию.
     session_state: Path = DEFAULT_STATE_PATH
     # Сессия career.habr.com и постоянный профиль Chrome для hCaptcha.
@@ -536,7 +537,6 @@ class DataPathsConfig(BaseModel):
     logs_dir: Path = DEFAULT_LOGS_DIR
 
     @field_validator(
-        "profile",
         "session_state",
         "habr_session_state",
         "habr_profile",

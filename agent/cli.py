@@ -7,12 +7,14 @@ import os
 import subprocess
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 from typing import TextIO
 
 from .browser import BrowserError, BrowserSession
 from .channel import CHANNEL_NAMES
 from .config import (
     DEFAULT_CONFIG_PATH,
+    PROJECT_ROOT,
     AppConfig,
     ConfigError,
     load_config,
@@ -33,11 +35,16 @@ from .pipeline import (
     RETRY_ALL,
     ResumeNameError,
     channel_for,
+    load_profile,
     log_channel_choice,
     run,
     session_settings,
 )
 from .profile import ProfileError
+from .resume import resume_block_report, resume_markup_report
+
+# Куда сохраняется профиль при `--dump-profile` без явного пути.
+DEFAULT_PROFILE_DUMP_PATH = PROJECT_ROOT / "data" / "profile.dump.md"
 
 # `--retry` без значения повторяет статусы из retry.statuses.
 RETRY_CHOICES = (RETRY_ALL,) + RETRYABLE_STATUSES
@@ -182,6 +189,11 @@ GENERAL_OPTIONS = (
     (
         "--channel, --ch <CHANNEL>",
         "канал запуска: hh или habr, по умолчанию: search.channel из config.yaml",
+    ),
+    (
+        "--dump-profile [PATH]",
+        "собрать профиль для LLM, сохранить в файл для отладки и выйти "
+        "(по умолчанию: data/profile.dump.md)",
     ),
     ("-r, --retry, --re [STATUS]", "повторить обработку вакансий, без поиска"),
     (
@@ -526,6 +538,16 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--dump-profile",
+        nargs="?",
+        const=str(DEFAULT_PROFILE_DUMP_PATH),
+        metavar="PATH",
+        help=(
+            "собрать профиль для LLM, сохранить в файл для отладки и выйти "
+            "(по умолчанию: data/profile.dump.md)"
+        ),
+    )
+    parser.add_argument(
         "--excluded",
         action="store_true",
         help="синоним «--retry excluded»: только исключённые вакансии (стоп-слова, компании)",
@@ -574,6 +596,9 @@ def main(argv: list[str] | None = None) -> int:
                 return 1
             return 0
 
+        if args.dump_profile:
+            return _dump_profile(config, logger, args.dump_profile, args.channel)
+
         if not config.llm.api_key.get_secret_value():
             print(
                 "Не задан AITUNNEL_API_KEY. Скопируйте .env.example в .env и укажите ключ.",
@@ -601,6 +626,53 @@ def main(argv: list[str] | None = None) -> int:
             print("Запуск прерван пользователем.", file=sys.stderr)
             return 130
 
+    return 0
+
+
+def _dump_profile(
+        config: AppConfig,
+        logger: RunLogger,
+        path: str,
+        channel_name: str | None = None,
+) -> int:
+    """Собирает профиль для LLM и сохраняет его в файл для отладки.
+
+    В файл попадает только обезличенный профессиональный блок: контакты и личные
+    сведения отбрасываются при сборе. Нужен, чтобы разобрать причины отказа LLM.
+    После разбора файл лучше удалить.
+    """
+    target = Path(path)
+    channel = channel_for(config, channel_name)
+    state_path, profile_dir = session_settings(config, channel)
+    try:
+        with BrowserSession(config.browser, state_path, logger, profile_dir) as session:
+            session.ensure_logged_in(channel.auth_check, channel.login_url, channel.site_label)
+            page = session.new_page()
+            profile = load_profile(page, config, channel, logger)
+            report = resume_block_report(page)
+            markup = resume_markup_report(page)
+    except (BrowserError, ProfileError) as exc:
+        logger.event("profile_dump_error", error=f"{type(exc).__name__}: {exc}")
+        print(f"Профиль не собран: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(profile.text + "\n", encoding="utf-8")
+    except OSError as exc:
+        logger.event("profile_dump_error", error=str(exc))
+        print(f"Не удалось сохранить профиль: {exc}", file=sys.stderr)
+        return 1
+
+    logger.event("profile_dumped", path=str(target), chars=len(profile.text))
+    print(f"Профиль собран и сохранён в {target} ({len(profile.text)} символов).")
+    print("Блоки страницы:")
+    for line in report:
+        print(line)
+    print("Разметка страницы (data-qa):")
+    for line in markup:
+        print(line)
+    print("После разбора файл лучше удалить: в нём обезличенный профиль.")
     return 0
 
 

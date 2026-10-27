@@ -1,76 +1,114 @@
-"""Разбор PROFILE.md: описание пользователя, примеры писем и правила стиля."""
+"""Профиль пользователя для LLM: обезличенный профессиональный блок резюме.
+
+Профиль собирается из резюме hh.ru (`agent/resume.py`) и живёт только в памяти
+процесса. Персональные данные не читаются и не сохраняются: блоки контактов,
+фото и личных сведений не извлекаются, а остатки контактов и номеров вычищает
+`scrub_personal_data`. Стиль письма живёт в `SYSTEM_PROMPT.md`, а не в профиле.
+"""
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from pathlib import Path
 
 
 class ProfileError(RuntimeError):
-    """Профиль пользователя отсутствует или заполнен неверно."""
+    """Профиль пользователя получить не удалось."""
 
 
 @dataclass(frozen=True)
 class Profile:
-    """Данные профиля для промпта LLM."""
+    """Данные профиля для промпта LLM: только факты из резюме."""
 
     text: str
-    examples: str
-    style_rules: str
 
 
-_HEADING_RE = re.compile(r"^(?P<level>#{1,6})\s+(?P<title>.+?)\s*$", re.MULTILINE)
-_EXAMPLES_HEADING_RE = re.compile(r"^\s*[*-]\s*\*\*[^*]*пример", re.IGNORECASE)
-_BULLET_RE = re.compile(r"^[*-]\s+")
+# Метки, которые подставляются вместо персональных данных.
+EMAIL_REPLACEMENT = "[почта скрыта]"
+PHONE_REPLACEMENT = "[телефон скрыт]"
+BIRTHDAY_REPLACEMENT = "[дата рождения скрыта]"
+DOCUMENT_REPLACEMENT = "[номер скрыт]"
+CONTACT_REPLACEMENT = "[контакт скрыт]"
+
+# Что вычищаем из текста резюме перед отправкой в LLM. Порядок важен:
+# почта вычищается раньше «собаки», иначе от почты останется имя пользователя.
+_SCRUB_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+", re.IGNORECASE), EMAIL_REPLACEMENT),
+    (
+        re.compile(r"https?://(?:t\.me|telegram\.me|wa\.me|vk\.me)/\S+", re.IGNORECASE),
+        CONTACT_REPLACEMENT,
+    ),
+    # Ник в мессенджере: только с явным словом-подсказкой или с подчёркиванием.
+    # Так аннотации вроде @Override и @Autowired остаются частью профиля.
+    (
+        re.compile(
+            r"(?:телеграм|telegram|tg|ник|username|контакт)\w*[^\n@]{0,20}@[A-Za-z0-9_]{4,}",
+            re.IGNORECASE,
+        ),
+        CONTACT_REPLACEMENT,
+    ),
+    (re.compile(r"(?<![\w@.])@[A-Za-z0-9]*_[A-Za-z0-9_]+"), CONTACT_REPLACEMENT),
+    (
+        re.compile(r"(?:\+7|8)[\s\-(]*\d{3}[\s\-)]*\d{3}[\s\-]*\d{2}[\s\-]*\d{2}"),
+        PHONE_REPLACEMENT,
+    ),
+    (
+        re.compile(
+            r"(?:дата\s+рождения|родил(?:ся|ась))\s*[:\-]?\s*[^\n,]{0,40}",
+            re.IGNORECASE,
+        ),
+        BIRTHDAY_REPLACEMENT,
+    ),
+    (re.compile(r"\b\d{3}-\d{3}-\d{3}[ \-]?\d{2}\b"), DOCUMENT_REPLACEMENT),
+    (re.compile(r"\bИНН\s*[:\-]?\s*\d{10,12}\b", re.IGNORECASE), DOCUMENT_REPLACEMENT),
+)
 
 
-def load_profile(path: Path) -> Profile:
-    """Читает профиль и выделяет из него примеры писем и правила стиля."""
-    if not path.exists():
-        raise ProfileError(f"Файл профиля не найден: {path}")
-    text = path.read_text(encoding="utf-8")
-    style_rules, examples = split_style_section(text)
-    if not style_rules:
-        raise ProfileError(
-            "В профиле не найден раздел со стилем писем. Ожидается заголовок вида "
-            "'## Стиль написания сопроводительных писем'"
-        )
-    return Profile(text=text, examples=examples, style_rules=style_rules)
+def normalize_text(text: str) -> str:
+    """Приводит текст страницы к обычным пробелам и убирает пустые строки.
+
+    hh.ru отдаёт неразрывные пробелы (NBSP) и невидимые символы: они ломают
+    сравнение заголовков, дедупликацию и склейку профиля, поэтому нормализуем
+    текст до разбора.
+    """
+    unified = text.replace("\r\n", "\n").replace("\r", "\n")
+    unified = unified.replace("\u200b", "").replace("\ufeff", "")
+    lines = [" ".join(line.split()) for line in unified.split("\n")]
+    return "\n".join(line for line in lines if line)
 
 
-def split_style_section(text: str) -> tuple[str, str]:
-    """Возвращает (правила стиля, примеры писем) из раздела о стиле."""
-    headings = list(_HEADING_RE.finditer(text))
-    style_heading = next((match for match in headings if "стил" in match.group("title").lower()), None)
-    if style_heading is None:
-        return "", ""
+def scrub_personal_data(text: str) -> str:
+    """Заменяет контакты и номера в тексте метками: страховка перед промптом."""
+    result = text
+    for pattern, replacement in _SCRUB_RULES:
+        result = pattern.sub(replacement, result)
+    return result
 
-    next_heading = next((match for match in headings if match.start() > style_heading.start()), None)
-    section_end = next_heading.start() if next_heading else len(text)
-    section = text[style_heading.end():section_end].strip()
 
-    lines = section.splitlines()
-    examples_index = next(
-        (index for index, line in enumerate(lines) if _EXAMPLES_HEADING_RE.match(line)),
-        None,
-    )
-    if examples_index is None:
-        return section, ""
+# Метки, которые остаются в тексте после обезличивания.
+_MARKER_RE = re.compile(
+    r"\[(?:почта|телефон|дата рождения|номер|контакт)\s+скрыт[ао]?\]",
+    re.IGNORECASE,
+)
+# Подписи контактов: без значения такая строка бесполезна.
+_CONTACT_LABEL_RE = re.compile(
+    r"^(?:почта|e-?mail|телефон|тел\.?|telegram|телеграм|tg|whatsapp|skype|vk)\s*:?\s*$",
+    re.IGNORECASE,
+)
 
-    style_rules = "\n".join(lines[:examples_index]).strip()
-    examples: list[str] = []
-    current: list[str] = []
-    for line in lines[examples_index + 1:]:
-        stripped = line.strip()
-        if not stripped:
+
+def drop_contact_markers(text: str) -> str:
+    """Убирает строки, где после обезличивания не осталось полезного текста."""
+    lines: list[str] = []
+    for line in text.splitlines():
+        if not line.strip():
+            lines.append(line)
             continue
-        if _BULLET_RE.match(stripped):
-            if current:
-                examples.append(" ".join(current))
-            current = [_BULLET_RE.sub("", stripped)]
-        elif current:
-            current.append(stripped)
-    if current:
-        examples.append(" ".join(current))
-    return style_rules, "\n".join(f"- {example}" for example in examples)
+        rest = _MARKER_RE.sub("", line).strip(" \t:;,.—-–")
+        if not rest or _CONTACT_LABEL_RE.match(rest):
+            continue
+        lines.append(line)
+    return "\n".join(lines)
+
+
+

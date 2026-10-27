@@ -63,11 +63,12 @@ from .models import (
     VacancyDetails,
 )
 from .notify import notify_captcha
-from .profile import Profile, load_profile
+from .profile import Profile, ProfileError
 from .prompts import requires_project_links
 from .processed import ProcessedError, ProcessedStore
 from .report import RunStats, build_report, send_email
-from .resume import boost_resume
+from .habr_profile import load_habr_profile
+from .resume import boost_resume, load_resume_profile
 
 
 class SessionLostError(RuntimeError):
@@ -221,8 +222,6 @@ def run(
     statuses = _retry_statuses(config, retry) if retry else ()
     processed = _open_report(config, logger)
 
-    profile = load_profile(config.data.paths.profile)
-
     config = with_channel(config, channel_name)
     channel = channel_for(config)
     log_channel_choice(logger, channel, channel_name)
@@ -233,6 +232,8 @@ def run(
         page = session.new_page()
         session.close_blank_pages(page)
         try:
+            # Профиль собирается на каждом запуске и живёт только в памяти процесса.
+            profile = load_profile(page, config, channel, logger)
             if channel.supports_resume_boost:
                 boost_resume(page, config, logger)
             with LLMClient(config.llm) as llm:
@@ -246,6 +247,9 @@ def run(
                     )
         except (ResumeNameError, ResumeNotFoundError):
             # Отклик без выбранного резюме невозможен: запуск завершается ошибкой.
+            raise
+        except ProfileError:
+            # Профиль не собрать — работать дальше не с чем: ошибку покажет CLI.
             raise
         except KeyboardInterrupt:
             stats.stop_reason = "остановлено пользователем (Ctrl+C)"
@@ -297,6 +301,13 @@ def _require_resume_name(config: AppConfig, logger: RunLogger, channel: Channel)
         raise ResumeNameError(
             "не задано название резюме: заполните pipeline.resume.name в config.local.yaml"
         )
+
+
+def load_profile(page: Page, config: AppConfig, channel: Channel, logger: RunLogger) -> Profile:
+    """Профиль для LLM: у hh.ru собирается из резюме, у career.habr.com — заглушка."""
+    if channel.name == HH:
+        return load_resume_profile(page, config, logger)
+    return load_habr_profile(page, config, logger)
 
 
 def _open_report(config: AppConfig, logger: RunLogger) -> ProcessedStore:

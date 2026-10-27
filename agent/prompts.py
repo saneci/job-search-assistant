@@ -22,14 +22,8 @@ FALLBACK_SYSTEM_PROMPT = """Ты — персональный ассистент
   "cover_letter": "текст письма (только если verdict = подходит)"
 }"""
 
-USER_PROMPT_TEMPLATE = """ПРОФИЛЬ ПОЛЬЗОВАТЕЛЯ:
+USER_PROMPT_TEMPLATE = """ПРОФИЛЬ ПОЛЬЗОВАТЕЛЯ (резюме):
 {profile_md}
-
-ПРИМЕРЫ ПИСЕМ ПОЛЬЗОВАТЕЛЯ:
-{examples}
-
-ПРАВИЛА СТИЛЯ:
-{style_rules}
 
 ТЕКСТ ВАКАНСИИ:
 {title}
@@ -146,8 +140,6 @@ def build_user_prompt(
     """
     values = {
         "{profile_md}": profile.text,
-        "{examples}": profile.examples or "примеры не заданы",
-        "{style_rules}": profile.style_rules,
         "{title}": vacancy.title,
         "{company}": vacancy.company or "не указана",
         "{salary}": vacancy.salary_text,

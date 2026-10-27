@@ -13,6 +13,7 @@ from agent.cli import (
     RETRY_ALL,
     RETRY_CHOICES,
     RETRY_STATUS_HELP,
+    _dump_profile,
     _notify_test,
     build_parser,
     CliUsageError,
@@ -28,6 +29,7 @@ from agent.cli import (
 from agent.config import load_config
 from agent.hh_vacancy import ResumeNotFoundError
 from agent.logging_setup import RunLogger
+from agent.profile import Profile
 
 GENERAL_HELP_TEXT = """Персональный ассистент для поиска работы, который отсеивает нерелевантное и оставляет только то, что стоит вашего внимания
 
@@ -37,6 +39,7 @@ GENERAL_HELP_TEXT = """Персональный ассистент для пои
   --login                     открыть браузер, войти на сайт выбранного канала и сохранить сессию
   --config <FILE>             путь к YAML-конфигурации, по умолчанию: config.yaml в корне проекта
   --channel, --ch <CHANNEL>   канал запуска: hh или habr, по умолчанию: search.channel из config.yaml
+  --dump-profile [PATH]       собрать профиль для LLM, сохранить в файл для отладки и выйти (по умолчанию: data/profile.dump.md)
   -r, --retry, --re [STATUS]  повторить обработку вакансий, без поиска
   --excluded                  повторить обработку только исключённых вакансий, синоним --retry excluded
   --notify-test               отправить тестовое оповещение о завершении работы по включённым видам уведомлений
@@ -469,6 +472,54 @@ def test_main_stops_on_resume_not_found(tmp_path: Path, monkeypatch, capsys) -> 
     assert "Запуск прерван" in err
     assert "Team Lead" in err
     assert "Traceback" not in err
+
+
+def test_parser_has_dump_profile_flag() -> None:
+    parser = build_parser()
+
+    assert parser.parse_args([]).dump_profile is None
+    assert parser.parse_args(["--dump-profile"]).dump_profile.endswith("profile.dump.md")
+    assert parser.parse_args(["--dump-profile", "out.txt"]).dump_profile == "out.txt"
+
+
+def test_dump_profile_writes_profile_and_report(tmp_path: Path, monkeypatch, capsys) -> None:
+    """Дамп сохраняет собранный профиль, а в консоль печатает только размеры блоков."""
+    config = make_config(tmp_path)
+    logger = RunLogger(tmp_path / "logs", run_id="dump")
+    target = tmp_path / "profile.dump.md"
+
+    class FakeSession:
+        def __enter__(self) -> "FakeSession":
+            return self
+
+        def __exit__(self, *exc_info: object) -> bool:
+            return False
+
+        def ensure_logged_in(self, *args: object) -> None:
+            return None
+
+        def new_page(self) -> object:
+            return object()
+
+    monkeypatch.setattr("agent.cli.BrowserSession", lambda *args, **kwargs: FakeSession())
+    monkeypatch.setattr(
+        "agent.cli.load_profile",
+        lambda page, config, channel, logger: Profile(text="Опыт: Java 21, Kafka"),
+    )
+    monkeypatch.setattr("agent.cli.resume_block_report", lambda page: ["- блок 1: 20 символов"])
+    monkeypatch.setattr(
+        "agent.cli.resume_markup_report",
+        lambda page: ["- resume-block: 20 символов"],
+    )
+
+    assert _dump_profile(config, logger, str(target)) == 0
+    logger.close()
+
+    assert target.read_text(encoding="utf-8") == "Опыт: Java 21, Kafka\n"
+    out = capsys.readouterr().out
+    assert "Java 21" not in out
+    assert "20 символов" in out
+    assert read_events(logger)[-1]["event"] == "profile_dumped"
 
 
 def test_notify_test_sends_to_each_enabled_kind(tmp_path: Path, monkeypatch, capsys) -> None:

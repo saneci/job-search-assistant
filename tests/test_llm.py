@@ -41,7 +41,7 @@ from agent.prompts import (
     load_system_prompt,
 )
 
-PROFILE = Profile(text="Java-разработчик", examples="- пример письма", style_rules="Коротко и по делу")
+PROFILE = Profile(text="Java-разработчик")
 VACANCY = VacancyDetails(
     url="https://hh.ru/vacancy/1",
     title="Java-разработчик",

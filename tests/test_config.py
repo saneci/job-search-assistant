@@ -61,6 +61,7 @@ def value_of(config: Any, field: str) -> Any:
         ("search.pages_limit", None),
         ("pipeline.limit_per_run", 5),
         ("pipeline.max_vacancies", 200),
+        ("pipeline.resume.boost", True),
         ("pipeline.resume.boost_interval_hours", 4),
         ("pipeline.retry.statuses", ("error", "queued", "excluded")),
         ("data.logs_retention_days", 30),

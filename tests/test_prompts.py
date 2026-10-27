@@ -11,7 +11,7 @@ from agent.prompts import (
     requires_project_links,
 )
 
-PROFILE = Profile(text="Java-разработчик", examples="- пример", style_rules="Коротко")
+PROFILE = Profile(text="Java-разработчик")
 
 INSTRUCTION = (
     "Как откликнуться\n"
