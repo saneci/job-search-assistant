@@ -1,13 +1,81 @@
-"""Тесты командной строки: флаг проверки канала уведомлений."""
+"""Тесты командной строки: справка, флаги повтора и проверка уведомлений."""
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
 
-from agent.cli import _notify_test, build_parser
+import pytest
+
+from agent.cli import (
+    NOT_RETRYABLE_HELP,
+    NOT_RETRYABLE_STATUSES,
+    RETRY_ALL,
+    RETRY_CHOICES,
+    RETRY_STATUS_HELP,
+    _notify_test,
+    build_parser,
+    excluded_help,
+    excluded_help_requested,
+    general_help,
+    help_requested,
+    help_topic,
+    main,
+    retry_help,
+    retry_help_requested,
+)
 from agent.config import load_config
 from agent.logging_setup import RunLogger
+
+GENERAL_HELP_TEXT = """Персональный агент автоматических откликов на hh.ru
+
+Опции:
+  --help, -h              показать справку и выйти
+  --install-browser       установить Chromium для Playwright, переопределяет значение из config.yaml: browser.channel
+  --login                 открыть браузер, войти в аккаунт hh.ru и сохранить сессию в data/state.json
+  --config <FILE>         путь к YAML-конфигурации (по умолчанию: config.yaml в корне проекта)
+  --no-ops                выполнить обычный цикл программы: поиск → оценка → отклики → отчёт
+  --retry, --re [STATUS]  повторить обработку вакансий, без поиска
+  --excluded              повторить обработку только исключённых вакансий, синоним --retry excluded
+  --notify-test           отправить тестовое оповещение о завершении работы по включённым видам уведомлений
+
+Для получения справки по конкретной опции нужно после опции ввести --help или -h, если документация есть она будет показана, пример: ./run.sh --retry -h"""
+
+RETRY_HELP_TEXT = """Повторение обработки вакансий по списку прямых ссылок из отчётов, без поиска
+
+Опции (принимается одно значение):
+  (без значения)  статусы из config.yaml: pipeline.retry.statuses (по умолчанию error)
+  error           сбой обработки: страница не открылась, ошибка браузера или парсинга
+  queued          требуется ручное действие пользователя: тест, анкета, внешняя форма, капча, пустое письмо
+  excluded        исключена по значению из config.yaml: search.exclude_companies или search.exclude_keywords
+  skipped         не подошла по оценке LLM-Decision, либо вакансия в архиве или недоступна по другим причинам
+
+Для терминальных статусов повтор не производится:
+  sent      отклик уже отправлен
+  rejected  пришёл отказ по отправленному отклику
+  offer     по отклику получен оффер"""
+
+EXCLUDED_HELP_TEXT = """Повторение обработки только исключённых вакансий, без поиска
+
+Синоним: --retry excluded
+
+Берутся вакансии со статусом excluded из дневных отчётов data/report.
+Статус excluded ставится по значениям config.yaml:
+  search.exclude_companies  компании-исключения
+  search.exclude_keywords   стоп-слова в названии вакансии
+
+Пока компания или стоп-слово остаются в config.yaml, повтор снова завершится статусом excluded.
+
+Полная справка по повторам: ./run.sh --retry -h"""
+
+
+@pytest.fixture(autouse=True)
+def plain_output(monkeypatch) -> None:
+    """В тестах сравниваем текст без ANSI; цвет проверяется отдельно."""
+    monkeypatch.delenv("FORCE_COLOR", raising=False)
+    monkeypatch.delenv("PYTHON_COLORS", raising=False)
+    monkeypatch.setenv("NO_COLOR", "1")
+    monkeypatch.delenv("TERM", raising=False)
 
 
 def make_config(tmp_path: Path, notifications: dict | None = None):
@@ -50,12 +118,220 @@ def test_parser_notify_test_defaults_to_false() -> None:
 def test_parser_retry_flag_and_aliases() -> None:
     parser = build_parser()
 
-    assert parser.parse_args(["--retry"]).retry == "all"
+    assert parser.parse_args(["--retry"]).retry == RETRY_ALL
+    assert parser.parse_args(["--retry", "all"]).retry == RETRY_ALL
     assert parser.parse_args(["--retry", "queued"]).retry == "queued"
-    assert parser.parse_args(["--re"]).retry == "all"
+    assert parser.parse_args(["--re"]).retry == RETRY_ALL
     assert parser.parse_args(["--excluded"]).excluded is True
     assert parser.parse_args([]).retry is None
     assert parser.parse_args([]).excluded is False
+
+
+def test_help_descriptions_cover_every_status() -> None:
+    """У каждого статуса из --retry есть описание, лишних описаний нет."""
+    assert set(RETRY_STATUS_HELP) == set(RETRY_CHOICES)
+    assert set(NOT_RETRYABLE_HELP) == set(NOT_RETRYABLE_STATUSES)
+
+
+def test_general_help_matches_spec() -> None:
+    """Общая справка — ровно заданный текст, без usage от argparse."""
+    assert general_help(color=False) == GENERAL_HELP_TEXT
+    assert "usage:" not in general_help(color=False)
+
+
+def test_config_uses_file_placeholder() -> None:
+    """Путь к конфигу показывается как подставляемое значение, а не CONFIG."""
+    assert "--config <FILE>" in build_parser().format_help()
+
+
+def test_no_ops_option_is_real_flag() -> None:
+    """`--no-ops` есть в парсере, а не только в тексте справки."""
+    assert build_parser().parse_args(["--no-ops"]).no_ops is True
+
+
+def test_retry_help_matches_spec() -> None:
+    """Справка повтора — ровно заданный текст, без старых разделов."""
+    assert retry_help(color=False) == RETRY_HELP_TEXT
+    assert "Режимы работы:" not in retry_help(color=False)
+    assert "Что делает повтор:" not in retry_help(color=False)
+
+
+def test_excluded_help_matches_spec() -> None:
+    """У `--excluded` своя узкая справка, а не справка всех повторов."""
+    text = excluded_help(color=False)
+
+    assert text == EXCLUDED_HELP_TEXT
+    assert "Синоним: --retry excluded" in text
+    assert "Для терминальных статусов" not in text
+    assert "sent" not in text
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--help"],
+        ["-h"],
+        ["--help", "--retry"],
+        ["--login", "--help"],
+        ["--install-browser", "-h"],
+        ["--notify-test", "--help"],
+        ["--config", "config.yaml", "-h"],
+    ],
+)
+def test_general_help_for_any_help_flag(argv: list[str], capsys) -> None:
+    """Любая команда с --help/-h без опции со своей справкой печатает общую."""
+    assert main(argv) == 0
+    assert capsys.readouterr().out == GENERAL_HELP_TEXT + "\n"
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--retry", "--help"],
+        ["--retry", "-h"],
+        ["--retry", "queued", "--help"],
+        ["--re", "-h"],
+        ["--retry=queued", "--help"],
+    ],
+)
+def test_retry_help_after_retry_flag(argv: list[str], capsys) -> None:
+    """`--retry --help` печатает справку по повторам и выходит с кодом 0."""
+    assert main(argv) == 0
+    assert capsys.readouterr().out == RETRY_HELP_TEXT + "\n"
+
+
+@pytest.mark.parametrize("argv", [["--excluded", "--help"], ["--excluded", "-h"]])
+def test_excluded_help_after_excluded_flag(argv: list[str], capsys) -> None:
+    """`--excluded --help` печатает узкую справку про исключённые вакансии."""
+    assert main(argv) == 0
+    assert capsys.readouterr().out == EXCLUDED_HELP_TEXT + "\n"
+
+
+@pytest.mark.parametrize(
+    "argv, expected",
+    [
+        (["--retry", "--help"], "retry"),
+        (["--retry", "-h"], "retry"),
+        (["--retry=error", "-h"], "retry"),
+        (["--re", "--help"], "retry"),
+        (["--excluded", "--help"], "excluded"),
+        (["--excluded", "-h"], "excluded"),
+        (["--help", "--retry"], "general"),
+        (["--help", "--excluded"], "general"),
+        (["--help"], "general"),
+        (["--retry"], "general"),
+        (["--excluded"], "general"),
+        ([], "general"),
+    ],
+)
+def test_help_topic_order(argv: list[str], expected: str) -> None:
+    """Справка опции — только когда опция идёт перед флагом справки."""
+    assert help_topic(argv) == expected
+
+
+@pytest.mark.parametrize(
+    "argv, expected",
+    [
+        (["--retry", "--help"], True),
+        (["--retry=error", "-h"], True),
+        (["--excluded", "--help"], False),
+        (["--help", "--retry"], False),
+        (["--retry"], False),
+        ([], False),
+    ],
+)
+def test_retry_help_requested_order(argv: list[str], expected: bool) -> None:
+    """Справка повторов — только для --retry/--re перед флагом справки."""
+    assert retry_help_requested(argv) is expected
+
+
+@pytest.mark.parametrize(
+    "argv, expected",
+    [
+        (["--excluded", "--help"], True),
+        (["--excluded", "-h"], True),
+        (["--retry", "--help"], False),
+        (["--help", "--excluded"], False),
+        ([], False),
+    ],
+)
+def test_excluded_help_requested_order(argv: list[str], expected: bool) -> None:
+    """Справка исключённых — только для --excluded перед флагом справки."""
+    assert excluded_help_requested(argv) is expected
+
+
+@pytest.mark.parametrize(
+    "argv, expected",
+    [
+        (["--help"], True),
+        (["-h"], True),
+        (["--login", "--help"], True),
+        (["--retry", "-h"], True),
+        (["--retry"], False),
+        ([], False),
+    ],
+)
+def test_help_requested_in_any_position(argv: list[str], expected: bool) -> None:
+    """`--help` и `-h` работают в любом месте аргументов."""
+    assert help_requested(argv) is expected
+
+
+def test_unknown_option_is_reported_in_russian(capsys) -> None:
+    """Опечатка в опции — понятное сообщение и подсказка, а не usage argparse."""
+    assert main(["--adsfa"]) == 2
+    err = capsys.readouterr().err
+
+    assert "Ошибка: неизвестная опция: --adsfa" in err
+    assert "Использование: ./run.sh [ОПЦИИ]" in err
+    assert "Справка: ./run.sh --help" in err
+    assert "usage:" not in err
+
+
+def test_unknown_retry_status_lists_allowed_values(capsys) -> None:
+    """Неверный статус — перечень допустимых значений, без внутреннего all."""
+    assert main(["--retry", "decade"]) == 2
+    err = capsys.readouterr().err
+
+    assert "Ошибка: неизвестный статус повтора: decade" in err
+    assert "Допустимые статусы: error, queued, excluded, skipped" in err
+    assert "Использование: ./run.sh --retry [STATUS]" in err
+    assert " all" not in err
+
+
+def test_config_option_without_value(capsys) -> None:
+    """`--config` без значения — понятная ошибка про значение."""
+    assert main(["--config"]) == 2
+    err = capsys.readouterr().err
+
+    assert "Ошибка: опция --config требует значение" in err
+    assert "Использование: ./run.sh --config <FILE>" in err
+
+
+def test_help_uses_color_when_forced(monkeypatch, capsys) -> None:
+    """Цвет включается по FORCE_COLOR; справка и ошибки оформлены одинаково."""
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.setenv("FORCE_COLOR", "1")
+
+    assert main(["--help"]) == 0
+    general = capsys.readouterr().out
+    assert "\x1b[1;36m--help, -h" in general
+
+    assert main(["--retry", "--help"]) == 0
+    retry = capsys.readouterr().out
+    assert "\x1b[1;34mОпции (принимается одно значение):\x1b[0m" in retry
+
+    assert main(["--adsfa"]) == 2
+    err = capsys.readouterr().err
+    assert "\x1b[1;35mОшибка:" in err
+
+
+def test_no_color_environment_disables_color(monkeypatch, capsys) -> None:
+    """NO_COLOR важнее FORCE_COLOR: вывод остаётся монохромным."""
+    monkeypatch.setenv("NO_COLOR", "1")
+    monkeypatch.setenv("FORCE_COLOR", "1")
+
+    assert main(["--help"]) == 0
+    assert "\x1b[" not in capsys.readouterr().out
 
 
 def test_notify_test_sends_to_each_enabled_kind(tmp_path: Path, monkeypatch, capsys) -> None:
