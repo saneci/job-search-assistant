@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import re
 import time
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
 
@@ -38,11 +40,18 @@ from .hh_vacancy import (
     STATUS_REJECTED,
     STATUS_SENT,
     STATUS_UNKNOWN,
+    TEST_FAILED,
+    TEST_PASSED,
+    ResponseForm,
     VacancyParseError,
+    open_response_form,
     open_vacancy,
     respond,
     response_state,
     set_resume_name,
+    start_test,
+    submit_response,
+    submit_test,
 )
 from .llm import LLMClient, LLMError, meets_threshold
 from .logging_setup import RunLogger, prune_logs
@@ -70,9 +79,23 @@ from .models import (
     VacancyDetails,
 )
 from .notify import notify_captcha
+from .prefilter import (
+    VERDICT_REJECT,
+    Answer,
+    PrefilterResult,
+    Question,
+    evaluate,
+    llm_answers,
+    merge_answers,
+    question_lines,
+    question_label,
+    unanswered_questions,
+    without_rejects,
+)
 from .profile import Profile, load_profile
 from .prompts import requires_project_links
 from .processed import ProcessedError, ProcessedStore
+from . import questionary as questionary_store
 from .report import RunStats, build_report, send_email
 from .resume import boost_resume
 
@@ -100,6 +123,7 @@ QUEUE_REASON_TEXTS: dict[str, str] = {
 
     "test": "Для отклика на вакансию необходимо пройти тестирование",
     "questionnaire": "Для отклика на вакансию необходимо заполнить анкету",
+    "prefilter_auto_fill": "Анкета работодателя заполнена автоматически — отклик за человеком",
     "external_form": "Отклик нужно отправить на сайте работодателя",
     "captcha": "hh.ru просит пройти капчу: откликнитесь вручную",
     "no_form": "hh.ru не показал форму отклика — проверьте вакансию вручную",
@@ -802,6 +826,7 @@ def _process_and_remember(
             _profile_name(config, channel),
             channel=outcome_channel or channel.name,
             archived=_outcome_archived(skipped),
+            questionary=stats.questionary.get(card.url, ()),
         )
 
 
@@ -1264,7 +1289,33 @@ def _process_vacancy(
         log.info(f"подходит, но уже есть отклик другого резюме: {OTHER_RESUME_REASON}")
         return
 
+    captcha_waiter = _captcha_waiter(
+        page, config, logger, details, site=channel.site_label
+    )
+    # Анкета работодателя есть только в форме отклика hh.ru: у Habr формы нет.
+    questionary: _Questionnaire | None = None
+    if config.prefilter.enabled and channel.name == HH:
+        questionary = _knockout_prefilter(page, config, stats, logger, details, captcha_waiter)
+        if questionary is None:
+            # Анкета гарантированно ведёт к отказу: Generation не нужен.
+            return
+
+    pending = questionary.pending if questionary is not None else ()
     needs_project_links = requires_project_links(details)
+    # Анкета уже решена профилем, а отправлять её нельзя: Generation не нужен.
+    if questionary is not None and questionary.result is not None and not pending:
+        if questionary.result.answers_to_fill() and not config.prefilter.submit_auto_fill:
+            queue(
+                stats,
+                logger,
+                details,
+                "prefilter_auto_fill",
+                "ответы анкеты вычислены",
+                reason="",
+            )
+            return
+    # Запрос к LLM меняется только когда есть вопросы для модели.
+    questions = {"questionnaire": question_lines(pending)} if pending else {}
 
     try:
         generation = llm.generate(
@@ -1272,6 +1323,7 @@ def _process_vacancy(
             details,
             config.llm.cover_letter.max_length,
             signature=config.llm.cover_letter.signature,
+            **questions,
         )
     except LLMError as exc:
         _record_error(stats, logger, page, config, details, exc)
@@ -1333,11 +1385,61 @@ def _process_vacancy(
     # которые не подошли по оценке LLM, её не ждут.
     _pause(config, logger, "перед отправкой отклика")
 
-    captcha_waiter = _captcha_waiter(
-        page, config, logger, details, site=channel.site_label
-    )
+    answers = _questionary_answers(questionary, pending, generation.answers)
+    if answers is None:
+        # Модель не ответила на вопрос анкеты: угадывать нельзя, отклик за человеком.
+        queue(
+            stats,
+            logger,
+            details,
+            "questionnaire",
+            "ответы анкеты",
+            reason=_pending_reason(pending, generation.answers),
+        )
+        return
+
+    form = None
+    if questionary is not None and questionary.result is not None:
+        if answers and not config.prefilter.submit_auto_fill:
+            queue(
+                stats,
+                logger,
+                details,
+                "prefilter_auto_fill",
+                "ответы анкеты вычислены",
+                reason="",
+            )
+            return
+        form = ResponseForm(
+            questionary.form.status,
+            questionary.form.reason,
+            questionary.form.questions,
+            answers,
+            questionary.form.other_resume,
+        )
+
     try:
-        result = channel.respond(page, generation.cover_letter, captcha_waiter=captcha_waiter)
+        if form is not None and questionary is not None and questionary.test:
+            # Тест проходим тем же ответами: сначала сам тест, потом отклик.
+            test_result = submit_test(page, form.answers, captcha_waiter)
+            _save_questionary(config, stats, details, channel, answers, test_result.status)
+            answers = ()
+            if test_result.status == TEST_PASSED:
+                log.info("тест по вакансии пройден, отправляю отклик")
+                result = channel.respond(
+                    page, generation.cover_letter, captcha_waiter=captcha_waiter
+                )
+            else:
+                result = test_result
+        elif form is not None:
+            # Префильтр уже открыл форму: отклик уходит вместе с ответами анкеты.
+            result = submit_response(
+                page, form, generation.cover_letter, captcha_waiter, form.answers
+            )
+        else:
+            result = channel.respond(
+                page, generation.cover_letter, captcha_waiter=captcha_waiter
+            )
     except ResumeNotFoundError as exc:
         logger.event(
             "resume_not_found",
@@ -1352,6 +1454,7 @@ def _process_vacancy(
 
     status = result.status
     log.event("respond", url=details.url, status=status, reason=result.reason)
+    _save_questionary(config, stats, details, channel, answers, status)
 
     if status == STATUS_SENT:
         stats.sent.append(
@@ -1413,6 +1516,17 @@ def _process_vacancy(
         log.info(f"{channel.site_label} показал капчу при отправке отклика, запуск остановлен.")
         return
 
+    if status == TEST_FAILED:
+        queue(
+            stats,
+            logger,
+            details,
+            "test",
+            "тест по вакансии",
+            reason="Тест по вакансии не пройден — откликнитесь вручную",
+        )
+        return
+
     if status in ("test", "questionnaire", "external_form"):
         queue(stats, logger, details, status, "в форме отклика")
         return
@@ -1456,6 +1570,148 @@ def _process_vacancy(
         f"статус отклика: {status or STATUS_UNKNOWN}",
         reason=result.reason,
     )
+
+
+def _questionary_answers(
+    questionary: _Questionnaire | None,
+    pending: Sequence[Question],
+    values: Mapping[int, str],
+) -> tuple[Answer, ...] | None:
+    """Ответы для формы: профиль первым, ответы модели на остаток.
+
+    `None` — на часть вопросов не ответил ни профиль, ни модель: такую анкету
+    отправлять нельзя, вакансия уходит в ручные. Модель не переопределяет
+    профиль: расхождение означало бы выдумку.
+    """
+    if questionary is None or questionary.result is None:
+        return ()
+    answers = merge_answers(questionary.result, llm_answers(pending, values))
+    answered = {answer.question.name or answer.question.text for answer in answers}
+    for question in pending:
+        if (question.name or question.text) not in answered:
+            return None
+    return answers
+
+
+def _pending_reason(pending: Sequence[Question], values: Mapping[int, str]) -> str:
+    """Причина ручного ответа: первый вопрос, на который модель не ответила."""
+    for number, question in enumerate(pending, 1):
+        if not str(values.get(number, "") or "").strip():
+            return f"Анкета работодателя: вопрос «{question_label(question)}» — нет ответа"
+    return "Анкета работодателя: часть вопросов осталась без ответа"
+
+
+def _save_questionary(
+    config: AppConfig,
+    stats: RunStats,
+    details: VacancyDetails,
+    channel: Channel,
+    answers: Sequence[Answer],
+    status: str,
+) -> None:
+    """Сохраняет ответы на анкету: файл вакансии в `data/questionary` и отчёт дня."""
+    entries = [(question_label(answer.question), answer.value) for answer in answers]
+    if not entries:
+        return
+    stats.questionary[details.url] = [
+        {"question": question, "answer": answer} for question, answer in entries
+    ]
+    questionary_store.save(
+        config.data.paths.questionary_dir,
+        url=details.url,
+        profile=config.pipeline.resume.name if channel.name == HH else "",
+        channel=channel.name,
+        status=status,
+        questionary=entries,
+        title=details.title,
+        company=details.company,
+    )
+
+
+@dataclass(frozen=True)
+class _Questionnaire:
+    """Форма отклика и вердикт префильтра по её анкете.
+
+    `result` пуст, если анкеты нет или форма не открылась: дальше работает
+    обычный путь отклика. Непустой `result` — вопросы, ответы профиля и то,
+    что осталось решить модели.
+    """
+
+    form: ResponseForm
+    result: PrefilterResult | None = None
+    # Форма оказалась тестом по вакансии: ответы идут в тест, не в анкету.
+    test: bool = False
+
+    @property
+    def pending(self) -> tuple[Question, ...]:
+        """Вопросы без ответа из профиля: их закрывает Generation-вызов."""
+        return unanswered_questions(self.result) if self.result is not None else ()
+
+
+def _knockout_prefilter(
+    page: Page,
+    config: AppConfig,
+    stats: RunStats,
+    logger: RunLogger,
+    details: VacancyDetails,
+    captcha_waiter: Callable[[], bool] | None = None,
+) -> _Questionnaire | None:
+    """Открывает форму отклика и разбирает анкету до Generation.
+
+    Возвращает открытую форму и вердикт префильтра. `None` — вакансия уже
+    закрыта: анкета гарантированно ведёт к отказу (`skipped`) или форма
+    не открылась. Вопросы, на которые профиль не ответил, остаются в вердикте:
+    их закрывает тот же Generation-вызов, что и письмо.
+
+    Форма, которая не открылась (тест, внешняя анкета, капча), возвращается как
+    есть: её статус разбирает общий код после Generation, как и раньше.
+    """
+    log = _VacancyLog(logger, details.title, details.company, details.url)
+    is_test = False
+    try:
+        form = open_response_form(page, captcha_waiter, ignore_questionnaire=True)
+    except PlaywrightError as exc:
+        _record_error(stats, logger, page, config, details, exc)
+        return None
+    if form.status == "test":
+        # Тест по вакансии — отдельный экран со своими вопросами и результатом.
+        form = start_test(page, captcha_waiter)
+        is_test = form.ready
+    if not form.ready:
+        # Почему префильтр не сработал — видно в журнале, а не только по статусу.
+        log.event("response_form", url=details.url, status=form.status, reason=form.reason)
+        log.info(f"форма отклика не открылась: {form.status}")
+        return _Questionnaire(form)
+    if not form.questions:
+        return _Questionnaire(form, test=is_test)
+
+    result = evaluate(form.questions, config.prefilter.answers)
+    if is_test:
+        # В тесте отрицательный ответ не отсечка: он лишь снижает балл.
+        result = without_rejects(result)
+    log.event(
+        "prefilter",
+        url=details.url,
+        verdict=result.verdict,
+        questions=len(form.questions),
+        clusters=list(result.clusters),
+        unknown=result.unknown,
+        reason=result.reason,
+    )
+    log.info(f"анкета работодателя: вопросов {len(form.questions)}, вердикт «{result.verdict}»")
+
+    if result.verdict == VERDICT_REJECT:
+        stats.skipped.append(
+            SkippedVacancy(
+                title=details.title,
+                company=details.company,
+                url=details.url,
+                reason=result.reason,
+            )
+        )
+        log.info(f"пропуск: {result.reason.lower()}")
+        return None
+    return _Questionnaire(form, result, test=is_test)
 
 
 def _queue(
@@ -1774,6 +2030,7 @@ def _remember_processing(
     profile: str | None = None,
     channel: str = "",
     archived: bool = False,
+    questionary: Sequence[Mapping[str, str]] = (),
 ) -> None:
     """Записывает вакансию в дневной отчёт, чтобы не проходить её снова.
 
@@ -1806,6 +2063,7 @@ def _remember_processing(
             profile=profile,
             channel=channel,
             archived=archived,
+            questionary=questionary,
         )
     except ProcessedError as exc:
         vid = vacancy_id(card.url)

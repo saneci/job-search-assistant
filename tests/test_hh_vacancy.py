@@ -540,3 +540,34 @@ def test_set_resume_name_strips_spaces() -> None:
     assert resume_name() == "Java Developer"
 
     set_resume_name("")
+
+
+def test_unit_tests_in_questions_are_not_a_test_screen() -> None:
+    """«JUnit-тесты» и «покрытие тестами» в вопросах — не экран теста."""
+    scope = FakeScope(
+        {
+            "[data-qa='modal-content']": [
+                FakeElement(
+                    "Есть ли у вас опыт написания JUnit-тестов?\n"
+                    "Есть ли у вас опыт обеспечения покрытия тестами?"
+                )
+            ],
+            "button": [FakeElement("Откликнуться")],
+        }
+    )
+
+    assert detect_response_blocker(scope) is None  # type: ignore[arg-type]
+
+
+def test_test_word_in_question_text_is_not_a_test_screen() -> None:
+    """«Тестирование» в формулировке вопроса не делает форму экраном теста."""
+    scope = FakeScope(
+        {
+            "[data-qa='modal-content']": [
+                FakeElement("Есть ли у вас опыт тестирования и покрытия тестами?")
+            ],
+            "button": [FakeElement("Отправить")],
+        }
+    )
+
+    assert detect_response_blocker(scope) is None  # type: ignore[arg-type]

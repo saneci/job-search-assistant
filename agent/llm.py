@@ -5,7 +5,8 @@ from __future__ import annotations
 import json
 import re
 import time
-from dataclasses import dataclass
+from collections.abc import Sequence
+from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 import httpx
@@ -63,6 +64,8 @@ class GenerationResult:
     greeting_added: bool = False
     # Обязательное начало письма из вакансии («3PL»), если оно есть.
     required_opening: str = ""
+    # Ответы на вопросы анкеты или теста: номер вопроса с единицы и текст ответа.
+    answers: dict[int, str] = field(default_factory=dict)
 
 
 class LLMClient:
@@ -128,8 +131,13 @@ class LLMClient:
         vacancy: VacancyDetails,
         max_letter_length: int = 1500,
         signature: str = "",
+        questionnaire: str = "",
     ) -> GenerationResult:
-        """Генерирует сопроводительное письмо с валидацией JSON."""
+        """Генерирует сопроводительное письмо и ответы на вопросы анкеты.
+
+        `questionnaire` — уже пронумерованные вопросы формы отклика или теста.
+        Ответы приходят тем же вызовом: один запрос вместо двух.
+        """
         opening = detect_required_opening(vacancy)
         messages: list[dict[str, str]] = [
             {"role": "system", "content": self._system_prompt},
@@ -139,6 +147,7 @@ class LLMClient:
                 opening,
                 self.config.cover_letter.pet_projects,
                 requires_project_links(vacancy),
+                questionnaire,
             )},
         ]
         attempts = 2 if self.config.generation.retry_on_invalid_json else 1
@@ -387,7 +396,58 @@ def parse_generation(
         cover_letter=cover_letter,
         greeting_added=greeting_added,
         required_opening=opening.strip(),
+        answers=parse_answers(payload.get("answers")),
     )
+
+
+def parse_answers(raw: Any) -> dict[int, str]:
+    """Ответы на вопросы анкеты: список `{"id": 1, "answer": "Да"}` или объект.
+
+    Номер вопроса с единицы. Ответ-пустышка и множественный выбор отбрасываются:
+    проставить в форму можно только один вариант, а угадывать нельзя.
+    """
+    collected: dict[int, str] = {}
+    if isinstance(raw, Mapping):
+        for key, value in raw.items():
+            number = _question_number(key)
+            text = _answer_text(value)
+            if number and text:
+                collected[number] = text
+        return collected
+    if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
+        return collected
+    for position, item in enumerate(raw, 1):
+        if not isinstance(item, Mapping):
+            continue
+        number = _question_number(
+            item.get("id", item.get("question_id", item.get("number", position)))
+        )
+        text = _answer_text(item.get("answer", item.get("value", item.get("text"))))
+        if number and text:
+            collected[number] = text
+    return collected
+
+
+def _question_number(value: Any) -> int | None:
+    """Номер вопроса из ответа модели: целое положительное число."""
+    try:
+        number = int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
+def _answer_text(value: Any) -> str:
+    """Текст ответа модели: число, строка или один элемент списка."""
+    if isinstance(value, bool) or value is None:
+        return ""
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, str):
+        return " ".join(value.split())
+    if isinstance(value, Sequence) and len(value) == 1:
+        return _answer_text(value[0])
+    return ""
 
 
 SIGNATURE_SEPARATOR = "\n\n"

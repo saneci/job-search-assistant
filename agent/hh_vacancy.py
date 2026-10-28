@@ -13,6 +13,7 @@ from playwright.sync_api import Locator, Page, TimeoutError as PlaywrightTimeout
 
 from .browser import NAVIGATION_TIMEOUT_MS, CaptchaError, PageLoadError, detect_captcha
 from .models import REJECTED_REASON, VacancyCard, VacancyDetails
+from .prefilter import KIND_SELECT, KIND_TEXT, Answer, Question, read_questions
 
 TITLE_SELECTORS = ("h1[data-qa='vacancy-title']", "h1.bloko-header-1", "h1")
 DESCRIPTION_SELECTORS = (
@@ -181,10 +182,11 @@ QUESTIONNAIRE_SELECTORS = (
     "[data-qa*='questionnaire']",
     "a[href*='questionnaire']",
 )
+# Экран теста — отдельный блок hh.ru. Широкий `[data-qa*='-test']` не берём:
+# он цепляет разметку анкеты и слова «тест» в вопросах («JUnit-тесты»).
 TEST_SELECTORS = (
     "[data-qa='vacancy-response-test']",
     "[data-qa='vacancy-test']",
-    "[data-qa*='-test']",
 )
 
 # Текст формы отклика: модалка, заголовки, кнопки и блоки с data-qa="*response*".
@@ -198,6 +200,8 @@ RESPONSE_TEXT_SELECTORS = (
     "[role='button']",
     "[data-qa*='response']",
 )
+# Заголовки и кнопки: по ним отличаем экран теста от анкеты с вопросами.
+ACTION_TEXT_SELECTORS = ("h1", "h2", "h3", "button", "[role='button']")
 
 SUCCESS_TEXTS = (
     "Отклик отправлен",
@@ -214,6 +218,23 @@ PAGE_READY_WAIT_SECONDS = 15
 # Как часто проверяем готовность: браузер отвечает быстро, пауза нужна, чтобы
 # не крутить проверки вхолостую.
 PAGE_READY_POLL_MS = 500
+
+# Тест по вакансии: отдельный экран со своими вопросами и кнопкой отправки.
+# Статусы результата: тест пройден, тест не пройден, результат непонятен.
+TEST_PASSED = "test_passed"
+TEST_FAILED = "test_failed"
+TEST_RESULT_PASSED_RE = re.compile(
+    r"тест\s+пройден|тест\s+успешно|поздравляем|вы\s+набрали\s+проходной", re.IGNORECASE
+)
+TEST_RESULT_FAILED_RE = re.compile(
+    r"тест\s+не\s+пройден|не\s+набран|попробуйте\s+(?:ещё|еще|снова)|не\s+прошли\s+тест",
+    re.IGNORECASE,
+)
+TEST_SUBMIT_RE = re.compile(
+    r"^\s*(?:ответить|завершить тест|закончить тест|отправить ответы|отправить|далее|продолжить)\s*$",
+    re.IGNORECASE,
+)
+TEST_RESULT_WAIT_SECONDS = 20
 
 # После вставки письма hh.ru перерисовывает форму: если кликнуть «Откликнуться»
 # сразу, React ещё не применил текст, и нажатие уходит в пустоту.
@@ -691,7 +712,9 @@ def detect_response_blocker(scope: Locator | Page) -> str | None:
     text = _response_text(scope)
     if QUESTIONNAIRE_TEXT_RE.search(text):
         return "questionnaire"
-    if TEST_TEXT_RE.search(text):
+    # Слово «тест» ищем только в заголовках и кнопках: в тексте вопросов оно
+    # означает тему («JUnit-тесты», «покрытие тестами»), а не экран теста.
+    if TEST_TEXT_RE.search(_action_text(scope)):
         return "test"
     if EXTERNAL_TEXT_RE.search(text):
         return "external_form"
@@ -703,8 +726,18 @@ def detect_response_blocker(scope: Locator | Page) -> str | None:
 
 def _response_text(scope: Locator | Page) -> str:
     """Текст интерфейса формы отклика: заголовки, кнопки, модалка (без описания вакансии)."""
+    return _collect_text(scope, RESPONSE_TEXT_SELECTORS)
+
+
+def _action_text(scope: Locator | Page) -> str:
+    """Текст заголовков и кнопок: экран теста видно по ним, а не по вопросам."""
+    return _collect_text(scope, ACTION_TEXT_SELECTORS)
+
+
+def _collect_text(scope: Locator | Page, selectors: Sequence[str]) -> str:
+    """Видимый текст элементов по селекторам: без дублей и без описания вакансии."""
     parts: list[str] = []
-    for selector in RESPONSE_TEXT_SELECTORS:
+    for selector in selectors:
         try:
             items = scope.locator(selector)
             total = min(items.count(), 30)
@@ -737,21 +770,46 @@ def _inside_description(locator: Locator) -> bool:
         return False
 
 
-def respond(
+FORM_READY = "ready"
+
+
+@dataclass(frozen=True)
+class ResponseForm:
+    """Открытая форма отклика: статус, причина и вопросы анкеты работодателя.
+
+    `status` — `ready` (форма открыта) или статус, который hh.ru показывает
+    вместо формы. `questions` — вопросы анкеты: пустой список значит обычную
+    форму с одним сопроводительным письмом. `answers` — ответы префильтра,
+    которые надо проставить перед отправкой.
+    """
+
+    status: str
+    reason: str = ""
+    questions: tuple[Question, ...] = ()
+    answers: tuple[Answer, ...] = ()
+    # Форму открыли кнопкой «Отклик другим резюме»: текущего резюме может
+    # не быть в списке, и тогда по нему уже пришёл отказ.
+    other_resume: bool = False
+
+    @property
+    def ready(self) -> bool:
+        """Форма открыта и готова к заполнению."""
+        return self.status == FORM_READY
+
+
+def open_response_form(
     page: Page,
-    letter: str,
     captcha_waiter: Callable[[], bool] | None = None,
-) -> ResponseResult:
-    """Отправляет отклик с сопроводительным письмом.
+    ignore_questionnaire: bool = False,
+) -> ResponseForm:
+    """Нажимает «Откликнуться» и читает форму отклика до отправки.
 
-    `captcha_waiter` вызывается, когда hh.ru просит капчу: приложение только ждёт
-    ручного решения и продолжает, если человек её прошёл.
-
-    Вместе со статусом возвращаем причину, которую hh.ru показал в форме:
-    без неё непонятно, почему отклик не ушёл (например, резюме скрыто).
+    `ignore_questionnaire` — режим Knockout-префильтра: анкета не блокер,
+    её вопросы читаются из самой формы. Разбирать анкету нужно до Generation:
+    если ответ гарантированно ведёт к отказу, письмо генерировать незачем.
     """
     if detect_captcha(page) and not _solve_captcha(captcha_waiter):
-        return _result(STATUS_CAPTCHA)
+        return ResponseForm(STATUS_CAPTCHA)
 
     button = _find_action(page, RESPOND_BUTTON_SELECTORS, RESPOND_RE)
     other_resume = False
@@ -762,28 +820,71 @@ def respond(
         other_resume = button is not None
     if button is None:
         if _is_already_responded(page):
-            return _result(STATUS_ALREADY_RESPONDED)
-        return _result(STATUS_NO_FORM, page)
+            return ResponseForm(STATUS_ALREADY_RESPONDED)
+        return ResponseForm(STATUS_NO_FORM, response_notice(page))
 
     try:
         button.click()
     except PlaywrightError:
-        return _result(STATUS_UNKNOWN, page)
+        return ResponseForm(STATUS_UNKNOWN, response_notice(page))
 
-    ui = _wait_for_response_ui(page, captcha_waiter)
+    # Флаг нужен только префильтру: для обычного отклика вызов остаётся прежним.
+    if ignore_questionnaire:
+        ui = _wait_for_response_ui(page, captcha_waiter, ignore_questionnaire=True)
+    else:
+        ui = _wait_for_response_ui(page, captcha_waiter)
     if ui == STATUS_CAPTCHA:
-        return _result(STATUS_CAPTCHA)
+        return ResponseForm(STATUS_CAPTCHA)
     if ui in ("test", "questionnaire", "external_form"):
         reason = response_notice(page)
         _dismiss(page)
-        return _result(ui, reason=reason)
-    if ui != "ready":
+        return ResponseForm(ui, reason)
+    if ui != FORM_READY:
         reason = response_notice(page)
         _dismiss(page)
-        return _result(STATUS_NO_FORM, reason=reason)
+        return ResponseForm(STATUS_NO_FORM, reason)
 
     scope = _response_scope(page)
-    blocker = detect_response_blocker(scope)
+    # Вопросы читает только префильтр: обычному отклику они не нужны, а форма
+    # без анкеты не должна лишний раз дёргать DOM.
+    questions = read_questions(scope) if ignore_questionnaire else ()
+    return ResponseForm(FORM_READY, "", questions, other_resume=other_resume)
+
+
+def respond(
+    page: Page,
+    letter: str,
+    captcha_waiter: Callable[[], bool] | None = None,
+) -> ResponseResult:
+    """Отправляет отклик с сопроводительным письмом.
+
+    `captcha_waiter` вызывается, когда hh.ru просит капчу: приложение только ждёт
+    ручного решения и продолжает, если человек её прошёл. Это обёртка над
+    `open_response_form` и `submit_response` — поведение прежнее, без префильтра.
+    """
+    form = open_response_form(page, captcha_waiter)
+    return submit_response(page, form, letter, captcha_waiter)
+
+
+def submit_response(
+    page: Page,
+    form: ResponseForm,
+    letter: str,
+    captcha_waiter: Callable[[], bool] | None = None,
+    answers: Sequence[Answer] = (),
+) -> ResponseResult:
+    """Заполняет открытую форму отклика и отправляет её.
+
+    `answers` — ответы префильтра: проставляем их до письма, чтобы анкета
+    уходила вместе с откликом. Вместе со статусом возвращаем причину, которую
+    hh.ru показал в форме: без неё непонятно, почему отклик не ушёл.
+    """
+    if not form.ready:
+        return ResponseResult(status=form.status, reason=form.reason)
+
+    scope = _response_scope(page)
+    # Вопросы уже прочитаны префильтром: форма — анкета, блокер ей не нужен.
+    blocker = None if form.questions else detect_response_blocker(scope)
     if blocker:
         reason = response_notice(page)
         _dismiss(page)
@@ -794,12 +895,24 @@ def respond(
         try:
             select_resume(scope, _resume_name)
         except ResumeNotFoundError:
-            if not other_resume:
+            if not form.other_resume:
                 raise
             # Форму открыли кнопкой «Отклик другим резюме», а текущего резюме в
             # списке нет: им уже откликались, значит по нему пришёл отказ.
             _dismiss(page)
             return _result(STATUS_REJECTED, reason=REJECTED_REASON)
+
+    if answers:
+        expected = sum(1 for answer in answers if answer.filled)
+        applied = apply_answers(scope, answers)
+        if applied < expected:
+            # Часть ответов не проставилась: отправлять такую форму нельзя —
+            # пустой обязательный вопрос всё равно вернётся ошибкой.
+            _dismiss(page)
+            return _result(
+                "questionnaire",
+                reason="hh.ru не дал заполнить все вопросы анкеты — нужен ручной отклик",
+            )
 
     # Письмо вставляем, если форма позволяет (по ТЗ).
     if _fill_letter(page, scope, letter):
@@ -846,6 +959,139 @@ def respond(
     if result in ("test", "questionnaire", "external_form"):
         _dismiss(page)
     return _result(result, reason=reason)
+
+
+def start_test(
+    page: Page,
+    captcha_waiter: Callable[[], bool] | None = None,
+) -> ResponseForm:
+    """Открывает тест по вакансии и читает его вопросы.
+
+    Тест открывается отдельным экраном после «Пройти тест». Пока вопросов нет,
+    экран считается неоткрытым: проходить нечего, и вакансия уйдёт в ручные.
+    """
+    if detect_captcha(page) and not _solve_captcha(captcha_waiter):
+        return ResponseForm(STATUS_CAPTCHA)
+    button = _find_action(page, TEST_SELECTORS + ACTION_TEXT_SELECTORS, TEST_ACTION_RE)
+    if button is None:
+        return ResponseForm("test", response_notice(page))
+    try:
+        button.click()
+    except PlaywrightError:
+        return ResponseForm("test", response_notice(page))
+
+    questions = _wait_for_test_questions(page, captcha_waiter)
+    if not questions:
+        return ResponseForm("test", response_notice(page))
+    return ResponseForm(FORM_READY, "", questions)
+
+
+def submit_test(
+    page: Page,
+    answers: Sequence[Answer],
+    captcha_waiter: Callable[[], bool] | None = None,
+) -> ResponseResult:
+    """Проставляет ответы в тест, отправляет его и читает результат."""
+    scope = _response_scope(page)
+    expected = sum(1 for answer in answers if answer.filled)
+    if expected and apply_answers(scope, answers) < expected:
+        return _result(
+            "test",
+            reason="hh.ru не дал ответить на все вопросы теста — нужен ручной проход",
+        )
+    submit = _find_action(scope, TEST_SELECTORS + ACTION_TEXT_SELECTORS, TEST_SUBMIT_RE)
+    if submit is None:
+        return _result("test", reason="hh.ru не показал кнопку отправки теста")
+    try:
+        submit.click()
+    except PlaywrightError:
+        return _result(STATUS_UNKNOWN, page)
+    return _result(_wait_for_test_result(page, captcha_waiter), page)
+
+
+def _wait_for_test_questions(
+    page: Page, captcha_waiter: Callable[[], bool] | None = None
+) -> tuple[Question, ...]:
+    """Ждёт экран теста с вопросами: кнопка могла открыть отдельную страницу."""
+    deadline = time.monotonic() + RESPONSE_UI_WAIT_SECONDS
+    while True:
+        page.wait_for_timeout(500)
+        if detect_captcha(page) and not _solve_captcha(captcha_waiter):
+            return ()
+        questions = read_questions(_response_scope(page))
+        if questions:
+            return questions
+        if time.monotonic() >= deadline:
+            return ()
+
+
+def _wait_for_test_result(
+    page: Page, captcha_waiter: Callable[[], bool] | None = None
+) -> str:
+    """Ждёт результат теста: пройден, не пройден или непонятно."""
+    deadline = time.monotonic() + TEST_RESULT_WAIT_SECONDS
+    while True:
+        page.wait_for_timeout(1000)
+        if detect_captcha(page) and not _solve_captcha(captcha_waiter):
+            return STATUS_CAPTCHA
+        text = _collect_text(page, ACTION_TEXT_SELECTORS + RESPONSE_TEXT_SELECTORS)
+        if TEST_RESULT_FAILED_RE.search(text):
+            return TEST_FAILED
+        if TEST_RESULT_PASSED_RE.search(text):
+            return TEST_PASSED
+        if time.monotonic() >= deadline:
+            return STATUS_UNKNOWN
+
+
+def apply_answers(scope: Locator | Page, answers: Sequence[Answer]) -> int:
+    """Проставляет ответы анкеты в форме; возвращает число заполненных.
+
+    Лучшее усилие: сбой одного вопроса не ломает отклик — такой вопрос просто
+    останется пустым, и человек увидит его в открытой форме.
+    """
+    applied = 0
+    for answer in answers:
+        if not answer.filled:
+            continue
+        try:
+            if _apply_answer(scope, answer):
+                applied += 1
+        except PlaywrightError:
+            continue
+    return applied
+
+
+def _apply_answer(scope: Locator | Page, answer: Answer) -> bool:
+    """Ставит один ответ в форму. False — поле или вариант не нашлись."""
+    question = answer.question
+    if question.kind in (KIND_TEXT, KIND_SELECT):
+        field = _question_field(scope, question.name)
+        if field is None:
+            return False
+        if question.kind == KIND_SELECT:
+            field.select_option(label=answer.value)
+        else:
+            field.click()
+            field.fill(answer.value)
+            field.dispatch_event("input")
+            field.dispatch_event("change")
+        return True
+    option = scope.get_by_label(answer.value, exact=True)
+    if option.count() == 0:
+        option = scope.get_by_label(answer.value, exact=False)
+    if option.count() == 0:
+        return False
+    option.first.check()
+    return True
+
+
+def _question_field(scope: Locator | Page, name: str) -> Locator | None:
+    """Поле ввода вопроса (textarea или select) по имени контрола."""
+    if not name:
+        return None
+    value = name.replace("\\", "\\\\").replace('"', '\\"')
+    locator = scope.locator(f'textarea[name="{value}"], select[name="{value}"]').first
+    return locator if _is_visible(locator) else None
 
 
 def _result(status: str, page: Page | None = None, *, reason: str = "") -> ResponseResult:
@@ -965,8 +1211,13 @@ def _wait_for_response_ui(
     page: Page,
     captcha_waiter: Callable[[], bool] | None = None,
     seconds: int = RESPONSE_UI_WAIT_SECONDS,
+    ignore_questionnaire: bool = False,
 ) -> str:
-    """Ждёт форму отклика. Возвращает 'ready', статус или причину блокировки."""
+    """Ждёт форму отклика. Возвращает 'ready', статус или причину блокировки.
+
+    `ignore_questionnaire` нужен Knockout-префильтру: анкета — не блокер,
+    её вопросы читаются из самой формы, когда она откроется.
+    """
     deadline = time.monotonic() + seconds
     while True:
         page.wait_for_timeout(500)
@@ -979,10 +1230,16 @@ def _wait_for_response_ui(
 
         scope = _response_scope(page)
         blocker = detect_response_blocker(scope)
+        form_visible = _has_response_form(page, scope)
+        if ignore_questionnaire and blocker == "questionnaire":
+            blocker = None
+        if ignore_questionnaire and blocker == "test" and form_visible:
+            # Форма открыта: это анкета с вопросами про тесты, а не экран теста.
+            blocker = None
         if blocker:
             return blocker
-        if _has_response_form(page, scope):
-            return "ready"
+        if form_visible:
+            return FORM_READY
         if time.monotonic() >= deadline:
             return "none"
 

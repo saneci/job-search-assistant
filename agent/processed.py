@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 from .hh_search import profile_key, vacancy_keys
 from .models import (
@@ -256,10 +256,12 @@ class ProcessedStore:
         profile: str | None = None,
         channel: str = "",
         archived: bool = False,
+        questionary: Sequence[Mapping[str, str]] | None = None,
     ) -> bool:
         """Записывает вакансию в отчёт дня; известную запись обновляет (повтор).
 
         `profile` — название резюме, с которым обрабатывалась вакансия.
+        `questionary` — ответы на анкету или тест: блок `questionary` в записи.
         Возвращает False, если вакансию нечем опознать при следующем запуске:
         нет ни ссылки, ни названия с компанией.
         """
@@ -275,6 +277,7 @@ class ProcessedStore:
                 profile=profile,
                 channel=channel,
                 archived=archived,
+                questionary=questionary,
             )
 
         now = _now()
@@ -299,6 +302,8 @@ class ProcessedStore:
         if archived:
             # Вакансия в архиве или доступ к ней закрыт: признак виден в UI.
             item["archived"] = True
+        if questionary:
+            item["questionary"] = [dict(entry) for entry in questionary]
 
         try:
             with report_lock(self.directory):
@@ -314,6 +319,7 @@ class ProcessedStore:
                         profile=profile,
                         channel=channel,
                         archived=archived,
+                        questionary=questionary,
                     )
                 items.append(item)
                 _write(self.path, items)
@@ -333,6 +339,7 @@ class ProcessedStore:
         channel: str = "",
         count_attempt: bool = True,
         archived: bool = False,
+        questionary: Sequence[Mapping[str, str]] | None = None,
     ) -> bool:
         """Обновляет запись, удерживая общую с веб-интерфейсом блокировку каталога."""
         try:
@@ -345,6 +352,7 @@ class ProcessedStore:
                     channel=channel,
                     count_attempt=count_attempt,
                     archived=archived,
+                    questionary=questionary,
                 )
         except ReportLockError as exc:
             raise ProcessedError(str(exc)) from exc
@@ -359,6 +367,7 @@ class ProcessedStore:
         channel: str = "",
         count_attempt: bool = True,
         archived: bool = False,
+        questionary: Sequence[Mapping[str, str]] | None = None,
     ) -> bool:
         """Обновляет запись о вакансии: повтор увеличивает счётчик попыток.
 
@@ -366,6 +375,8 @@ class ProcessedStore:
         удаляется из всех дневных файлов, а обновлённая запись попадает в отчёт
         сегодняшней даты. `count_attempt=False` — правка статуса без обработки
         вакансии: счётчик попыток не растёт. Вызывается только под блокировкой.
+        `questionary=None` оставляет прежние ответы на анкету: правка статуса их
+        не затирает, а пустая последовательность удаляет блок из записи.
         """
         now = _now()
         if channel in ("habr", "external"):
@@ -395,7 +406,11 @@ class ProcessedStore:
         else:
             # Вакансия снова в работе (например, повтор): архив снимается.
             item.pop("archived", None)
-
+        if questionary is not None:
+            if questionary:
+                item["questionary"] = [dict(entry) for entry in questionary]
+            else:
+                item.pop("questionary", None)
         for file in self.directory.glob("*.json"):
             if file == self.path:
                 continue

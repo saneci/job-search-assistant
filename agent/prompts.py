@@ -45,7 +45,12 @@ OPENING_HINT_TEMPLATE = """ТРЕБОВАНИЕ ВАКАНСИИ К НАЧАЛУ
 Первым идёт «{opening}» дословно, сразу после него - «Здравствуйте!», затем обычный текст письма.
 """
 
-# Подсказка для случая, когда вакансия просит приложить ссылки на проекты.
+# Подсказка для случая, когда в форме отклика или теста есть вопросы анкеты:
+# ответы приходят тем же вызовом, что и письмо (один вызов — один запрос к LLM).
+QUESTIONNAIRE_HINT_TEMPLATE = """ВОПРОСЫ АНКЕТЫ ИЛИ ТЕСТА РАБОТОДАТЕЛЯ (ответь на каждый):
+{questions}
+"""
+
 PROJECT_LINKS_HINT_TEMPLATE = """ТРЕБОВАНИЕ ВАКАНСИИ К ПРОЕКТАМ:
 В вакансии просят приложить ссылки на проекты в сопроводительном письме.
 {links}
@@ -138,11 +143,13 @@ def build_user_prompt(
     opening: str = "",
     pet_projects: tuple[str, ...] = (),
     needs_project_links: bool = False,
+    questionnaire: str = "",
 ) -> str:
     """Подставляет данные профиля и вакансии в шаблон user prompt.
 
     `opening` — обязательное начало письма из текста вакансии (если есть):
     тогда в промпт добавляется явное требование, а не надежда на догадку модели.
+    `questionnaire` — вопросы анкеты или теста: ответы приходят тем же вызовом.
     """
     values = {
         "{profile_md}": profile.text,
@@ -169,6 +176,15 @@ def build_user_prompt(
                 links="Ссылок в профиле и конфиге нет: не придумывай их."
             )
         prompt = prompt.replace("\nОцени вакансию", f"\n{hint}\nОцени вакансию", 1)
+
+    questions = (questionnaire or "").strip()
+    if questions:
+        hint = QUESTIONNAIRE_HINT_TEMPLATE.format(questions=questions)
+        prompt = prompt.replace(
+            "\nОцени вакансию",
+            f"\n{hint}\nОцени вакансию и ответь на вопросы анкеты.",
+            1,
+        )
 
     return prompt
 

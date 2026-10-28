@@ -2,8 +2,8 @@
 
 Схема описана pydantic-моделями: типы, диапазоны и обязательные поля проверяются
 при старте, а все ошибки собираются за один проход (`ConfigError` со списком).
-Раскладка `config.yaml` повторяет модели: `search`, `pipeline`, `data`, `llm`,
-`browser`, `notifications`. Источники по убыванию приоритета: аргументы,
+Раскладка `config.yaml` повторяет модели: `search`, `pipeline`, `data`, `prefilter`,
+`llm`, `browser`, `notifications`. Источники по убыванию приоритета: аргументы,
 окружение, `.env`, `config.yaml` (структура, лежит в git) + `config.local.yaml`
 (личные данные, файл не в git), дефолты схемы.
 """
@@ -59,6 +59,8 @@ DEFAULT_HABR_PROFILE_PATH = PROJECT_ROOT / "data" / "habr-profile"
 DEFAULT_CACHE_PATH = PROJECT_ROOT / "data" / "cache.json"
 DEFAULT_LOGS_DIR = PROJECT_ROOT / "data" / "logs"
 DEFAULT_REPORT_DIR = PROJECT_ROOT / "data" / "report"
+# Ответы на анкеты и тесты: файл на вакансию, локальные данные пользователя.
+DEFAULT_QUESTIONARY_DIR = PROJECT_ROOT / "data" / "questionary"
 
 DEFAULT_API_KEY_ENV = "AITUNNEL_API_KEY"
 DEFAULT_SMTP_USERNAME_ENV = "SMTP_USERNAME"
@@ -91,6 +93,12 @@ AREA_IDS: dict[str, int] = {
 
 EXPERIENCE_VALUES = frozenset({"noExperience", "between1And3", "between3And6", "moreThan6"})
 SCHEDULE_VALUES = frozenset({"fullDay", "shift", "flexible", "remote", "flyInFlyOut"})
+
+# Значения полей профиля для анкеты работодателя (prefilter.answers).
+EDUCATION_VALUES = frozenset({"higher_tech", "higher_other", "none"})
+RELOCATION_VALUES = frozenset({"yes", "no", "remote_only"})
+WORK_FORMAT_VALUES = frozenset({"office", "hybrid", "remote", "any"})
+WORK_PERMIT_VALUES = frozenset({"citizen", "permit", "sponsorship_needed"})
 # Размеры страницы выдачи, которые понимает hh.ru (параметр items_on_page).
 PER_PAGE_VALUES = frozenset({20, 50, 100})
 
@@ -223,6 +231,11 @@ def _parse_queries(value: Any) -> tuple[str, ...]:
     if not queries:
         raise ValueError("search.queries должен содержать хотя бы один непустой запрос")
     return queries
+
+
+def _one_line(value: Any) -> str:
+    """Однострочный текст: в форме отклика это обычное поле, переносы там лишние."""
+    return " ".join(str(value or "").split())
 
 
 def _str_list(value: Any, key: str) -> tuple[str, ...]:
@@ -533,6 +546,8 @@ class DataPathsConfig(BaseModel):
     habr_profile: Path = DEFAULT_HABR_PROFILE_PATH
     cache: Path = DEFAULT_CACHE_PATH
     report_dir: Path = DEFAULT_REPORT_DIR
+    # Ответы на вопросы анкет и тестов: data/questionary/<вакансия>-<резюме>.json.
+    questionary_dir: Path = DEFAULT_QUESTIONARY_DIR
     logs_dir: Path = DEFAULT_LOGS_DIR
 
     @field_validator(
@@ -542,6 +557,7 @@ class DataPathsConfig(BaseModel):
         "habr_profile",
         "cache",
         "report_dir",
+        "questionary_dir",
         "logs_dir",
         mode="before",
     )
@@ -599,6 +615,129 @@ class CoverLetterConfig(BaseModel):
                 result.append(text)
         return tuple(result)
 
+
+
+class PrefilterAnswersConfig(BaseModel):
+    """Ответы профиля для анкеты работодателя (prefilter.answers).
+
+    Личные данные: их место — config.local.yaml, из окружения и `.env` они
+    не читаются. Пустое значение означает «поле не заполнено»: вопрос с таким
+    полем уходит в ручные и никогда не приводит к отсеву.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    # Навыки: по ним отвечаем на вопросы анкеты про стек («есть ли опыт со Spring?»).
+    skills: Annotated[tuple[str, ...], NoDecode] = ()
+    # Свободный текст для вопроса «важные достижения» — одна строка.
+    achievements: str = ""
+    education_level: str = ""
+    location_country: str = ""
+    work_experience: float | None = None
+    salary_min: float | None = None
+    # Свободный текст про зарплату: нужен, когда вакансия просит «пожелания»,
+    # а не конкретную сумму.
+    salary_message: str = ""
+    relocation_ready: str = ""
+    # Формат работы: одно значение или список. В списке порядок — приоритет:
+    # сначала берём первый формат, который есть в вариантах анкеты.
+    work_format: Annotated[tuple[str, ...], NoDecode] = ()
+    work_permit: str = ""
+    notice_period: int | None = None
+    languages: str = ""
+    has_electronic_workbook: bool | None = None
+    travel_ready: bool | None = None
+
+    @field_validator("education_level", "relocation_ready", "work_permit", mode="before")
+    @classmethod
+    def _enums(cls, value: Any, info: ValidationInfo) -> str:
+        allowed = {
+            "education_level": EDUCATION_VALUES,
+            "relocation_ready": RELOCATION_VALUES,
+            "work_permit": WORK_PERMIT_VALUES,
+        }[str(info.field_name)]
+        text = _optional_str(value) or ""
+        if text and text not in allowed:
+            raise ValueError(
+                f"prefilter.answers.{info.field_name}: неизвестное значение «{text}» "
+                "(допустимо: " + ", ".join(sorted(allowed)) + ")"
+            )
+        return text
+
+    @field_validator("work_experience", "salary_min", mode="before")
+    @classmethod
+    def _numbers(cls, value: Any, info: ValidationInfo) -> float | None:
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return None
+        number = _as_float(value)
+        if number < 0:
+            raise ValueError(f"prefilter.answers.{info.field_name} не может быть отрицательным")
+        return number
+
+    @field_validator("notice_period", mode="before")
+    @classmethod
+    def _notice_period(cls, value: Any) -> int | None:
+        return _optional_non_negative_int(value, "prefilter.answers.notice_period")
+
+    @field_validator("work_format", mode="before")
+    @classmethod
+    def _work_formats(cls, value: Any) -> tuple[str, ...]:
+        return _filter_values(value, "prefilter.answers.work_format", WORK_FORMAT_VALUES)
+
+    @field_validator("location_country", "languages", mode="before")
+    @classmethod
+    def _texts(cls, value: Any) -> str:
+        return _optional_str(value) or ""
+
+    @field_validator("salary_message", "achievements", mode="before")
+    @classmethod
+    def _one_line_text(cls, value: Any) -> str:
+        """Свободный текст — одной строкой: в форме это обычное поле ввода."""
+        return _one_line(value)
+
+    @field_validator("skills", mode="before")
+    @classmethod
+    def _skills(cls, value: Any) -> tuple[str, ...]:
+        """Навыки без повторов: «Spring» и « spring » — одна технология."""
+        result: list[str] = []
+        seen: set[str] = set()
+        for skill in _str_list(value, "prefilter.answers.skills"):
+            key = skill.casefold()
+            if key not in seen:
+                seen.add(key)
+                result.append(skill)
+        return tuple(result)
+
+    @field_validator("has_electronic_workbook", "travel_ready", mode="before")
+    @classmethod
+    def _flags(cls, value: Any, info: ValidationInfo) -> bool | None:
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return None
+        try:
+            return _as_bool(value)
+        except ValueError:
+            raise ValueError(
+                f"prefilter.answers.{info.field_name}: должно быть true или false"
+            ) from None
+
+
+class PrefilterConfig(BaseModel):
+    """Knockout-префильтр анкеты работодателя: вопросы формы до Generation."""
+
+    model_config = ConfigDict(frozen=True)
+
+    # В схеме выключен, чтобы поведение по умолчанию оставалось прежним;
+    # рабочий config.yaml включает префильтр явно.
+    enabled: bool = False
+    # Отправлять отклик с автоматически заполненной анкетой. false — ответы
+    # проставляются, но отклик остаётся за человеком (первый этап по ТЗ).
+    submit_auto_fill: bool = False
+    answers: PrefilterAnswersConfig = Field(default_factory=PrefilterAnswersConfig)
+
+    @field_validator("enabled", "submit_auto_fill", mode="before")
+    @classmethod
+    def _flags(cls, value: Any) -> bool:
+        return _as_bool(value)
 
 
 class DecisionConfig(BaseModel):
@@ -850,6 +989,7 @@ class YamlSource(PydanticBaseSettingsSource):
 PERSONAL_FIELDS = frozenset({
     "llm.cover_letter.signature",
     "llm.cover_letter.pet_projects",
+    "prefilter.answers",
 })
 
 
@@ -892,6 +1032,7 @@ class AppConfig(BaseSettings):
     search: SearchConfig
     pipeline: PipelineConfig
     data: DataConfig = Field(default_factory=DataConfig)
+    prefilter: PrefilterConfig = Field(default_factory=PrefilterConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
     browser: BrowserConfig = Field(default_factory=BrowserConfig)
     notifications: NotificationsConfig = Field(default_factory=NotificationsConfig)

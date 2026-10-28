@@ -31,6 +31,8 @@ class RunStats:
     already_sent: list[SkippedVacancy] = field(default_factory=list)
     queued: list[dict[str, Any]] = field(default_factory=list)
     errors: list[RunError] = field(default_factory=list)
+    # Ответы на анкеты и тесты по ссылке вакансии: попадают в отчёт дня.
+    questionary: dict[str, list[dict[str, str]]] = field(default_factory=dict)
     stop_reason: str = ""
     reviewed: int = 0
     run_id: str = ""
