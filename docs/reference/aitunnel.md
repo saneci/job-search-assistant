@@ -73,9 +73,11 @@ print(chat_result.choices[0].message)
   и другим.
 - [Генерация изображений](https://aitunnel.ru/docs/images.md) — `POST /images/generations`. GPT Image, Flux, Seedream —
   генерация и редактирование по референсным изображениям.
-- [Генерация видео](https://aitunnel.ru/docs/videos.md) — `POST /videos`. Veo, Seedance, Wan через асинхронный эндпоинт с
+- [Генерация видео](https://aitunnel.ru/docs/videos.md) — `POST /videos`. Veo, Seedance, Wan через асинхронный эндпоинт
+  с
   опросом статуса задачи.
-- [Аудио в чате](https://aitunnel.ru/docs/audio.md) — `POST /chat/completions`. Аудиофайл на вход (input_audio) и голосовой
+- [Аудио в чате](https://aitunnel.ru/docs/audio.md) — `POST /chat/completions`. Аудиофайл на вход (input_audio) и
+  голосовой
   ответ модели (modalities, audio).
 - [Озвучка текста](https://aitunnel.ru/docs/text-to-speech.md) — `POST /audio/speech`. Text-to-Speech с выбором голоса и
   формата аудио.
@@ -83,13 +85,17 @@ print(chat_result.choices[0].message)
   Transcribe, Voxtral, Qwen3-ASR, Chirp 3 — транскрипция аудио.
 - [Эмбеддинги](https://aitunnel.ru/docs/embeddings.md) — `POST /embeddings`. Векторные представления текста для поиска и
   RAG.
-- [Модерация](https://aitunnel.ru/docs/moderation.md) — `POST /moderations`. Проверка контента перед отправкой в модель или
+- [Модерация](https://aitunnel.ru/docs/moderation.md) — `POST /moderations`. Проверка контента перед отправкой в модель
+  или
   публикацией.
-- [Ранжирование](https://aitunnel.ru/docs/rerank.md) — `POST /rerank`. Перестановка документов по релевантности запросу —
+- [Ранжирование](https://aitunnel.ru/docs/rerank.md) — `POST /rerank`. Перестановка документов по релевантности
+  запросу —
   второй шаг RAG после эмбеддингов.
-- [Решения](https://aitunnel.ru/docs/decisions.md) — `POST /decisions`. Ответы да/нет, выбор варианта и оценка по шкале с
+- [Решения](https://aitunnel.ru/docs/decisions.md) — `POST /decisions`. Ответы да/нет, выбор варианта и оценка по шкале
+  с
   вероятностями — для роутинга, классификации и проверки действий агента.
-- [RAG](https://aitunnel.ru/docs/rag.md) — `POST /embeddings · /rerank`. Поиск по своей базе и ответ модели по найденному
+- [RAG](https://aitunnel.ru/docs/rag.md) — `POST /embeddings · /rerank`. Поиск по своей базе и ответ модели по
+  найденному
   контексту — эмбеддинги, rerank, чат.
 - Другие форматы API — `POST /messages · /responses`. Нативный Claude Messages API и Responses API OpenAI — те же ключ и
   base URL.

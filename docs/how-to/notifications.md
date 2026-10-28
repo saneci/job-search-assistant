@@ -9,7 +9,7 @@
 - `enabled: true` включает канал (без него писем не будет вообще).
 - `smtp_host`, `smtp_port`, `use_ssl` — реквизиты сервера (в `config.yaml`).
 - `sender`, `recipient` — адреса, личные данные: в `config.local.yaml`
-  ([configuration.md](configuration.md)).
+  ([configuration.md](../tutorials/configuration.md)).
 - `SMTP_PASSWORD` (и при необходимости `SMTP_USERNAME`) — в `.env`.
 
 Виды писем:
