@@ -33,7 +33,7 @@ from .profile import ProfileError
 RETRY_CHOICES = (RETRY_ALL,) + RETRYABLE_STATUSES
 
 # Как в справке выглядит вызов `--retry` без значения.
-RETRY_ALL_LABEL = "[NO OPS]"
+RETRY_ALL_LABEL = "(без значения)"
 
 # Флаги повтора и справки: по ним выбирается, какую справку показать.
 RETRY_FLAGS = ("--retry", "--re")
@@ -136,8 +136,8 @@ NOT_RETRYABLE_HELP = {
 def retry_statuses_help(color: bool | None = None) -> str:
     """Статусы, которые принимает `--retry`, — по строке на статус.
 
-    Внутренний ключ `all` (статусы из конфига) показывается как `[NO OPS]`:
-    именно так вызывается `--retry` без значения.
+    Внутренний ключ `all` (статусы из конфига) показывается как
+    `(без значения)`: именно так вызывается `--retry` без аргумента.
     """
     if color is None:
         color = _color_enabled()
@@ -164,14 +164,14 @@ GENERAL_OPTIONS = (
         "открыть браузер, войти в аккаунт hh.ru и сохранить сессию в data/state.json",
     ),
     (
-        "--config CONFIG",
-        "путь к YAML-конфигурации (по умолчанию config.yaml в корне проекта)",
+        "--config <FILE>",
+        "путь к YAML-конфигурации (по умолчанию: config.yaml в корне проекта)",
     ),
     (
-        "--[NO OPS]",
+        "--no-ops",
         "выполнить обычный цикл программы: поиск → оценка → отклики → отчёт",
     ),
-    ("--retry, --re [СТАТУС]", "повторить обработку вакансий, без поиска"),
+    ("--retry, --re [STATUS]", "повторить обработку вакансий, без поиска"),
     (
         "--excluded",
         "повторить обработку только исключённых вакансий, синоним --retry excluded",
@@ -329,7 +329,7 @@ def _translate_parser_error(message: str) -> CliUsageError:
     if message.startswith("argument --config: expected one argument"):
         return CliUsageError(
             "опция --config требует значение",
-            usage="./run.sh --config CONFIG",
+            usage="./run.sh --config <FILE>",
         )
     return CliUsageError(message)
 
@@ -344,7 +344,7 @@ class _CliArgumentParser(argparse.ArgumentParser):
         if action.dest == "retry" and value not in action.choices:
             raise CliUsageError(
                 f"неизвестный статус повтора: {value}",
-                usage="./run.sh --retry [СТАТУС]",
+                usage="./run.sh --retry [STATUS]",
                 hint="Допустимые статусы: " + ", ".join(RETRYABLE_STATUSES),
                 help_hint="./run.sh --retry -h",
             )
@@ -387,7 +387,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--config",
         default=str(DEFAULT_CONFIG_PATH),
-        help="путь к YAML-конфигурации (по умолчанию config.yaml в корне проекта)",
+        metavar="<FILE>",
+        help="путь к YAML-конфигурации (по умолчанию: config.yaml в корне проекта)",
+    )
+    parser.add_argument(
+        "--no-ops",
+        action="store_true",
+        help="выполнить обычный цикл программы: поиск → оценка → отклики → отчёт",
     )
     parser.add_argument(
         "--install-browser",
@@ -405,7 +411,7 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="?",
         const=RETRY_ALL,
         choices=RETRY_CHOICES,
-        metavar="СТАТУС",
+        metavar="STATUS",
         help=(
             "повторить вакансии из дневных отчётов по прямой ссылке, без поиска; "
             "без значения — статусы из pipeline.retry.statuses, со значением — только он "

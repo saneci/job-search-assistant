@@ -33,9 +33,9 @@ GENERAL_HELP_TEXT = """Персональный агент автоматиче�
   --help, -h              показать справку и выйти
   --install-browser       установить Chromium для Playwright, переопределяет значение из config.yaml: browser.channel
   --login                 открыть браузер, войти в аккаунт hh.ru и сохранить сессию в data/state.json
-  --config CONFIG         путь к YAML-конфигурации (по умолчанию config.yaml в корне проекта)
-  --[NO OPS]              выполнить обычный цикл программы: поиск → оценка → отклики → отчёт
-  --retry, --re [СТАТУС]  повторить обработку вакансий, без поиска
+  --config <FILE>         путь к YAML-конфигурации (по умолчанию: config.yaml в корне проекта)
+  --no-ops                выполнить обычный цикл программы: поиск → оценка → отклики → отчёт
+  --retry, --re [STATUS]  повторить обработку вакансий, без поиска
   --excluded              повторить обработку только исключённых вакансий, синоним --retry excluded
   --notify-test           отправить тестовое оповещение о завершении работы по включённым видам уведомлений
 
@@ -44,11 +44,11 @@ GENERAL_HELP_TEXT = """Персональный агент автоматиче�
 RETRY_HELP_TEXT = """Повторение обработки вакансий по списку прямых ссылок из отчётов, без поиска
 
 Опции (принимается одно значение):
-  [NO OPS]  статусы из config.yaml: pipeline.retry.statuses (по умолчанию error)
-  error     сбой обработки: страница не открылась, ошибка браузера или парсинга
-  queued    требуется ручное действие пользователя: тест, анкета, внешняя форма, капча, пустое письмо
-  excluded  исключена по значению из config.yaml: search.exclude_companies или search.exclude_keywords
-  skipped   не подошла по оценке LLM-Decision, либо вакансия в архиве или недоступна по другим причинам
+  (без значения)  статусы из config.yaml: pipeline.retry.statuses (по умолчанию error)
+  error           сбой обработки: страница не открылась, ошибка браузера или парсинга
+  queued          требуется ручное действие пользователя: тест, анкета, внешняя форма, капча, пустое письмо
+  excluded        исключена по значению из config.yaml: search.exclude_companies или search.exclude_keywords
+  skipped         не подошла по оценке LLM-Decision, либо вакансия в архиве или недоступна по другим причинам
 
 Для терминальных статусов повтор не производится:
   sent      отклик уже отправлен
@@ -137,6 +137,16 @@ def test_general_help_matches_spec() -> None:
     """Общая справка — ровно заданный текст, без usage от argparse."""
     assert general_help(color=False) == GENERAL_HELP_TEXT
     assert "usage:" not in general_help(color=False)
+
+
+def test_config_uses_file_placeholder() -> None:
+    """Путь к конфигу показывается как подставляемое значение, а не CONFIG."""
+    assert "--config <FILE>" in build_parser().format_help()
+
+
+def test_no_ops_option_is_real_flag() -> None:
+    """`--no-ops` есть в парсере, а не только в тексте справки."""
+    assert build_parser().parse_args(["--no-ops"]).no_ops is True
 
 
 def test_retry_help_matches_spec() -> None:
@@ -284,7 +294,7 @@ def test_unknown_retry_status_lists_allowed_values(capsys) -> None:
 
     assert "Ошибка: неизвестный статус повтора: decade" in err
     assert "Допустимые статусы: error, queued, excluded, skipped" in err
-    assert "Использование: ./run.sh --retry [СТАТУС]" in err
+    assert "Использование: ./run.sh --retry [STATUS]" in err
     assert " all" not in err
 
 
@@ -294,7 +304,7 @@ def test_config_option_without_value(capsys) -> None:
     err = capsys.readouterr().err
 
     assert "Ошибка: опция --config требует значение" in err
-    assert "Использование: ./run.sh --config CONFIG" in err
+    assert "Использование: ./run.sh --config <FILE>" in err
 
 
 def test_help_uses_color_when_forced(monkeypatch, capsys) -> None:
