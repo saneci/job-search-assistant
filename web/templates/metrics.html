@@ -229,6 +229,29 @@
                         </div>
                     </div>
 
+                    <!-- График 3: каналы поиска -->
+                    <div class="chart-section">
+                        <h2>Каналы поиска ({{ metrics.total }})</h2>
+                        <div class="stack-group">
+                            {% if metrics.channels %}
+                            <div class="stack-bar">
+                                {% for item in metrics.channels %}
+                                <div class="stack-segment" style="width: {{ item.percent }}%; background: {{ item.color }};" title="{{ item.label }}: {{ item.count }}">
+                                    {% if item.percent >= 10 %}<span>{{ item.percent_text }}</span>{% endif %}
+                                </div>
+                                {% endfor %}
+                            </div>
+                            {% else %}
+                            <div class="empty-note">В отчётах пока нет данных о канале.</div>
+                            {% endif %}
+                            <div class="pie-legend" style="justify-content: flex-start;">
+                                {% for item in metrics.channels %}
+                                <div class="legend-item"><div class="legend-color" style="background: {{ item.color }};"></div>{{ item.label }} ({{ item.count }})</div>
+                                {% endfor %}
+                            </div>
+                        </div>
+                    </div>
+
                 </div>
             </div>
             {% endif %}

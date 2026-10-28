@@ -51,7 +51,11 @@ LOCAL_CONFIG_NAME = "config.local.yaml"
 DEFAULT_SYSTEM_PROMPT_PATH = PROJECT_ROOT / "SYSTEM_PROMPT.md"
 
 DEFAULT_PROFILE_PATH = PROJECT_ROOT / "data" / "profile.md"
-DEFAULT_STATE_PATH = PROJECT_ROOT / "data" / "state.json"
+# Файлы сессии раздельные: cookie hh.ru и career.habr.com не мешают друг другу.
+DEFAULT_STATE_PATH = PROJECT_ROOT / "data" / "hh-state.json"
+DEFAULT_HABR_STATE_PATH = PROJECT_ROOT / "data" / "habr-state.json"
+# Постоянный профиль Chrome для habr: без него hCaptcha не отрисовывается.
+DEFAULT_HABR_PROFILE_PATH = PROJECT_ROOT / "data" / "browser-profile"
 DEFAULT_CACHE_PATH = PROJECT_ROOT / "data" / "cache.json"
 DEFAULT_LOGS_DIR = PROJECT_ROOT / "logs"
 DEFAULT_REPORT_DIR = PROJECT_ROOT / "data" / "report"
@@ -89,6 +93,9 @@ EXPERIENCE_VALUES = frozenset({"noExperience", "between1And3", "between3And6", "
 SCHEDULE_VALUES = frozenset({"fullDay", "shift", "flexible", "remote", "flyInFlyOut"})
 # Размеры страницы выдачи, которые понимает hh.ru (параметр items_on_page).
 PER_PAGE_VALUES = frozenset({20, 50, 100})
+
+# Каналы поиска: hh — поиск по запросам, habr — лента «Подходящие».
+CHANNEL_VALUES = frozenset({"hh", "habr"})
 
 DEFAULT_RETRY_STATUSES = (STATUS_ERROR, STATUS_QUEUED, STATUS_EXCLUDED)
 
@@ -155,6 +162,15 @@ def _str(value: Any, key: str) -> str:
     text = _optional_str(value)
     if not text:
         raise ValueError(f"Параметр {key} не может быть пустым")
+    return text
+
+
+def _channel_name(value: Any, key: str) -> str:
+    """Канал поиска: только значения из CHANNEL_VALUES, регистр не важен."""
+    text = (_optional_str(value) or "").lower()
+    if text not in CHANNEL_VALUES:
+        allowed = ", ".join(sorted(CHANNEL_VALUES))
+        raise ValueError(f"Параметр {key} должен быть одним из: {allowed}")
     return text
 
 
@@ -323,7 +339,7 @@ def _drop_path(data: dict[str, Any], path: str) -> None:
 class DelayRange(BaseModel):
     """Случайная пауза между действиями."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     minimum: float
     maximum: float
@@ -367,7 +383,7 @@ class DelayRange(BaseModel):
 class ResumeConfig(BaseModel):
     """Подъём резюме в поиске: название резюме и минимальный интервал между подъёмами."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     name: str = ""
     boost_interval_hours: PositiveInt = 4
@@ -381,7 +397,7 @@ class ResumeConfig(BaseModel):
 class RetryConfig(BaseModel):
     """Какие вакансии из дневных отчётов повторять при `--retry`."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     statuses: tuple[str, ...] = DEFAULT_RETRY_STATUSES
 
@@ -393,12 +409,15 @@ class RetryConfig(BaseModel):
 
 
 class SearchConfig(BaseModel):
-    """Параметры поиска вакансий на hh.ru."""
+    """Параметры поиска: канал (hh/habr) и фильтры hh.ru."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
-    queries: tuple[str, ...]
-    area: str
+    # Канал поиска: hh — запросы и фильтры, habr — лента «Подходящие».
+    channel: str = "hh"
+    # Для habr запросы и регион не нужны: лента строится по профилю пользователя.
+    queries: tuple[str, ...] = ()
+    area: str = ""
     salary_from: int | None = None
     experience: tuple[str, ...] = ()
     schedule: str | None = None
@@ -412,14 +431,23 @@ class SearchConfig(BaseModel):
         """id региона hh.ru: единственный источник — area, второго поля нет."""
         return resolve_area_id(self.area)
 
+    @field_validator("channel", mode="before")
+    @classmethod
+    def _channel_value(cls, value: Any) -> str:
+        return _channel_name(value, "search.channel")
+
     @field_validator("queries", mode="before")
     @classmethod
     def _queries(cls, value: Any) -> tuple[str, ...]:
+        if value is None:
+            return ()
         return _parse_queries(value)
 
     @field_validator("area", mode="before")
     @classmethod
     def _area(cls, value: Any) -> str:
+        if value is None or not str(value).strip():
+            return ""
         text = _area_text(value)
         _area_id(text)  # регион проверяем при загрузке, а не при построении URL
         return text
@@ -459,11 +487,21 @@ class SearchConfig(BaseModel):
     def _per_page(cls, value: Any) -> int:
         return _page_size(value, "search.per_page")
 
+    @model_validator(mode="after")
+    def _required_fields(self) -> "SearchConfig":
+        """Запросы и регион обязательны только для поиска hh.ru."""
+        if self.channel == "hh":
+            if not self.queries:
+                raise ValueError("Обязательный параметр отсутствует: search.queries")
+            if not self.area:
+                raise ValueError("Обязательный параметр отсутствует: search.area")
+        return self
+
 
 class PipelineConfig(BaseModel):
     """Параметры запуска: лимиты, паузы, подъём резюме и повторы."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     resume: ResumeConfig = Field(default_factory=ResumeConfig)
     limit_per_run: int
@@ -485,16 +523,27 @@ class PipelineConfig(BaseModel):
 class DataPathsConfig(BaseModel):
     """Пути к локальным данным проекта."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     profile: Path = DEFAULT_PROFILE_PATH
+    # Сессия hh.ru: имя ключа прежнее, изменился только файл по умолчанию.
     session_state: Path = DEFAULT_STATE_PATH
+    # Сессия career.habr.com и постоянный профиль Chrome для hCaptcha.
+    habr_session_state: Path = DEFAULT_HABR_STATE_PATH
+    habr_profile: Path = DEFAULT_HABR_PROFILE_PATH
     cache: Path = DEFAULT_CACHE_PATH
     report_dir: Path = DEFAULT_REPORT_DIR
     logs_dir: Path = DEFAULT_LOGS_DIR
 
     @field_validator(
-        "profile", "session_state", "cache", "report_dir", "logs_dir", mode="before"
+        "profile",
+        "session_state",
+        "habr_session_state",
+        "habr_profile",
+        "cache",
+        "report_dir",
+        "logs_dir",
+        mode="before",
     )
     @classmethod
     def _project_path(cls, value: Any, info: ValidationInfo) -> Path:
@@ -504,7 +553,7 @@ class DataPathsConfig(BaseModel):
 class DataConfig(BaseModel):
     """Локальные данные: срок хранения логов и пути."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     # Журналы и скриншоты старше срока удаляются при старте.
     # Дневные отчёты (data/report) не удаляются никогда: это история для аналитики.
@@ -515,7 +564,7 @@ class DataConfig(BaseModel):
 class CoverLetterConfig(BaseModel):
     """Сопроводительное письмо: лимит длины и подпись с контактами."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     max_length: PositiveInt = 1500
     # Личное поле: живёт в config.local.yaml, из окружения не читается.
@@ -555,7 +604,7 @@ class CoverLetterConfig(BaseModel):
 class DecisionConfig(BaseModel):
     """Параметры Decision-вызова (модель решений)."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     model: str = "gpt-6-luna-decisions"
     threshold: float = 0.8
@@ -589,7 +638,7 @@ class DecisionConfig(BaseModel):
 class GenerationConfig(BaseModel):
     """Параметры Generation-вызова (чат-модель)."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     model: str = "gpt-6-luna-pro"
     max_tokens: PositiveInt = 2000
@@ -611,7 +660,7 @@ class GenerationConfig(BaseModel):
 class LLMConfig(BaseModel):
     """Настройки LLM-слоя: общий транспорт и два вызова."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     # Секрет: в конфиге хранится только имя переменной окружения с ключом.
     api_key: SecretStr = SecretStr("")
@@ -654,11 +703,15 @@ class LLMConfig(BaseModel):
 class BrowserConfig(BaseModel):
     """Настройки браузера."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     headless: bool = False
     slow_mo_ms: NonNegativeInt = 0
     channel: str | None = None
+    # Playwright по умолчанию запускает Chromium с --no-sandbox: браузер пишет
+    # предупреждение о стабильности и безопасности. true — sandbox включён.
+    # false нужно только там, где sandbox не стартует (root, Linux без userns).
+    chromium_sandbox: bool = True
     # Сколько секунд ждать, пока человек решит капчу в открытом окне (0 — не ждать).
     captcha_wait_seconds: NonNegativeInt = 120
 
@@ -676,7 +729,7 @@ class BrowserConfig(BaseModel):
 class EmailConfig(BaseModel):
     """SMTP-канал: общий транспорт для отчёта и уведомлений."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     enabled: bool = False
     smtp_host: str = ""
@@ -705,7 +758,7 @@ class NotificationConfig(BaseModel):
     Пустой `recipient` означает «общий адрес из notifications.email.recipient».
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     enabled: bool = True
     recipient: str = ""
@@ -728,7 +781,7 @@ class NotificationConfig(BaseModel):
 class NotificationsConfig(BaseModel):
     """Письма на email: общий транспорт и отдельные виды писем."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     email: EmailConfig = Field(default_factory=EmailConfig)
     report: NotificationConfig = Field(default_factory=NotificationConfig)

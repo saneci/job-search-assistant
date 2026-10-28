@@ -1,4 +1,4 @@
-"""Playwright: запуск Chromium, сохранение и восстановление сессии hh.ru."""
+"""Playwright: запуск браузера, сохранение и восстановление сессии hh.ru и Habr."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import json
 import re
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from playwright.sync_api import (
     Browser,
@@ -23,6 +23,10 @@ from .logging_setup import RunLogger
 
 HH_HOME = "https://hh.ru/"
 HH_RESUMES = "https://hh.ru/applicant/resumes"
+
+# Постоянный профиль Chrome подменяет признак автоматизации: без этого hCaptcha
+# на входе в Habr не отрисовывается и ручной вход невозможен.
+HIDE_WEBDRIVER = "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
 
 # Таймаут загрузки страницы hh.ru: страницы с тяжёлой версткой грузятся дольше обычных.
 NAVIGATION_TIMEOUT_MS = 45000
@@ -63,10 +67,14 @@ class BrowserSession:
         config: BrowserConfig,
         state_path: Path,
         logger: RunLogger,
+        profile_dir: Path | None = None,
     ) -> None:
         self.config = config
         self.state_path = state_path
         self.logger = logger
+        # Постоянный профиль нужен каналу Habr: в одноразовом контексте hCaptcha
+        # не отрисовывается. Для hh.ru профиль не используется (профиль = None).
+        self.profile_dir = profile_dir
         self._playwright: Playwright | None = None
         self._browser: Browser | None = None
         self._context: BrowserContext | None = None
@@ -88,9 +96,16 @@ class BrowserSession:
         launch_options: dict[str, Any] = {
             "headless": headless,
             "slow_mo": self.config.slow_mo_ms,
+            # Без этой опции Playwright добавляет --no-sandbox и браузер
+            # предупреждает, что стабильность и безопасность нарушены.
+            "chromium_sandbox": self.config.chromium_sandbox,
         }
         if self.config.channel:
             launch_options["channel"] = self.config.channel
+        if self.profile_dir is not None:
+            self._launch_persistent(launch_options)
+            self._headless = headless
+            return
         self._browser = self._playwright.chromium.launch(**launch_options)
         context_options: dict[str, Any] = {
             "locale": "ru-RU",
@@ -101,10 +116,44 @@ class BrowserSession:
         self._context = self._browser.new_context(**context_options)
         self._headless = headless
 
+    def _launch_persistent(self, launch_options: dict[str, Any]) -> None:
+        """Запускает постоянный профиль Chrome без признаков автоматизации."""
+        assert self._playwright is not None and self.profile_dir is not None
+        self.profile_dir.mkdir(parents=True, exist_ok=True)
+        context_options: dict[str, Any] = {
+            "user_data_dir": str(self.profile_dir),
+            "ignore_default_args": ["--enable-automation"],
+            "args": ["--disable-blink-features=AutomationControlled"],
+            "locale": "ru-RU",
+            "viewport": {"width": 1680, "height": 1000},
+        }
+        self._context = self._playwright.chromium.launch_persistent_context(
+            **launch_options, **context_options
+        )
+        self._context.add_init_script(HIDE_WEBDRIVER)
+        self._browser = None
+        self._restore_cookies()
+
+    def _restore_cookies(self) -> None:
+        """Переносит cookie из файла сессии в постоянный профиль.
+
+        `launch_persistent_context` не принимает `storage_state`, а cookie
+        из сохранённого файла нужны, чтобы не входить заново после смены профиля.
+        """
+        if self._context is None or not self.state_path.exists():
+            return
+        try:
+            state = json.loads(self.state_path.read_text(encoding="utf-8"))
+            cookies = state.get("cookies") or []
+            if cookies:
+                self._context.add_cookies(cookies)
+        except (OSError, ValueError, PlaywrightError) as exc:
+            self.logger.event("session_restore_error", error=str(exc))
+
     def _ensure_headed(self) -> None:
         if not self._headless:
             return
-        self.logger.info("Перезапускаю браузер с окном: требуется ручной вход в hh.ru.")
+        self.logger.info("Перезапускаю браузер с окном: требуется ручной вход.")
         self._close_current()
         self._launch(headless=False)
 
@@ -124,7 +173,9 @@ class BrowserSession:
                 pass
 
     def is_alive(self) -> bool:
-        return self._context is not None and self._browser is not None
+        if self._context is None:
+            return False
+        return self._browser is not None or self.profile_dir is not None
 
     def new_page(self) -> Page:
         if self._context is None:
@@ -149,43 +200,65 @@ class BrowserSession:
         )
         self.logger.info(f"Сессия сохранена в {self.state_path}")
 
-    def ensure_logged_in(self) -> None:
-        """Проверяет сессию и при необходимости запускает ручной вход."""
-        self.logger.info("Проверяю сессию hh.ru...")
+    def ensure_logged_in(
+        self,
+        check: Callable[[Page], bool] | None = None,
+        login_url: str | None = None,
+        name: str = "hh.ru",
+    ) -> None:
+        """Проверяет сессию сайта и при необходимости запускает ручной вход.
+
+        Без `check` поведение прежнее (hh.ru): проверка и тексты про hh.ru.
+        `check` позволяет проверить сессию другого сайта (Habr).
+        """
+        authenticate = check or is_authenticated
+        state_exists = self.state_path.exists()
+        # Для постоянного профиля файл сессии не обязателен: cookie живут в профиле.
+        ready = state_exists or check is not None
+        self.logger.info(f"Проверяю сессию {name}...")
         page = self.new_page()
         try:
-            if self.state_path.exists() and is_authenticated(page):
-                self.logger.info("Сессия hh.ru восстановлена, вход не требуется.")
+            if ready and authenticate(page):
+                self.logger.info(f"Сессия {name} восстановлена, вход не требуется.")
                 return
-            if self.state_path.exists():
-                self.logger.info("Сохранённая сессия hh.ru недействительна, нужен повторный вход.")
+            if state_exists:
+                self.logger.info(
+                    f"Сохранённая сессия {name} недействительна, нужен повторный вход."
+                )
             else:
-                self.logger.info("Сохранённая сессия не найдена, нужен первый вход в hh.ru.")
+                self.logger.info(f"Сохранённая сессия не найдена, нужен первый вход в {name}.")
         finally:
             page.close()
-        self.login_manually()
+        self.login_manually(login_url, check, name)
 
-    def login_manually(self) -> None:
-        """Открывает hh.ru и ждёт, пока пользователь войдёт в аккаунт вручную."""
+    def login_manually(
+        self,
+        url: str | None = None,
+        check: Callable[[Page], bool] | None = None,
+        name: str = "hh.ru",
+    ) -> None:
+        """Открывает сайт и ждёт, пока пользователь войдёт в аккаунт вручную."""
+        authenticate = check or is_authenticated
+        target = url or HH_HOME
         self._ensure_headed()
         page = self.new_page()
         authenticated = False
         try:
-            page.goto(HH_HOME, wait_until="domcontentloaded", timeout=NAVIGATION_TIMEOUT_MS)
+            page.goto(target, wait_until="domcontentloaded", timeout=NAVIGATION_TIMEOUT_MS)
             self.logger.info(
-                "В открытом окне браузера войдите в аккаунт hh.ru. "
+                f"В открытом окне браузера войдите в аккаунт {name}. "
                 "После входа вернитесь в консоль и нажмите Enter."
             )
             try:
-                input("Нажмите Enter после входа в аккаунт hh.ru... ")
+                input(f"Нажмите Enter после входа в аккаунт {name}... ")
             except EOFError as exc:
                 raise BrowserError(
                     "Не удалось дождаться подтверждения входа: консоль недоступна. "
                     "Запустите приложение из терминала."
                 ) from exc
 
-            self.logger.info("Проверяю вход в hh.ru...")
-            authenticated = is_authenticated(page)
+            self.logger.info(f"Проверяю вход в {name}...")
+            authenticated = authenticate(page)
             if authenticated:
                 self.logger.info("Вход подтверждён.")
             else:
@@ -295,6 +368,9 @@ def detect_captcha(page: Page) -> bool:
             "[data-qa='captcha']",
             "#captcha",
             "iframe[src*='captcha']",
+            "iframe[src*='hcaptcha']",
+            "[id^='h-captcha']",
+            "textarea[name='h-captcha-response']",
             "[data-qa*='captcha']",
             "input[name*='captcha']",
             "img[alt*='капч']",

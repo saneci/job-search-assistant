@@ -15,6 +15,7 @@ from agent.cli import (
     RETRY_STATUS_HELP,
     _notify_test,
     build_parser,
+    CliUsageError,
     excluded_help,
     excluded_help_requested,
     general_help,
@@ -27,19 +28,27 @@ from agent.cli import (
 from agent.config import load_config
 from agent.logging_setup import RunLogger
 
-GENERAL_HELP_TEXT = """Персональный агент автоматических откликов на hh.ru
+GENERAL_HELP_TEXT = """Персональный ассистент для поиска работы, который отсеивает нерелевантное и оставляет только то, что стоит вашего внимания
 
 Опции:
-  --help, -h              показать справку и выйти
-  --install-browser       установить Chromium для Playwright, переопределяет значение из config.yaml: browser.channel
-  --login                 открыть браузер, войти в аккаунт hh.ru и сохранить сессию в data/state.json
-  --config <FILE>         путь к YAML-конфигурации (по умолчанию: config.yaml в корне проекта)
-  --no-ops                выполнить обычный цикл программы: поиск → оценка → отклики → отчёт
-  --retry, --re [STATUS]  повторить обработку вакансий, без поиска
-  --excluded              повторить обработку только исключённых вакансий, синоним --retry excluded
-  --notify-test           отправить тестовое оповещение о завершении работы по включённым видам уведомлений
+  -h, --help                  показать справку и выйти
+  --install-browser           установить Chromium для Playwright (не нужен при browser.channel)
+  --login                     открыть браузер, войти на сайт выбранного канала и сохранить сессию
+  --config <FILE>             путь к YAML-конфигурации, по умолчанию: config.yaml в корне проекта
+  --channel, --ch <CHANNEL>   канал запуска: hh или habr, по умолчанию: search.channel из config.yaml
+  -r, --retry, --re [STATUS]  повторить обработку вакансий, без поиска
+  --excluded                  повторить обработку только исключённых вакансий, синоним --retry excluded
+  --notify-test               отправить тестовое оповещение о завершении работы по включённым видам уведомлений
 
-Для получения справки по конкретной опции нужно после опции ввести --help или -h, если документация есть она будет показана, пример: ./run.sh --retry -h"""
+Для получения справки по конкретной опции нужно после опции ввести --help или -h, если документация есть она будет показана, пример: ./run.sh --retry -h
+
+Examples:
+  ./run.sh
+  ./run.sh --channel habr
+  ./run.sh --channel habr --retry
+  ./run.sh --channel habr --re
+  ./run.sh --retry queued
+  ./run.sh --login --ch habr"""
 
 RETRY_HELP_TEXT = """Повторение обработки вакансий по списку прямых ссылок из отчётов, без поиска
 
@@ -119,12 +128,27 @@ def test_parser_retry_flag_and_aliases() -> None:
     parser = build_parser()
 
     assert parser.parse_args(["--retry"]).retry == RETRY_ALL
+    assert parser.parse_args(["-r"]).retry == RETRY_ALL
     assert parser.parse_args(["--retry", "all"]).retry == RETRY_ALL
     assert parser.parse_args(["--retry", "queued"]).retry == "queued"
     assert parser.parse_args(["--re"]).retry == RETRY_ALL
     assert parser.parse_args(["--excluded"]).excluded is True
     assert parser.parse_args([]).retry is None
     assert parser.parse_args([]).excluded is False
+
+
+def test_parser_channel_flag_and_aliases() -> None:
+    parser = build_parser()
+
+    assert parser.parse_args([]).channel is None
+    assert parser.parse_args(["--channel", "habr"]).channel == "habr"
+    assert parser.parse_args(["--ch", "hh"]).channel == "hh"
+
+
+def test_no_ops_option_is_removed() -> None:
+    """`--no-ops` удалён: обычный цикл выполняется без этой опции."""
+    with pytest.raises(CliUsageError):
+        build_parser().parse_args(["--no-ops"])
 
 
 def test_help_descriptions_cover_every_status() -> None:
@@ -144,9 +168,18 @@ def test_config_uses_file_placeholder() -> None:
     assert "--config <FILE>" in build_parser().format_help()
 
 
-def test_no_ops_option_is_real_flag() -> None:
-    """`--no-ops` есть в парсере, а не только в тексте справки."""
-    assert build_parser().parse_args(["--no-ops"]).no_ops is True
+def test_channel_uses_placeholder() -> None:
+    """Канал показывается как подставляемое значение, а не КАНАЛ."""
+    assert "--channel, --ch <CHANNEL>" in build_parser().format_help()
+    assert "--channel, --ch <CHANNEL>" in general_help(color=False)
+
+
+def test_general_help_examples_include_channel_with_retry() -> None:
+    """В примерах общей справки есть канал вместе с повтором."""
+    text = general_help(color=False)
+
+    assert "./run.sh --channel habr --retry" in text
+    assert "./run.sh --channel habr --re" in text
 
 
 def test_retry_help_matches_spec() -> None:
@@ -172,7 +205,6 @@ def test_excluded_help_matches_spec() -> None:
         ["--help"],
         ["-h"],
         ["--help", "--retry"],
-        ["--login", "--help"],
         ["--install-browser", "-h"],
         ["--notify-test", "--help"],
         ["--config", "config.yaml", "-h"],
@@ -207,6 +239,28 @@ def test_excluded_help_after_excluded_flag(argv: list[str], capsys) -> None:
     assert capsys.readouterr().out == EXCLUDED_HELP_TEXT + "\n"
 
 
+@pytest.mark.parametrize("argv", [["--login", "--help"], ["--login", "-h"]])
+def test_login_help_after_login_flag(argv: list[str], capsys) -> None:
+    """`--login --help` объясняет вход и показывает канал."""
+    assert main(argv) == 0
+    out = capsys.readouterr().out
+
+    assert "Вход на сайт выбранного канала с сохранением сессии" in out
+    assert "--channel, --ch <CHANNEL>" in out
+    assert "./run.sh --login --channel habr" in out
+
+
+@pytest.mark.parametrize("argv", [["--channel", "--help"], ["--ch", "-h"]])
+def test_channel_help_after_channel_flag(argv: list[str], capsys) -> None:
+    """`--channel --help` объясняет значения канала и примеры запуска."""
+    assert main(argv) == 0
+    out = capsys.readouterr().out
+
+    assert "Канал запуска: hh.ru или career.habr.com" in out
+    assert "hh" in out and "habr" in out
+    assert "./run.sh --channel habr --retry" in out
+
+
 @pytest.mark.parametrize(
     "argv, expected",
     [
@@ -214,10 +268,17 @@ def test_excluded_help_after_excluded_flag(argv: list[str], capsys) -> None:
         (["--retry", "-h"], "retry"),
         (["--retry=error", "-h"], "retry"),
         (["--re", "--help"], "retry"),
+        (["-r", "-h"], "retry"),
         (["--excluded", "--help"], "excluded"),
         (["--excluded", "-h"], "excluded"),
+        (["--login", "--help"], "login"),
+        (["--channel", "-h"], "channel"),
+        (["--ch", "habr", "--help"], "channel"),
+        (["--retry", "--login", "-h"], "login"),
+        (["--login", "--channel", "habr", "-h"], "channel"),
         (["--help", "--retry"], "general"),
         (["--help", "--excluded"], "general"),
+        (["--help", "--login"], "general"),
         (["--help"], "general"),
         (["--retry"], "general"),
         (["--excluded"], "general"),
@@ -282,7 +343,7 @@ def test_unknown_option_is_reported_in_russian(capsys) -> None:
     err = capsys.readouterr().err
 
     assert "Ошибка: неизвестная опция: --adsfa" in err
-    assert "Использование: ./run.sh [ОПЦИИ]" in err
+    assert "Использование: ./run.sh [OPTIONS]" in err
     assert "Справка: ./run.sh --help" in err
     assert "usage:" not in err
 
@@ -296,6 +357,17 @@ def test_unknown_retry_status_lists_allowed_values(capsys) -> None:
     assert "Допустимые статусы: error, queued, excluded, skipped" in err
     assert "Использование: ./run.sh --retry [STATUS]" in err
     assert " all" not in err
+
+
+def test_unknown_channel_lists_allowed_values(capsys) -> None:
+    """Неверный канал — перечень допустимых значений и подсказка по справке."""
+    assert main(["--channel", "superjob"]) == 2
+    err = capsys.readouterr().err
+
+    assert "Ошибка: неизвестный канал: superjob" in err
+    assert "Допустимые каналы: hh, habr" in err
+    assert "Использование: ./run.sh --channel <CHANNEL>" in err
+    assert "Справка: ./run.sh --help" in err
 
 
 def test_config_option_without_value(capsys) -> None:
@@ -314,7 +386,7 @@ def test_help_uses_color_when_forced(monkeypatch, capsys) -> None:
 
     assert main(["--help"]) == 0
     general = capsys.readouterr().out
-    assert "\x1b[1;36m--help, -h" in general
+    assert "\x1b[1;36m-h, --help" in general
 
     assert main(["--retry", "--help"]) == 0
     retry = capsys.readouterr().out
@@ -332,6 +404,37 @@ def test_no_color_environment_disables_color(monkeypatch, capsys) -> None:
 
     assert main(["--help"]) == 0
     assert "\x1b[" not in capsys.readouterr().out
+
+
+def test_main_passes_channel_and_retry_to_run(tmp_path: Path, monkeypatch) -> None:
+    """Флаг канала доходит до запуска вместе с --retry, браузер не поднимается."""
+    data = {
+        "search": {"queries": "Java", "area": "Москва"},
+        "pipeline": {"limit_per_run": 1, "delay_between_actions": {"from": 0, "to": 0}},
+        "llm": {"api_key_env": "TEST_API_KEY"},
+    }
+    path = tmp_path / "config.yaml"
+    path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setenv("TEST_API_KEY", "test-key")
+    captured: dict[str, object] = {}
+
+    class FakeLogger:
+        def __enter__(self) -> "FakeLogger":
+            return self
+
+        def __exit__(self, *exc_info: object) -> bool:
+            return False
+
+    def fake_run(config, logger, retry=None, channel_name=None):
+        del config, logger
+        captured["channel"] = channel_name
+        captured["retry"] = retry
+
+    monkeypatch.setattr("agent.cli.RunLogger", lambda *args, **kwargs: FakeLogger())
+    monkeypatch.setattr("agent.cli.run", fake_run)
+
+    assert main(["--config", str(path), "--ch", "habr", "--retry"]) == 0
+    assert captured == {"channel": "habr", "retry": RETRY_ALL}
 
 
 def test_notify_test_sends_to_each_enabled_kind(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -418,4 +521,3 @@ def test_notify_test_with_all_kinds_disabled(tmp_path: Path, capsys) -> None:
 
     assert "уведомления отключены" in capsys.readouterr().err
     assert read_events(logger)[-1]["sent"] is False
-

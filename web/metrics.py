@@ -38,6 +38,14 @@ STATUS_COLORS = {
 # Статусы, которые означают отправленный отклик: ожидание ответа, отказ и оффер.
 RESPONSE_STATUSES = ("sent", "rejected", "offer")
 
+# Каналы поиска: у записей старых отчётов поля нет — они идут как unknown.
+CHANNEL_LABELS = {"hh": "hh.ru", "habr": "Habr Career", "unknown": "Без канала"}
+CHANNEL_COLORS = {
+    "hh": "var(--color-sent)",
+    "habr": "var(--color-queued)",
+    "unknown": "var(--color-base)",
+}
+
 
 def _vacancy_key(record: Mapping[str, Any], index: int) -> tuple[str, ...]:
     """Ключ вакансии: ссылка, иначе название и компания."""
@@ -154,6 +162,12 @@ def build_metrics(
     """
     rows = dedupe_vacancies(vacancies)
     total = len(rows)
+    channel_counts = Counter(str(row.get("channel", "") or "unknown") for row in rows)
+    channels = [
+        _item(name, CHANNEL_LABELS[name], channel_counts.get(name, 0), total, CHANNEL_COLORS[name])
+        for name in ("hh", "habr", "unknown")
+        if channel_counts.get(name)
+    ]
     raw_counts = Counter(str(row.get("status", "") or "unknown") for row in rows)
     counts = {status: raw_counts.get(status, 0) for status in STATUS_ORDER}
     unknown = total - sum(counts.values())
@@ -235,6 +249,7 @@ def build_metrics(
         "pie_legend": pie_legend,
         "distribution": distribution,
         "fate": fate,
+        "channels": channels,
         "empty": total == 0,
         "has_responses": responses > 0,
     }

@@ -124,6 +124,7 @@ class ProcessedStore:
         status: str,
         reason: str = "",
         profile: str | None = None,
+        channel: str = "",
     ) -> bool:
         """Записывает вакансию в отчёт дня; известную запись обновляет (повтор).
 
@@ -137,7 +138,7 @@ class ProcessedStore:
         known = next((self._records[key] for key in keys if key in self._records), None)
         if known is not None:
             return self._update(
-                known[1], status=status, reason=reason, profile=profile
+                known[1], status=status, reason=reason, profile=profile, channel=channel
             )
 
         now = _now()
@@ -153,6 +154,8 @@ class ProcessedStore:
         }
         if reason:
             item["reason"] = reason
+        if channel:
+            item["channel"] = channel
 
         items = _read(self.path)
         items.append(item)
@@ -171,6 +174,7 @@ class ProcessedStore:
         status: str,
         reason: str,
         profile: str | None = None,
+        channel: str = "",
     ) -> bool:
         """Обновляет запись о вакансии: повтор увеличивает счётчик попыток.
 
@@ -188,6 +192,8 @@ class ProcessedStore:
         item["status"] = status
         item["attempts"] = int(item.get("attempts", 1)) + 1
         item["updated_at"] = now
+        if channel:
+            item["channel"] = channel
         if reason:
             item["reason"] = reason
         else:

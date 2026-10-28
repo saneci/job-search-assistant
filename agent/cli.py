@@ -10,6 +10,7 @@ from collections.abc import Sequence
 from typing import TextIO
 
 from .browser import BrowserError, BrowserSession
+from .channel import CHANNEL_NAMES
 from .config import (
     DEFAULT_CONFIG_PATH,
     AppConfig,
@@ -26,7 +27,7 @@ from .models import (
 )
 from .notify import notify_test as send_test_notification
 from .notify import notify_test_targets
-from .pipeline import RETRY_ALL, run
+from .pipeline import RETRY_ALL, channel_for, log_channel_choice, run, session_settings
 from .profile import ProfileError
 
 # `--retry` без значения повторяет статусы из retry.statuses.
@@ -35,9 +36,11 @@ RETRY_CHOICES = (RETRY_ALL,) + RETRYABLE_STATUSES
 # Как в справке выглядит вызов `--retry` без значения.
 RETRY_ALL_LABEL = "(без значения)"
 
-# Флаги повтора и справки: по ним выбирается, какую справку показать.
-RETRY_FLAGS = ("--retry", "--re")
+# Опции повтора, входа и справки: по ним выбирается, какую справку показать.
+RETRY_FLAGS = ("-r", "--retry", "--re")
 EXCLUDED_FLAGS = ("--excluded",)
+LOGIN_FLAGS = ("--login",)
+CHANNEL_FLAGS = ("--channel", "--ch")
 HELP_FLAGS = ("-h", "--help")
 
 # Цвета повторяют тему argparse в Python 3.14+: пользователь видит один
@@ -85,10 +88,10 @@ def _paint(text: str, color: str, enabled: bool) -> str:
 
 
 def _option_rows(
-    rows: Sequence[tuple[str, str]],
-    *,
-    color: bool,
-    label_color: str = _COLOR_OPTION,
+        rows: Sequence[tuple[str, str]],
+        *,
+        color: bool,
+        label_color: str = _COLOR_OPTION,
 ) -> str:
     """Строки «опция  описание»: подписи выровнены по самой длинной."""
     width = max(len(label) for label, _ in rows)
@@ -153,25 +156,24 @@ def retry_statuses_help(color: bool | None = None) -> str:
 
 
 GENERAL_OPTIONS = (
-    ("--help, -h", "показать справку и выйти"),
+    ("-h, --help", "показать справку и выйти"),
     (
         "--install-browser",
-        "установить Chromium для Playwright, переопределяет значение из "
-        "config.yaml: browser.channel",
+        "установить Chromium для Playwright (не нужен при browser.channel)",
     ),
     (
         "--login",
-        "открыть браузер, войти в аккаунт hh.ru и сохранить сессию в data/state.json",
+        "открыть браузер, войти на сайт выбранного канала и сохранить сессию",
     ),
     (
         "--config <FILE>",
-        "путь к YAML-конфигурации (по умолчанию: config.yaml в корне проекта)",
+        "путь к YAML-конфигурации, по умолчанию: config.yaml в корне проекта",
     ),
     (
-        "--no-ops",
-        "выполнить обычный цикл программы: поиск → оценка → отклики → отчёт",
+        "--channel, --ch <CHANNEL>",
+        "канал запуска: hh или habr, по умолчанию: search.channel из config.yaml",
     ),
-    ("--retry, --re [STATUS]", "повторить обработку вакансий, без поиска"),
+    ("-r, --retry, --re [STATUS]", "повторить обработку вакансий, без поиска"),
     (
         "--excluded",
         "повторить обработку только исключённых вакансий, синоним --retry excluded",
@@ -190,14 +192,22 @@ def general_help(color: bool | None = None) -> str:
         color = _color_enabled()
     rows = _option_rows(GENERAL_OPTIONS, color=color)
     return (
-        f"{_paint('Персональный агент автоматических откликов на hh.ru', _COLOR_HEADING, color)}\n"
+        f"{_paint('Персональный ассистент для поиска работы, который отсеивает нерелевантное и оставляет только то, что стоит вашего внимания', _COLOR_HEADING, color)}\n"
         "\n"
         f"{_paint('Опции:', _COLOR_HEADING, color)}\n"
         f"{rows}\n"
         "\n"
         "Для получения справки по конкретной опции нужно после опции ввести "
         "--help или -h, если документация есть она будет показана, пример: "
-        "./run.sh --retry -h"
+        "./run.sh --retry -h\n"
+        "\n"
+        f"{_paint('Examples:', _COLOR_HEADING, color)}\n"
+        "  ./run.sh\n"
+        "  ./run.sh --channel habr\n"
+        "  ./run.sh --channel habr --retry\n"
+        "  ./run.sh --channel habr --re\n"
+        "  ./run.sh --retry queued\n"
+        "  ./run.sh --login --ch habr"
     )
 
 
@@ -249,8 +259,74 @@ def excluded_help(color: bool | None = None) -> str:
     )
 
 
+def login_help(color: bool | None = None) -> str:
+    """Справка `--login --help`: вход на сайт выбранного канала."""
+    if color is None:
+        color = _color_enabled()
+    rows = _option_rows(
+        (
+            (
+                "--channel, --ch <CHANNEL>",
+                "канал входа: hh или habr (по умолчанию: search.channel из config.yaml)",
+            ),
+        ),
+        color=color,
+        label_color=_COLOR_LABEL,
+    )
+    return (
+        f"{_paint('Вход на сайт выбранного канала с сохранением сессии', _COLOR_HEADING, color)}\n"
+        "\n"
+        "Открывается браузер: войдите в аккаунт вручную и закройте окно. "
+        "Сессия сохранится в файл выбранного канала из data.paths.\n"
+        "\n"
+        f"{_paint('Опции:', _COLOR_HEADING, color)}\n"
+        f"{rows}\n"
+        "\n"
+        "Капча и другие проверки проходятся вручную: приложение их не обходит.\n"
+        "\n"
+        f"{_paint('Examples:', _COLOR_HEADING, color)}\n"
+        "  ./run.sh --login\n"
+        "  ./run.sh --login --channel habr\n"
+        "  ./run.sh --login --ch hh"
+    )
+
+
+def channel_help(color: bool | None = None) -> str:
+    """Справка `--channel --help`: канал запуска и где он применяется."""
+    if color is None:
+        color = _color_enabled()
+    rows = _option_rows(
+        (
+            ("hh", "hh.ru: поиск по запросам и подъём резюме"),
+            ("habr", "career.habr.com: лента «Подходящие» и профиль браузера"),
+        ),
+        color=color,
+        label_color=_COLOR_LABEL,
+    )
+    return (
+        f"{_paint('Канал запуска: hh.ru или career.habr.com', _COLOR_HEADING, color)}\n"
+        "\n"
+        f"{_paint('Опции:', _COLOR_HEADING, color)}\n"
+        "  --channel, --ch <CHANNEL>  канал запуска "
+        "(по умолчанию: search.channel из config.yaml)\n"
+        "\n"
+        "Без опции канал берётся из конфига. Неверное значение — ошибка "
+        "до запуска браузера.\n"
+        "\n"
+        f"{_paint('Допустимые значения:', _COLOR_HEADING, color)}\n"
+        f"{rows}\n"
+        "\n"
+        "Опция действует для обычного запуска, --retry и --login.\n"
+        "\n"
+        f"{_paint('Examples:', _COLOR_HEADING, color)}\n"
+        "  ./run.sh --channel habr\n"
+        "  ./run.sh --channel habr --retry\n"
+        "  ./run.sh --login --ch habr"
+    )
+
+
 def _first_flag(argv: Sequence[str], flags: tuple[str, ...]) -> int | None:
-    """Позиция первого флага в argv; `--retry=queued` считается флагом `--retry`."""
+    """Позиция первой опции в argv; `--retry=queued` считается опцией `--retry`."""
     for index, token in enumerate(argv):
         if token in flags:
             return index
@@ -265,7 +341,7 @@ def help_requested(argv: Sequence[str]) -> bool:
 
 
 def help_topic(argv: Sequence[str]) -> str:
-    """Какую справку показать: general, retry или excluded.
+    """Какую справку показать: general, retry, excluded, login или channel.
 
     Справка конкретной опции показывается, только если эта опция стоит до
     `--help`/`-h`: `--retry -h` — про повтор, `-h --retry` — общая.
@@ -279,6 +355,10 @@ def help_topic(argv: Sequence[str]) -> str:
             return "excluded"
         if flag in RETRY_FLAGS:
             return "retry"
+        if flag in LOGIN_FLAGS:
+            return "login"
+        if flag in CHANNEL_FLAGS:
+            return "channel"
     return "general"
 
 
@@ -299,19 +379,23 @@ def help_text(argv: Sequence[str], color: bool | None = None) -> str:
         return retry_help(color)
     if topic == "excluded":
         return excluded_help(color)
+    if topic == "login":
+        return login_help(color)
+    if topic == "channel":
+        return channel_help(color)
     return general_help(color)
 
 
 class CliUsageError(RuntimeError):
-    """Некорректные аргументы командной строки."""
+    """Некорректные опции или аргументы командной строки."""
 
     def __init__(
-        self,
-        reason: str,
-        *,
-        usage: str = "./run.sh [ОПЦИИ]",
-        hint: str = "",
-        help_hint: str = "./run.sh --help",
+            self,
+            reason: str,
+            *,
+            usage: str = "./run.sh [OPTIONS]",
+            hint: str = "",
+            help_hint: str = "./run.sh --help",
     ) -> None:
         super().__init__(reason)
         self.reason = reason
@@ -348,6 +432,12 @@ class _CliArgumentParser(argparse.ArgumentParser):
                 hint="Допустимые статусы: " + ", ".join(RETRYABLE_STATUSES),
                 help_hint="./run.sh --retry -h",
             )
+        if action.dest == "channel" and value not in action.choices:
+            raise CliUsageError(
+                f"неизвестный канал: {value}",
+                usage="./run.sh --channel <CHANNEL>",
+                hint="Допустимые каналы: " + ", ".join(CHANNEL_NAMES),
+            )
         super()._check_value(action, value)
 
 
@@ -369,7 +459,7 @@ def error_text(error: CliUsageError, color: bool | None = None) -> str:
 def build_parser() -> argparse.ArgumentParser:
     parser = _CliArgumentParser(
         prog="run.py",
-        description="Персональный агент автоматических откликов на hh.ru",
+        description="Персональный ассистент для поиска работы, который отсеивает нерелевантное и оставляет только то, что стоит вашего внимания",
         add_help=False,
         allow_abbrev=False,
     )
@@ -382,18 +472,24 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--login",
         action="store_true",
-        help="открыть браузер, войти в аккаунт hh.ru и сохранить сессию",
+        help="открыть браузер, войти на сайт выбранного канала и сохранить сессию",
     )
     parser.add_argument(
         "--config",
         default=str(DEFAULT_CONFIG_PATH),
         metavar="<FILE>",
-        help="путь к YAML-конфигурации (по умолчанию: config.yaml в корне проекта)",
+        help="путь к YAML-конфигурации, по умолчанию: config.yaml в корне проекта",
     )
     parser.add_argument(
-        "--no-ops",
-        action="store_true",
-        help="выполнить обычный цикл программы: поиск → оценка → отклики → отчёт",
+        "--channel",
+        "--ch",
+        choices=CHANNEL_NAMES,
+        default=None,
+        metavar="<CHANNEL>",
+        help=(
+            "канал запуска: hh или habr, по умолчанию: search.channel из config.yaml; "
+            "действует для обычного запуска, --retry и --login"
+        ),
     )
     parser.add_argument(
         "--install-browser",
@@ -406,6 +502,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="отправить тестовое письмо-уведомление и выйти (проверка SMTP-канала)",
     )
     parser.add_argument(
+        "-r",
         "--retry",
         "--re",
         nargs="?",
@@ -451,11 +548,16 @@ def main(argv: list[str] | None = None) -> int:
             return _notify_test(config, logger)
 
         if args.login:
+            channel = channel_for(config, args.channel)
+            log_channel_choice(logger, channel, args.channel)
+            state_path, profile_dir = session_settings(config, channel)
             try:
                 with BrowserSession(
-                    config.browser, config.data.paths.session_state, logger
+                        config.browser, state_path, logger, profile_dir
                 ) as session:
-                    session.login_manually()
+                    session.login_manually(
+                        channel.login_url, channel.auth_check, channel.site_label
+                    )
             except BrowserError as exc:
                 logger.event("login_error", error=str(exc))
                 print(f"Не удалось сохранить сессию: {exc}", file=sys.stderr)
@@ -470,7 +572,12 @@ def main(argv: list[str] | None = None) -> int:
             return 2
 
         try:
-            run(config, logger, retry="excluded" if args.excluded else args.retry)
+            run(
+                config,
+                logger,
+                retry="excluded" if args.excluded else args.retry,
+                channel_name=args.channel,
+            )
         except (BrowserError, ProfileError) as exc:
             logger.event("fatal_error", error=f"{type(exc).__name__}: {exc}")
             print(f"Запуск прерван: {exc}", file=sys.stderr)

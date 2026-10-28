@@ -30,8 +30,9 @@ def notify_captcha(
     company: str = "",
     url: str = "",
     note: str = "",
+    site: str = "hh.ru",
 ) -> tuple[bool, str]:
-    """Письмо «на hh.ru нужна капча»: где она и что сделать человеку.
+    """Письмо «на сайте нужна капча»: где она и что сделать человеку.
 
     Пустые поля не печатаются: у капчи на странице поиска вакансии может не быть.
     """
@@ -39,9 +40,9 @@ def notify_captcha(
         return False, "уведомления о капче отключены (notifications.captcha.enabled: false)"
 
     label = f"{title} — {company}" if title and company else title
-    subject = "Необходимо пройти капчу на hh.ru"
+    subject = f"Необходимо пройти капчу на {site}"
 
-    lines = ["hh.ru просит пройти капчу.", ""]
+    lines = [f"{site} просит пройти капчу.", ""]
     if label:
         lines.append(f"Вакансия: {label}")
     if url:

@@ -4,6 +4,10 @@
 # Раскладка та же, что в config.yaml: search → pipeline → llm → notifications.
 
 search:
+  # Канал: hh (поиск по запросам) или habr (лента «Подходящие»).
+  # Для habr запросы ниже не нужны.
+  # channel: habr
+
   # Поисковые запросы: строка или список строк, поиск идёт по каждому отдельно.
   queries:
     - "Java developer"
