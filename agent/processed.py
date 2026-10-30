@@ -7,7 +7,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Sequence
 
-from .hh_search import vacancy_keys
+from .hh_search import profile_key, vacancy_keys
 from .models import STATUSES
 
 DATE_FORMAT = "%Y-%m-%d"
@@ -29,8 +29,10 @@ class ProcessedStore:
     вакансия не будет обработана повторно ни завтра, ни через месяц. Прочие
     файлы каталога (не вида «ГГГГ-ММ-ДД.json») игнорируются.
 
-    Одна вакансия — одна запись по URL. При загрузке старые файлы не
-    переписываются, а при обновлении запись переносится в отчёт текущей даты.
+    Одна запись — это вакансия и резюме: ключ `(url, profile)`. Разными резюме
+    можно отвечать на одну вакансию, поэтому у каждой такой пары своя запись.
+    При загрузке старые файлы не переписываются, а при обновлении запись
+    переносится в отчёт текущей даты.
 
     У записи две даты: `created_at` — дата обработки вакансии, она не меняется
     при переносах между файлами и сменах статуса, и `updated_at` — когда запись
@@ -83,6 +85,7 @@ class ProcessedStore:
                     str(record.get("title", "")),
                     str(record.get("company", "")),
                     str(record.get("url", "")),
+                    str(record.get("profile", "")),
                 )
                 if keys and any(key in self._records for key in keys):
                     self.dropped_copies += 1
@@ -90,11 +93,25 @@ class ProcessedStore:
                 for key in keys:
                     self._seen.setdefault(key, day.strftime(DATE_FORMAT))
                     self._records[key] = (file, record)
+                # Старые вызовы без профиля ищут запись по ключам без резюме.
+                for key in vacancy_keys(
+                    str(record.get("title", "")),
+                    str(record.get("company", "")),
+                    str(record.get("url", "")),
+                    None,
+                ):
+                    self._records.setdefault(key, (file, record))
         return len(self._seen)
 
-    def find(self, title: str, company: str, url: str) -> str | None:
-        """Дата, когда вакансия уже обрабатывалась, или None."""
-        for key in vacancy_keys(title, company, url):
+    def find(
+        self,
+        title: str,
+        company: str,
+        url: str,
+        profile: str = "",
+    ) -> str | None:
+        """Дата, когда вакансия с этим резюме уже обрабатывалась, или None."""
+        for key in vacancy_keys(title, company, url, profile):
             day = self._seen.get(key)
             if day:
                 return day
@@ -132,7 +149,7 @@ class ProcessedStore:
         Возвращает False, если вакансию нечем опознать при следующем запуске:
         нет ни ссылки, ни названия с компанией.
         """
-        keys = vacancy_keys(title, company, url)
+        keys = vacancy_keys(title, company, url, profile)
         if not keys:
             return False
         known = next((self._records[key] for key in keys if key in self._records), None)
@@ -148,10 +165,12 @@ class ProcessedStore:
             "company": company,
             "status": status,
             "attempts": 1,
-            "profile": profile or "",
             "created_at": now,
             "updated_at": now,
         }
+        # У Habr и внешней формы нет резюме: поле в отчёт не пишем.
+        if channel not in ("habr", "external"):
+            item["profile"] = profile or ""
         if reason:
             item["reason"] = reason
         if channel:
@@ -161,10 +180,7 @@ class ProcessedStore:
         items.append(item)
         _write(self.path, items)
 
-        day = self.today.strftime(DATE_FORMAT)
-        for key in keys:
-            self._seen.setdefault(key, day)
-            self._records.setdefault(key, (self.path, item))
+        self._remember(item)
         return True
 
     def _update(
@@ -178,11 +194,14 @@ class ProcessedStore:
     ) -> bool:
         """Обновляет запись о вакансии: повтор увеличивает счётчик попыток.
 
-        По URL должна остаться одна запись. Поэтому вакансия удаляется из всех
-        дневных файлов, а обновлённая запись попадает в отчёт сегодняшней даты.
+        По ключу `(url, profile)` должна остаться одна запись. Поэтому вакансия
+        удаляется из всех дневных файлов, а обновлённая запись попадает в отчёт
+        сегодняшней даты.
         """
         now = _now()
-        if profile is not None:
+        if channel in ("habr", "external"):
+            item.pop("profile", None)
+        elif profile is not None:
             item["profile"] = profile
         # Дата создания фиксируется один раз. Для старых записей без неё берём
         # дату обработки из самой записи, а не дату файла.
@@ -220,13 +239,25 @@ class ProcessedStore:
             today.append(item)
         _write(self.path, today)
 
-        for key in vacancy_keys(
-            str(item.get("title", "")),
-            str(item.get("company", "")),
-            str(item.get("url", "")),
-        ):
-            self._records[key] = (self.path, item)
+        self._remember(item)
         return True
+
+    def _remember(self, item: dict[str, Any]) -> None:
+        """Индексирует запись по ключам с профилем и без него.
+
+        Ключи с профилем — рабочая дедупликация: вакансия и резюме. Ключи без
+        профиля остаются для обратной совместимости вызовов без `profile`.
+        """
+        day = self.today.strftime(DATE_FORMAT)
+        title = str(item.get("title", ""))
+        company = str(item.get("company", ""))
+        url = str(item.get("url", ""))
+        profile = str(item.get("profile", ""))
+        for key in vacancy_keys(title, company, url, profile):
+            self._seen.setdefault(key, day)
+            self._records[key] = (self.path, item)
+        for key in vacancy_keys(title, company, url, None):
+            self._records[key] = (self.path, item)
 
 
 def _file_date(path: Path) -> date | None:
@@ -238,7 +269,11 @@ def _file_date(path: Path) -> date | None:
 
 
 def _same_vacancy(row: dict[str, Any], item: dict[str, Any]) -> bool:
-    """Одна и та же вакансия: по ссылке, иначе по названию и компании."""
+    """Одна и та же запись: та же вакансия и то же резюме."""
+    if profile_key(str(row.get("profile", ""))) != profile_key(
+        str(item.get("profile", ""))
+    ):
+        return False
     url = str(item.get("url", ""))
     if url and str(row.get("url", "")) == url:
         return True

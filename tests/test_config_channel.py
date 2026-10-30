@@ -27,7 +27,7 @@ def test_channel_defaults_to_hh(tmp_path: Path) -> None:
     assert config.search.channel == "hh"
     assert config.data.paths.session_state.name == "hh-state.json"
     assert config.data.paths.habr_session_state.name == "habr-state.json"
-    assert config.data.paths.habr_profile.name == "browser-profile"
+    assert config.data.paths.habr_profile.name == "habr-profile"
 
 
 def test_habr_channel_needs_no_queries_and_area(tmp_path: Path) -> None:

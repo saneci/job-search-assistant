@@ -45,6 +45,7 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
         [
             vacancy("https://hh.ru/vacancy/1", "hh"),
             vacancy("https://career.habr.com/vacancies/2", "habr"),
+            vacancy("https://career.habr.com/vacancies/3", "external"),
         ],
     )
     return TestClient(web_main.app)
@@ -55,7 +56,7 @@ def test_metrics_api_has_channels(client: TestClient) -> None:
 
     assert response.status_code == 200
     channels = {item["key"]: item["count"] for item in response.json()["channels"]}
-    assert channels == {"hh": 1, "habr": 1}
+    assert channels == {"hh": 1, "habr": 1, "external": 1}
 
 
 def test_report_page_filters_by_channel(client: TestClient) -> None:
@@ -65,6 +66,7 @@ def test_report_page_filters_by_channel(client: TestClient) -> None:
     assert response.status_code == 200
     assert 'id="channelGroup"' in response.text
     assert 'data-channel="habr"' in response.text
+    assert 'data-channel="external"' in response.text
     assert 'id="filterReset"' in response.text
     # Кнопка видна всегда, но без выбранных условий она неактивна.
     assert 'id="filterReset" type="button" disabled' in response.text

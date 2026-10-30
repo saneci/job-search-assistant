@@ -34,15 +34,19 @@ class FakePage:
         url: str = "https://hh.ru/vacancy/1",
         dialog_text: str = "",
         captcha_ticks: int = 0,
+        visible_selectors: set[str] | None = None,
     ) -> None:
         self.url = url
         self.dialog_text = dialog_text
         self.captcha_ticks = captcha_ticks
+        self.visible_selectors = visible_selectors or set()
         self.waits = 0
 
     def locator(self, selector: str) -> FakeLocator:
         if selector in ("[role='dialog']", "[data-qa='modal-content']") and self.captcha_ticks > 0:
             return FakeLocator(visible=True, text=self.dialog_text)
+        if selector in self.visible_selectors:
+            return FakeLocator(visible=True)
         return FakeLocator()
 
     def wait_for_timeout(self, milliseconds: int) -> None:
@@ -129,6 +133,26 @@ def test_other_dialog_is_not_captcha() -> None:
 
 def test_captcha_by_url() -> None:
     assert detect_captcha(FakePage(url="https://hh.ru/captcha?x=1"))  # type: ignore[arg-type]
+
+
+def test_recaptcha_widget_is_not_a_blocking_captcha() -> None:
+    """reCAPTCHA гостевой формы на странице вакансии не блокирует залогиненный отклик."""
+    page = FakePage(
+        url="https://career.habr.com/vacancies/1000168714",
+        visible_selectors={"iframe[src*='captcha']", "iframe[src*='hcaptcha']"},
+    )
+
+    assert not detect_captcha(page)  # type: ignore[arg-type]
+
+
+def test_hcaptcha_response_field_is_detected() -> None:
+    """Поле ответа hCaptcha — признак настоящей капчи на странице."""
+    page = FakePage(
+        url="https://hh.ru/vacancy/1",
+        visible_selectors={"textarea[name='h-captcha-response']"},
+    )
+
+    assert detect_captcha(page)  # type: ignore[arg-type]
 
 
 def test_wait_for_captcha_solved() -> None:

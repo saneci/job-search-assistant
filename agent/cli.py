@@ -17,6 +17,7 @@ from .config import (
     ConfigError,
     load_config,
 )
+from .hh_vacancy import ResumeNotFoundError
 from .logging_setup import RunLogger
 from .models import (
     RETRYABLE_STATUSES,
@@ -27,7 +28,14 @@ from .models import (
 )
 from .notify import notify_test as send_test_notification
 from .notify import notify_test_targets
-from .pipeline import RETRY_ALL, channel_for, log_channel_choice, run, session_settings
+from .pipeline import (
+    RETRY_ALL,
+    ResumeNameError,
+    channel_for,
+    log_channel_choice,
+    run,
+    session_settings,
+)
 from .profile import ProfileError
 
 # `--retry` без значения повторяет статусы из retry.statuses.
@@ -580,6 +588,10 @@ def main(argv: list[str] | None = None) -> int:
             )
         except (BrowserError, ProfileError) as exc:
             logger.event("fatal_error", error=f"{type(exc).__name__}: {exc}")
+            print(f"Запуск прерван: {exc}", file=sys.stderr)
+            return 1
+        except (ResumeNameError, ResumeNotFoundError) as exc:
+            # События resume_name_is_empty и resume_not_found уже в журнале.
             print(f"Запуск прерван: {exc}", file=sys.stderr)
             return 1
         except KeyboardInterrupt:

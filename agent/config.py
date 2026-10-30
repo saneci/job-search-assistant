@@ -55,7 +55,7 @@ DEFAULT_PROFILE_PATH = PROJECT_ROOT / "data" / "profile.md"
 DEFAULT_STATE_PATH = PROJECT_ROOT / "data" / "hh-state.json"
 DEFAULT_HABR_STATE_PATH = PROJECT_ROOT / "data" / "habr-state.json"
 # Постоянный профиль Chrome для habr: без него hCaptcha не отрисовывается.
-DEFAULT_HABR_PROFILE_PATH = PROJECT_ROOT / "data" / "browser-profile"
+DEFAULT_HABR_PROFILE_PATH = PROJECT_ROOT / "data" / "habr-profile"
 DEFAULT_CACHE_PATH = PROJECT_ROOT / "data" / "cache.json"
 DEFAULT_LOGS_DIR = PROJECT_ROOT / "logs"
 DEFAULT_REPORT_DIR = PROJECT_ROOT / "data" / "report"

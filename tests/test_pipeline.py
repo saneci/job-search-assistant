@@ -6,7 +6,10 @@ import json
 from datetime import date, datetime
 from pathlib import Path
 
+import pytest
+
 from agent.config import AppConfig, NotificationConfig, load_config
+from agent.hh_vacancy import ResumeNotFoundError
 from agent.llm import DecisionResult, GenerationResult
 from agent.logging_setup import RunLogger
 from agent.models import SentVacancy, SkippedVacancy, VacancyCard, VacancyDetails
@@ -18,6 +21,7 @@ from agent.pipeline import (
     OUTCOME_SKIPPED,
     PAGE_STATUS_REASONS,
     QUEUE_REASON_TEXTS,
+    ResumeNameError,
     _captcha_waiter,
     _check_new_day,
     _counters,
@@ -31,13 +35,17 @@ from agent.pipeline import (
     _plural,
     _process_vacancies,
     _process_vacancy,
+    _profile_name,
     _queue,
     _remember_processing,
+    _require_resume_name,
     _retry_statuses,
     _retry_vacancies,
     _save_problem_screenshot,
     _send_report_email,
     _VacancyLog,
+    channel_for,
+    with_resume,
 )
 from agent.processed import ProcessedStore
 from agent.profile import Profile
@@ -59,6 +67,59 @@ def make_config(tmp_path: Path) -> AppConfig:
 
 def make_stats(**kwargs: object) -> RunStats:
     return RunStats(started_at=datetime(2026, 10, 21, 9, 0), **kwargs)  # type: ignore[arg-type]
+
+
+class _EventLogger:
+    """Минимальный журнал: запоминает события и их поля."""
+
+    def __init__(self) -> None:
+        self.events: list[tuple[str, dict[str, object]]] = []
+
+    def event(self, name: str, **fields: object) -> None:
+        self.events.append((name, fields))
+
+
+def test_require_resume_name_stops_hh_without_name(tmp_path: Path) -> None:
+    """Без pipeline.resume.name отклик на hh.ru невозможен: запуск не начинается."""
+    config = make_config(tmp_path)
+    logger = _EventLogger()
+
+    with pytest.raises(ResumeNameError):
+        _require_resume_name(config, logger, channel_for(config))  # type: ignore[arg-type]
+
+    assert logger.events[0][0] == "resume_name_is_empty"
+
+
+def test_require_resume_name_allows_habr_and_filled_name(tmp_path: Path) -> None:
+    """Habr работает без резюме hh.ru, а заполненное имя проходит проверку."""
+    config = make_config(tmp_path)
+    logger = _EventLogger()
+
+    _require_resume_name(config, logger, channel_for(config, "habr"))  # type: ignore[arg-type]
+    _require_resume_name(  # type: ignore[arg-type]
+        with_resume(config, "Java Developer"), logger, channel_for(config)
+    )
+
+    assert logger.events == []
+
+
+def test_with_resume_returns_copy_with_new_name(tmp_path: Path) -> None:
+    """Повтор с другим резюме получает копию конфига, исходный не меняется."""
+    config = make_config(tmp_path)
+
+    changed = with_resume(config, "Team Lead")
+
+    assert changed.pipeline.resume.name == "Team Lead"
+    assert config.pipeline.resume.name == ""
+    assert with_resume(config, "") is config
+
+
+def test_profile_name_is_only_for_hh(tmp_path: Path) -> None:
+    """Habr не использует резюме hh.ru: в его записях профиля нет."""
+    config = with_resume(make_config(tmp_path), "Java Developer")
+
+    assert _profile_name(config, channel_for(config)) == "Java Developer"
+    assert _profile_name(config, channel_for(config, "habr")) == ""
 
 
 def test_final_message_without_actions(tmp_path: Path) -> None:
@@ -1122,3 +1183,61 @@ def test_required_project_link_blocks_send(tmp_path: Path, monkeypatch) -> None:
     ]
     assert [item["code"] for item in events if item["event"] == "queued"] == ["project_links"]
 
+
+def test_resume_not_found_is_logged_and_stops_run(tmp_path: Path, monkeypatch) -> None:
+    """Нет настроенного резюме в форме: событие с именем и URL, запуск падает."""
+    config = make_config(tmp_path)
+    details = VacancyDetails(
+        url="https://hh.ru/vacancy/138836233",
+        title="Java-разработчик",
+        company="ППК",
+        salary="",
+        description="Java, Spring, PostgreSQL.",
+    )
+    monkeypatch.setattr("agent.pipeline.open_vacancy", lambda page, vacancy: details)
+
+    def fake_respond(page, letter, captcha_waiter=None):
+        del page, letter, captcha_waiter
+        raise ResumeNotFoundError("Team Lead")
+
+    monkeypatch.setattr("agent.pipeline.respond", fake_respond)
+
+    class FakeLLM:
+        def decide(self, profile, vacancy):
+            return DecisionResult(
+                fits=True,
+                probability=0.95,
+                threshold=0.8,
+                probabilities={"подходит": 0.95, "не подходит": 0.05},
+                chosen="подходит",
+            )
+
+        def generate(self, profile, vacancy, max_length=1500, signature=""):
+            return GenerationResult(
+                verdict="подходит",
+                reason="ok",
+                cover_letter="Здравствуйте! Готов обсудить вакансию.",
+            )
+
+    stats = make_stats()
+    logger = RunLogger(tmp_path / "logs", run_id="resume-not-found")
+    card = VacancyCard(title=details.title, company=details.company, url=details.url)
+
+    with pytest.raises(ResumeNotFoundError):
+        _process_vacancy(
+            _FakePage(details.url),
+            config,
+            Profile(text="Java", examples="", style_rules=""),
+            FakeLLM(),
+            stats,
+            logger,
+            card,
+        )
+    logger.close()
+
+    events = [
+        json.loads(line) for line in logger.events_path.read_text(encoding="utf-8").splitlines()
+    ]
+    found = [item for item in events if item["event"] == "resume_not_found"]
+    assert found[0]["resume"] == "Team Lead"
+    assert found[0]["url"] == details.url

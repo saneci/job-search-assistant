@@ -29,6 +29,7 @@ from .hh_search import (
     vacancy_keys,
 )
 from .hh_vacancy import (
+    ResumeNotFoundError,
     STATUS_ALREADY_RESPONDED,
     STATUS_CAPTCHA,
     STATUS_NO_FORM,
@@ -38,6 +39,7 @@ from .hh_vacancy import (
     open_vacancy,
     respond,
     response_state,
+    set_resume_name,
 )
 from .llm import LLMClient, LLMError
 from .logging_setup import RunLogger, prune_logs
@@ -68,8 +70,15 @@ class SessionLostError(RuntimeError):
     """Сессия сайта перестала быть действительной во время работы."""
 
 
+class ResumeNameError(RuntimeError):
+    """Название резюме не настроено: отклик на hh.ru невозможен."""
+
+
 # `--retry` без значения: статусы для повтора берём из retry.statuses.
 RETRY_ALL = "all"
+
+# Канал отчёта для вакансий, которые требуют отклика на сайте компании.
+EXTERNAL_CHANNEL = "external"
 
 # Вакансии, на которые нельзя откликнуться автоматически: что писать в отчёте за день.
 QUEUE_REASON_TEXTS: dict[str, str] = {
@@ -211,10 +220,12 @@ def run(
     config = with_channel(config, channel_name)
     channel = channel_for(config)
     log_channel_choice(logger, channel, channel_name)
+    _require_resume_name(config, logger, channel)
     state_path, profile_dir = session_settings(config, channel)
     with BrowserSession(config.browser, state_path, logger, profile_dir) as session:
         session.ensure_logged_in(channel.auth_check, channel.login_url, channel.site_label)
         page = session.new_page()
+        session.close_blank_pages(page)
         try:
             if channel.supports_resume_boost:
                 boost_resume(page, config, logger)
@@ -227,6 +238,9 @@ def run(
                     _process_vacancies(
                         page, config, profile, llm, stats, logger, processed, channel
                     )
+        except (ResumeNameError, ResumeNotFoundError):
+            # Отклик без выбранного резюме невозможен: запуск завершается ошибкой.
+            raise
         except KeyboardInterrupt:
             stats.stop_reason = "остановлено пользователем (Ctrl+C)"
             logger.event("interrupted")
@@ -270,6 +284,15 @@ def run(
     return stats, processed.path
 
 
+def _require_resume_name(config: AppConfig, logger: RunLogger, channel: Channel) -> None:
+    """Отклик на hh.ru невозможен без названия резюме: останавливаем запуск."""
+    if channel.name == HH and not config.pipeline.resume.name.strip():
+        logger.event("resume_name_is_empty", channel=channel.name)
+        raise ResumeNameError(
+            "не задано название резюме: заполните pipeline.resume.name в config.local.yaml"
+        )
+
+
 def _open_report(config: AppConfig, logger: RunLogger) -> ProcessedStore:
     """Готовит отчёты: чистит старые журналы и читает историю вакансий.
 
@@ -309,6 +332,8 @@ def _retry_statuses(config: AppConfig, retry: str) -> tuple[str, ...]:
 def _hh_channel(config: AppConfig) -> Channel:
     """hh.ru: обёртки над функциями модуля, чтобы тесты могли их подменять."""
     search = config.search
+    # Резюме выбирается внутри формы отклика: канал передаёт имя один раз.
+    set_resume_name(config.pipeline.resume.name)
 
     def labels(query: str) -> QueryLabels:
         return QueryLabels(
@@ -378,6 +403,25 @@ def with_channel(config: AppConfig, name: str | None) -> AppConfig:
     )
 
 
+def with_resume(config: AppConfig, name: str) -> AppConfig:
+    """Конфиг с другим названием резюме: повтор идёт тем же резюме.
+
+    Модели заморожены, поэтому возвращается копия. Имя резюме читают поиск,
+    отклик и запись в отчёт — достаточно подменить его в одном месте.
+    """
+    if not name or name == config.pipeline.resume.name:
+        return config
+    resume = config.pipeline.resume.model_copy(update={"name": name})
+    return config.model_copy(
+        update={"pipeline": config.pipeline.model_copy(update={"resume": resume})}
+    )
+
+
+def _profile_name(config: AppConfig, channel: Channel) -> str:
+    """Резюме для записи отчёта: у hh — из конфига, у habr резюме hh нет."""
+    return config.pipeline.resume.name if channel.name == HH else ""
+
+
 def session_settings(config: AppConfig, channel: Channel) -> tuple[Path, Path | None]:
     """Файл сессии и профиль браузера выбранного канала."""
     state_path = (
@@ -409,6 +453,7 @@ def _process_vacancies(
 ) -> None:
     channel = channel or _channel_for(config)
     search = config.search
+    profile_name = _profile_name(config, channel)
     seen: set[str] = set()
     reviewed = 0
 
@@ -510,7 +555,7 @@ def _process_vacancies(
                 if _should_stop(config.pipeline.limit_per_run, stats, logger):
                     break
                 _check_new_day(logger, processed)
-                keys = vacancy_keys(card.title, card.company, card.url)
+                keys = vacancy_keys(card.title, card.company, card.url, profile_name)
                 if any(key in seen for key in keys):
                     logger.event(
                         "skipped_duplicate",
@@ -550,6 +595,7 @@ def _process_vacancies(
                         card,
                         OUTCOME_SENT,
                         ALREADY_RESPONDED_REASON,
+                        profile_name,
                         channel=channel.name,
                     )
                     continue
@@ -565,10 +611,17 @@ def _process_vacancies(
                         card,
                         OUTCOME_SKIPPED,
                         "Отклик на сайте компании",
+                        profile_name,
+                        channel=EXTERNAL_CHANNEL,
                     )
                     continue
 
-                previous = processed.find(card.title, card.company, card.url)
+                previous = processed.find(
+                    card.title,
+                    card.company,
+                    card.url,
+                    profile_name,
+                )
                 if previous:
                     logger.event(
                         "skipped_processed",
@@ -652,7 +705,15 @@ def _retry_vacancies(
             logger.event("retry_channel_mismatch", url=card.url, channel=record_channel)
             continue
         _process_and_remember(
-            page, config, profile, llm, stats, logger, processed, card, channel
+            page,
+            with_resume(config, str(record.get("profile") or "")),
+            profile,
+            llm,
+            stats,
+            logger,
+            processed,
+            card,
+            channel,
         )
         _ensure_session_alive(page)
         _pause(config, logger, "перед следующей вакансией из отчёта")
@@ -672,7 +733,7 @@ def _process_and_remember(
     """Обрабатывает вакансию и записывает результат в дневной отчёт."""
     channel = channel or _channel_for(config)
     counters = _counters(stats)
-    _process_vacancy(page, config, profile, llm, stats, logger, card)
+    outcome_channel = _process_vacancy(page, config, profile, llm, stats, logger, card)
     outcome = _outcome(counters, _counters(stats))
     if outcome:
         _remember_processing(
@@ -681,8 +742,8 @@ def _process_and_remember(
             card,
             outcome,
             _outcome_reason(stats, counters, outcome),
-            config.pipeline.resume.name,
-            channel=channel.name,
+            _profile_name(config, channel),
+            channel=outcome_channel or channel.name,
         )
 
 
@@ -702,7 +763,8 @@ def _process_vacancy(
     stats: RunStats,
     logger: RunLogger,
     card: VacancyCard,
-) -> None:
+) -> str | None:
+    """Обрабатывает вакансию; возвращает канал отчёта, если он не равен каналу поиска."""
     channel = _channel_for(config)
 
     def queue(*args: object, **kwargs: object) -> None:
@@ -839,7 +901,8 @@ def _process_vacancy(
 
     if details.blocker:
         queue(stats, logger, details, details.blocker, "признак на странице вакансии")
-        return
+        # Отклик на сайте компании — отдельный канал отчёта, а не канал поиска.
+        return EXTERNAL_CHANNEL if details.blocker == "external_form" else None
 
     if stats.sent_count >= config.pipeline.limit_per_run:
         stats.stop_reason = f"достигнут лимит откликов за запуск ({config.pipeline.limit_per_run})"
@@ -978,6 +1041,14 @@ def _process_vacancy(
     )
     try:
         result = channel.respond(page, generation.cover_letter, captcha_waiter=captcha_waiter)
+    except ResumeNotFoundError as exc:
+        logger.event(
+            "resume_not_found",
+            resume=exc.resume,
+            url=card.url,
+            title=card.title,
+        )
+        raise
     except PlaywrightError as exc:
         _record_error(stats, logger, page, config, details, exc)
         return
