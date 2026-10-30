@@ -11,7 +11,8 @@
 # browser → notifications.
 
 search:
-  # Каналы поиска (обязательный параметр): hh, habr
+  # Канал поиска: hh (поиск по запросам) или habr (лента «Подходящие»).
+  # Для habr запросы, регион и фильтры hh.ru не нужны.
   channel: hh
   # Поисковые запросы (search.queries) — личное: в config.local.yaml.
   # Регион: название (Москва, Санкт-Петербург, Россия, Екатеринбург, Новосибирск, Казань)
@@ -73,7 +74,11 @@ data:
   # Локальные данные: профиль, сессия, кэш подъёма резюме и дневные отчёты о вакансиях.
   paths:
     profile: data/profile.md
-    session_state: data/state.json
+    # Сессия hh.ru (ключ прежний, файл переименован).
+    session_state: data/hh-state.json
+    # Сессия career.habr.com и постоянный профиль Chrome для hCaptcha.
+    habr_session_state: data/habr-state.json
+    habr_profile: data/browser-profile
     # Кэш служебных данных: когда последний раз поднимали резюме в поиске.
     cache: data/cache.json
     # Дневные отчёты по вакансиям: файл на дату, повторно эти вакансии не проходим.
@@ -131,6 +136,10 @@ browser:
   # chrome, msedge, chrome-beta и т.п. Пустое значение ("") — Chromium,
   # который ставится командой: python run.py --install-browser
   channel: chrome
+  # Sandbox Chromium. Playwright по умолчанию его отключает (--no-sandbox),
+  # и браузер предупреждает о стабильности и безопасности.
+  # false — только если Chromium не стартует: запуск от root или Linux без userns.
+  chromium_sandbox: true
   # Сколько секунд ждать, пока вы вручную решите капчу в открытом окне браузера.
   # Капча не обходится: приложение только ждёт (0 — не ждать, отложить вакансию).
   # В headless-режиме окна нет, поэтому ожидание не включается.

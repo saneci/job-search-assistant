@@ -35,7 +35,8 @@ SCROLL_EMPTY_SECONDS = 2.0
 
 TITLE_SELECTOR = "a[data-qa='serp-item__title'], a[data-qa='vacancy-serp__vacancy-title']"
 
-_VACANCY_ID_RE = re.compile(r"/vacancy/(\d+)")
+# Один шаблон на оба канала: hh.ru — /vacancy/<id>, Habr — /vacancies/<id>.
+_VACANCY_ID_RE = re.compile(r"/vacanc(?:y|ies)/(\d+)")
 
 EMPLOYER_SELECTORS = (
     "[data-qa='vacancy-serp__vacancy-employer']",

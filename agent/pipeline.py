@@ -10,6 +10,7 @@ from pathlib import Path
 from playwright.sync_api import Error as PlaywrightError, Page
 
 from .browser import (
+    HH_HOME,
     BrowserError,
     BrowserSession,
     CaptchaError,
@@ -17,9 +18,9 @@ from .browser import (
     save_screenshot,
     wait_for_captcha_solved,
 )
+from .channel import HABR, HH, Channel, QueryLabels, channel_name_for_url, habr_channel
 from .config import FIT_LABEL, NOT_FIT_LABEL, AppConfig
 from .hh_search import (
-    expected_cards,
     is_company_excluded,
     is_excluded,
     open_search_page,
@@ -64,7 +65,7 @@ from .resume import boost_resume
 
 
 class SessionLostError(RuntimeError):
-    """Сессия hh.ru перестала быть действительной во время работы."""
+    """Сессия сайта перестала быть действительной во время работы."""
 
 
 # `--retry` без значения: статусы для повтора берём из retry.statuses.
@@ -198,6 +199,7 @@ def run(
     config: AppConfig,
     logger: RunLogger,
     retry: str | None = None,
+    channel_name: str | None = None,
 ) -> tuple[RunStats, Path]:
     """Выполняет полный цикл: поиск (или повтор по отчётам), оценка, отклики и отчёт."""
     stats = RunStats(started_at=datetime.now())
@@ -206,18 +208,25 @@ def run(
 
     profile = load_profile(config.data.paths.profile)
 
-    with BrowserSession(config.browser, config.data.paths.session_state, logger) as session:
-        session.ensure_logged_in()
+    config = with_channel(config, channel_name)
+    channel = channel_for(config)
+    log_channel_choice(logger, channel, channel_name)
+    state_path, profile_dir = session_settings(config, channel)
+    with BrowserSession(config.browser, state_path, logger, profile_dir) as session:
+        session.ensure_logged_in(channel.auth_check, channel.login_url, channel.site_label)
         page = session.new_page()
         try:
-            boost_resume(page, config, logger)
+            if channel.supports_resume_boost:
+                boost_resume(page, config, logger)
             with LLMClient(config.llm) as llm:
                 if statuses:
                     _retry_vacancies(
-                        page, config, profile, llm, stats, logger, processed, statuses
+                        page, config, profile, llm, stats, logger, processed, statuses, channel
                     )
                 else:
-                    _process_vacancies(page, config, profile, llm, stats, logger, processed)
+                    _process_vacancies(
+                        page, config, profile, llm, stats, logger, processed, channel
+                    )
         except KeyboardInterrupt:
             stats.stop_reason = "остановлено пользователем (Ctrl+C)"
             logger.event("interrupted")
@@ -297,6 +306,97 @@ def _retry_statuses(config: AppConfig, retry: str) -> tuple[str, ...]:
     return (retry,)
 
 
+def _hh_channel(config: AppConfig) -> Channel:
+    """hh.ru: обёртки над функциями модуля, чтобы тесты могли их подменять."""
+    search = config.search
+
+    def labels(query: str) -> QueryLabels:
+        return QueryLabels(
+            start=f"по запросу «{query}»",
+            subject=f"По запросу «{query}»",
+            source=f"из результата запроса «{query}»",
+            title=f"Запрос «{query}»",
+        )
+
+    return Channel(
+        name=HH,
+        site_label="hh.ru",
+        login_url=HH_HOME,
+        uses_persistent_profile=False,
+        supports_resume_boost=True,
+        per_page=search.per_page,
+        queries=lambda: search.queries,
+        query_label=lambda query: f"по запросу «{query}»",
+        labels=labels,
+        open_search_page=lambda page, query, index: open_search_page(
+            page, search, query, index
+        ),
+        pages_plan=lambda total: pages_plan(total, search.per_page),
+        vacancy_id=vacancy_id,
+        open_vacancy=lambda page, card: open_vacancy(page, card),
+        # pipeline вызывает отклик по имени: `captcha_waiter=...`. Имя параметра
+        # в обёртке должно совпадать, иначе TypeError вместо ожидания капчи.
+        respond=lambda page, letter, captcha_waiter: respond(
+            page, letter, captcha_waiter=captcha_waiter
+        ),
+        response_state=lambda page: response_state(page),
+        queue_reasons=QUEUE_REASON_TEXTS,
+    )
+
+
+def _channel_for(config: AppConfig, name: str | None = None) -> Channel:
+    """Канал запуска: из опции CLI или из конфига (hh по умолчанию)."""
+    selected = name or config.search.channel
+    if selected == HABR:
+        return habr_channel(config)
+    return _hh_channel(config)
+
+
+def channel_for(config: AppConfig, name: str | None = None) -> Channel:
+    """Публичный выбор канала: CLI использует его для входа и запуска."""
+    return _channel_for(config, name)
+
+
+def log_channel_choice(logger: RunLogger, channel: Channel, name: str | None) -> None:
+    """Пишет в лог, какой канал выбран и откуда: опция CLI или конфиг."""
+    source = "flag" if name else "config"
+    logger.event("channel_selected", channel=channel.name, source=source)
+    logger.info(f"Канал запуска: {channel.site_label}")
+
+
+def with_channel(config: AppConfig, name: str | None) -> AppConfig:
+    """Конфиг с выбранным каналом: опция CLI сильнее `search.channel`.
+
+    Модели заморожены, поэтому возвращается копия. Подменять канал в конфиге
+    дешевле, чем протаскивать его через все шаги: выдача, страница вакансии
+    и тексты причин уже читают канал из одного места.
+    """
+    if not name or name == config.search.channel:
+        return config
+    return config.model_copy(
+        update={"search": config.search.model_copy(update={"channel": name})}
+    )
+
+
+def session_settings(config: AppConfig, channel: Channel) -> tuple[Path, Path | None]:
+    """Файл сессии и профиль браузера выбранного канала."""
+    state_path = (
+        config.data.paths.habr_session_state
+        if channel.name == HABR
+        else config.data.paths.session_state
+    )
+    profile_dir = config.data.paths.habr_profile if channel.uses_persistent_profile else None
+    return state_path, profile_dir
+
+
+def _expected_cards(channel: Channel, total: int | None, page_index: int) -> int:
+    """Сколько карточек ждём на странице: размер страницы, на последней — остаток."""
+    if not total:
+        return channel.per_page
+    rest = total - page_index * channel.per_page
+    return max(0, min(channel.per_page, rest))
+
+
 def _process_vacancies(
     page: Page,
     config: AppConfig,
@@ -305,22 +405,25 @@ def _process_vacancies(
     stats: RunStats,
     logger: RunLogger,
     processed: ProcessedStore,
+    channel: Channel | None = None,
 ) -> None:
+    channel = channel or _channel_for(config)
     search = config.search
     seen: set[str] = set()
     reviewed = 0
 
-    for number, query in enumerate(search.queries):
+    for number, query in enumerate(channel.queries()):
         if _should_stop(config.pipeline.limit_per_run, stats, logger):
             break
         _check_new_day(logger, processed)
-        if number:
+        if number and channel.supports_resume_boost:
             # Новый запрос: резюме поднимаем только если по кэшу уже пора.
             boost_resume(page, config, logger)
 
+        labels = channel.labels(query)
         # Глубина: pages_limit из конфига, а если он не задан — считаем страницы
         # по числу найденных после открытия первой страницы этого запроса.
-        logger.info(f"Начинаю поиск на hh.ru по запросу «{query}»...")
+        logger.info(f"Начинаю поиск на {channel.site_label} {labels.start}...")
         pages = search.pages_limit
         page_index = 0
         while pages is None or page_index < pages:
@@ -328,64 +431,67 @@ def _process_vacancies(
                 break
 
             try:
-                cards, total = open_search_page(page, search, query, page_index)
+                cards, total = channel.open_search_page(page, query, page_index)
             except CaptchaError as exc:
-                stats.stop_reason = f"капча на странице поиска ({query}, стр. {page_index + 1})"
+                stats.stop_reason = f"капча на странице поиска ({labels.start}, стр. {page_index + 1})"
                 logger.event("captcha", query=query, page=page_index, url=page.url, error=str(exc))
-                logger.info("hh.ru показал капчу на странице поиска, запуск остановлен.")
+                logger.info(
+                    f"{channel.site_label} показал капчу на странице поиска, запуск остановлен."
+                )
                 _notify_captcha(
                     config,
                     logger,
                     note=(
-                        f"Капча на странице поиска ({query}, стр. {page_index + 1}). "
+                        f"Капча на странице поиска ({labels.start}, стр. {page_index + 1}). "
                         "Запуск остановлен — пройдите капчу вручную."
                     ),
                     url=page.url,
+                    site=channel.site_label,
                 )
                 break
             except PageLoadError as exc:
                 logger.event("search_page_error", query=query, page=page_index, error=str(exc))
-                logger.info(f"Не удалось открыть поиск ({query}): {exc}")
+                logger.info(f"Не удалось открыть поиск ({labels.start}): {exc}")
                 break
 
             if not cards:
                 logger.info(
-                    f"Обработка результатов запроса «{query}»: "
+                    f"Обработка результатов {labels.source}: "
                     f"на странице {page_index + 1} вакансий нет"
                 )
                 break
 
             if pages is None:
-                pages = pages_plan(total, search.per_page)
+                pages = channel.pages_plan(total)
                 logger.event(
                     "search_pages_plan",
                     query=query,
                     total=total,
-                    per_page=search.per_page,
+                    per_page=channel.per_page,
                     pages=pages,
                 )
                 if total:
                     logger.info(
-                        f"По запросу «{query}» найдено {total} "
+                        f"{labels.subject} найдено {total} "
                         f"{_plural(total, 'вакансию', 'вакансии', 'вакансий')}, "
                         f"разделяю обработку на {pages} "
                         f"{_plural(pages, 'страница', 'страницы', 'страниц')}"
                     )
                 else:
                     logger.info(
-                        f"Запрос «{query}»: число найденных неизвестно, иду до первой "
+                        f"{labels.title}: число найденных неизвестно, иду до первой "
                         f"пустой страницы (не больше {pages})"
                     )
 
             logger.info(
                 f"Обработка {len(cards)} "
                 f"{_plural(len(cards), 'вакансия', 'вакансии', 'вакансий')} "
-                f"из результата запроса «{query}»: страница {page_index + 1} из {pages}"
+                f"{labels.source}: страница {page_index + 1} из {pages}"
             )
 
             # hh.ru отдаёт карточки лениво: если догрузка не удалась, часть
             # вакансий страницы молча терялась бы — пишем это в лог.
-            expected = expected_cards(total, search.per_page, page_index)
+            expected = _expected_cards(channel, total, page_index)
             if cards and len(cards) < expected:
                 logger.event(
                     "search_page_short",
@@ -395,7 +501,7 @@ def _process_vacancies(
                     expected=expected,
                 )
                 logger.info(
-                    f"hh.ru отдал {len(cards)} "
+                    f"{channel.site_label} отдал {len(cards)} "
                     f"{_plural(len(cards), 'карточку', 'карточки', 'карточек')} "
                     f"вместо {expected}: часть вакансий страницы не догрузилась"
                 )
@@ -419,6 +525,49 @@ def _process_vacancies(
                 seen.update(keys)
 
                 stats.reviewed += 1
+                if card.already_responded:
+                    # Отклик уже есть: карточку не открываем, но фиксируем в отчёте.
+                    logger.event(
+                        "skipped_already_responded",
+                        url=card.url,
+                        title=card.title,
+                        company=card.company,
+                    )
+                    stats.already_sent.append(
+                        SkippedVacancy(
+                            title=card.title,
+                            company=card.company,
+                            url=card.url,
+                            reason=ALREADY_RESPONDED_REASON,
+                        )
+                    )
+                    _VacancyLog(logger, card.title, card.company, card.url).info(
+                        "уже есть отклик, карточку не открываю"
+                    )
+                    _remember_processing(
+                        processed,
+                        logger,
+                        card,
+                        OUTCOME_SENT,
+                        ALREADY_RESPONDED_REASON,
+                        channel=channel.name,
+                    )
+                    continue
+
+                if card.external_response:
+                    logger.event("skipped_external", url=card.url, title=card.title)
+                    _VacancyLog(logger, card.title, card.company, card.url).info(
+                        "отклик уходит на сайте компании, канал не поддерживается"
+                    )
+                    _remember_processing(
+                        processed,
+                        logger,
+                        card,
+                        OUTCOME_SKIPPED,
+                        "Отклик на сайте компании",
+                    )
+                    continue
+
                 previous = processed.find(card.title, card.company, card.url)
                 if previous:
                     logger.event(
@@ -441,7 +590,7 @@ def _process_vacancies(
                     break
 
                 _process_and_remember(
-                    page, config, profile, llm, stats, logger, processed, card
+                    page, config, profile, llm, stats, logger, processed, card, channel
                 )
                 _ensure_session_alive(page)
 
@@ -458,12 +607,16 @@ def _retry_vacancies(
     logger: RunLogger,
     processed: ProcessedStore,
     statuses: tuple[str, ...],
+    channel: Channel | None = None,
 ) -> None:
     """Повторяет вакансии из дневных отчётов по прямой ссылке, без поиска.
 
     Выдача hh.ru каждый раз одна и та же, поэтому идти по ней ради пары
     вакансий дорого: берём ссылки из отчётов и открываем их сразу.
+    Если запись относится к другому каналу, она пропускается: чужая сессия
+    и чужие селекторы приведут к ложной ошибке.
     """
+    channel = channel or _channel_for(config)
     records = processed.pending(statuses)
     logger.event("retry_selected", statuses=list(statuses), count=len(records))
     if not records:
@@ -494,7 +647,13 @@ def _retry_vacancies(
         if not card.url:
             continue
         stats.reviewed += 1
-        _process_and_remember(page, config, profile, llm, stats, logger, processed, card)
+        record_channel = channel_name_for_url(card.url)
+        if record_channel != channel.name:
+            logger.event("retry_channel_mismatch", url=card.url, channel=record_channel)
+            continue
+        _process_and_remember(
+            page, config, profile, llm, stats, logger, processed, card, channel
+        )
         _ensure_session_alive(page)
         _pause(config, logger, "перед следующей вакансией из отчёта")
 
@@ -508,8 +667,10 @@ def _process_and_remember(
     logger: RunLogger,
     processed: ProcessedStore,
     card: VacancyCard,
+    channel: Channel | None = None,
 ) -> None:
     """Обрабатывает вакансию и записывает результат в дневной отчёт."""
+    channel = channel or _channel_for(config)
     counters = _counters(stats)
     _process_vacancy(page, config, profile, llm, stats, logger, card)
     outcome = _outcome(counters, _counters(stats))
@@ -521,15 +682,16 @@ def _process_and_remember(
             outcome,
             _outcome_reason(stats, counters, outcome),
             config.pipeline.resume.name,
+            channel=channel.name,
         )
 
 
 def _ensure_session_alive(page: Page) -> None:
-    """Роняет запуск, если окно закрыто или hh.ru требует повторный вход."""
+    """Роняет запуск, если окно закрыто или сайт требует повторный вход."""
     if _page_closed(page):
         raise SessionLostError("окно браузера закрыто — запуск остановлен")
     if _is_login_page(page):
-        raise SessionLostError("hh.ru требует повторный вход: сессия больше не действительна")
+        raise SessionLostError("сайт требует повторный вход: сессия больше не действительна")
 
 
 def _process_vacancy(
@@ -541,6 +703,12 @@ def _process_vacancy(
     logger: RunLogger,
     card: VacancyCard,
 ) -> None:
+    channel = _channel_for(config)
+
+    def queue(*args: object, **kwargs: object) -> None:
+        """Отложить вакансию: тексты причин — из выбранного канала."""
+        _queue(*args, channel=channel, **kwargs)  # type: ignore[arg-type]
+
     log = _VacancyLog(logger, card.title, card.company, card.url)
     excluded = is_excluded(card.title, config.search.exclude_keywords)
     if excluded:
@@ -583,18 +751,19 @@ def _process_vacancy(
 
     log.info("открываю вакансию")
     try:
-        details = open_vacancy(page, card)
+        details = channel.open_vacancy(page, card)
     except CaptchaError as exc:
         _save_problem_screenshot(page, config, logger, "captcha")
-        _queue(stats, logger, card, "captcha", f"капча: {exc}")
+        queue(stats, logger, card, "captcha", f"капча: {exc}")
         stats.stop_reason = "капча на странице вакансии"
         _notify_captcha(
             config,
             logger,
             card,
             "Капча на странице вакансии. Запуск остановлен — откликнитесь вручную.",
+            site=channel.site_label,
         )
-        log.info("hh.ru показал капчу на странице вакансии, запуск остановлен.")
+        log.info(f"{channel.site_label} показал капчу на странице вакансии, запуск остановлен.")
         return
     except (VacancyParseError, PageLoadError, PlaywrightError) as exc:
         _record_error(stats, logger, page, config, card, exc)
@@ -669,7 +838,7 @@ def _process_vacancy(
         return
 
     if details.blocker:
-        _queue(stats, logger, details, details.blocker, "признак на странице вакансии")
+        queue(stats, logger, details, details.blocker, "признак на странице вакансии")
         return
 
     if stats.sent_count >= config.pipeline.limit_per_run:
@@ -764,7 +933,7 @@ def _process_vacancy(
 
     if not generation.cover_letter:
         cause = _generation_reason_text(generation.reason)
-        _queue(stats, logger, details, "empty_cover_letter", generation.reason, reason=cause)
+        queue(stats, logger, details, "empty_cover_letter", generation.reason, reason=cause)
         return
 
 
@@ -781,7 +950,7 @@ def _process_vacancy(
                 "В вакансии требуется ссылка на проекты в письме, "
                 "но llm.cover_letter.pet-projects не задан"
             )
-        _queue(stats, logger, details, "project_links", generation.reason, reason=reason)
+        queue(stats, logger, details, "project_links", generation.reason, reason=reason)
         return
 
     log.event(
@@ -804,9 +973,11 @@ def _process_vacancy(
         else:
             log.info("в письме не было приветствия, добавил «Здравствуйте!»")
 
-    captcha_waiter = _captcha_waiter(page, config, logger, details)
+    captcha_waiter = _captcha_waiter(
+        page, config, logger, details, site=channel.site_label
+    )
     try:
-        result = respond(page, generation.cover_letter, captcha_waiter=captcha_waiter)
+        result = channel.respond(page, generation.cover_letter, captcha_waiter=captcha_waiter)
     except PlaywrightError as exc:
         _record_error(stats, logger, page, config, details, exc)
         return
@@ -839,19 +1010,21 @@ def _process_vacancy(
                 probability=decision.probability,
             )
         )
-        log.info("hh.ru уже принял отклик, помечаю вакансию отправленной")
+        log.info(f"{channel.site_label} уже принял отклик, помечаю вакансию отправленной")
         return
 
     if status == STATUS_CAPTCHA:
         _save_problem_screenshot(page, config, logger, "captcha")
-        _queue(stats, logger, details, "captcha", "капча в форме отклика")
+        queue(stats, logger, details, "captcha", "капча в форме отклика")
         stats.stop_reason = "Капча при отправке отклика — откликнитесь вручную"
-        _notify_captcha_stop(config, logger, details, captcha_waiter)
-        log.info("hh.ru показал капчу при отправке отклика, запуск остановлен.")
+        _notify_captcha_stop(
+            config, logger, details, captcha_waiter, site=channel.site_label
+        )
+        log.info(f"{channel.site_label} показал капчу при отправке отклика, запуск остановлен.")
         return
 
     if status in ("test", "questionnaire", "external_form"):
-        _queue(stats, logger, details, status, "в форме отклика")
+        queue(stats, logger, details, status, "в форме отклика")
         return
 
     if status == STATUS_NO_FORM:
@@ -862,9 +1035,9 @@ def _process_vacancy(
             vacancy_id=vacancy_id(details.url),
             status=status,
             reason=result.reason,
-            **response_state(page),
+            **channel.response_state(page),
         )
-        _queue(
+        queue(
             stats,
             logger,
             details,
@@ -876,16 +1049,16 @@ def _process_vacancy(
 
     if status == STATUS_UNKNOWN:
         _save_problem_screenshot(page, config, logger, "respond-unknown")
-        # Что именно показал hh.ru — без письма и персональных данных.
+        # Что именно показал сайт — без письма и персональных данных.
         logger.event(
             "respond_state",
             url=details.url,
             vacancy_id=vacancy_id(details.url),
             status=status,
             reason=result.reason,
-            **response_state(page),
+            **channel.response_state(page),
         )
-    _queue(
+    queue(
         stats,
         logger,
         details,
@@ -903,13 +1076,16 @@ def _queue(
     note: str = "",
     *,
     reason: str = "",
+    channel: Channel | None = None,
 ) -> None:
     """Отмечает вакансию как отложенную: отклик нужно отправить вручную.
 
-    `reason` — реальная причина, которую показал hh.ru. Она важнее общей
+    `reason` — реальная причина, которую показал сайт. Она важнее общей
     формулировки для кода: если сайт объяснил отказ, в отчёт идёт его текст.
+    Общие тексты берутся из канала: у hh.ru и Habr они разные.
     """
-    text = reason.strip() or QUEUE_REASON_TEXTS.get(code, QUEUE_REASON_TEXTS["unknown"])
+    reasons = channel.queue_reasons if channel is not None else QUEUE_REASON_TEXTS
+    text = reason.strip() or reasons.get(code, reasons.get("unknown", ""))
     log = _VacancyLog(logger, card.title, card.company, card.url)
     stats.queued.append(
         {
@@ -937,11 +1113,13 @@ class _CaptchaWaiter:
         config: AppConfig,
         logger: RunLogger,
         card: VacancyCard | VacancyDetails | None = None,
+        site: str = "hh.ru",
     ) -> None:
         self._page = page
         self._config = config
         self._logger = logger
         self._card = card
+        self._site = site
         self._log = (
             _VacancyLog(logger, card.title, card.company, card.url) if card is not None else None
         )
@@ -964,8 +1142,8 @@ class _CaptchaWaiter:
         seconds = self.seconds
         self._event("captcha_wait", seconds=seconds)
         self._info(
-            "hh.ru просит пройти капчу: введите текст с картинки в открытом окне браузера "
-            f"и нажмите «Отправить», жду до {seconds} с."
+            f"{self._site} просит пройти капчу: введите текст с картинки в открытом окне "
+            f"браузера и нажмите «Отправить», жду до {seconds} с."
         )
         if not self.notified:
             _notify_captcha(
@@ -975,6 +1153,7 @@ class _CaptchaWaiter:
                 f"Капча в форме отклика: жду решения до {seconds} с. "
                 "Введите текст с картинки в открытом окне браузера и нажмите «Отправить».",
                 url=self._page.url,
+                site=self._site,
             )
             self.notified = True
         solved = wait_for_captcha_solved(self._page, seconds)
@@ -991,6 +1170,7 @@ def _captcha_waiter(
     config: AppConfig,
     logger: RunLogger,
     card: VacancyCard | VacancyDetails | None = None,
+    site: str = "hh.ru",
 ) -> _CaptchaWaiter | None:
     """Ждёт, пока человек решит капчу в открытом окне браузера.
 
@@ -999,7 +1179,7 @@ def _captcha_waiter(
     """
     if config.browser.captcha_wait_seconds <= 0 or config.browser.headless:
         return None
-    return _CaptchaWaiter(page, config, logger, card)
+    return _CaptchaWaiter(page, config, logger, card, site)
 
 
 def _notify_captcha_stop(
@@ -1007,6 +1187,7 @@ def _notify_captcha_stop(
     logger: RunLogger,
     card: VacancyCard | VacancyDetails | None,
     waiter: _CaptchaWaiter | None,
+    site: str = "hh.ru",
 ) -> None:
     """Письмо «капча остановила запуск» — только если о ней ещё не писали."""
     if waiter is not None and waiter.notified:
@@ -1016,6 +1197,7 @@ def _notify_captcha_stop(
         logger,
         card,
         "Капча в форме отклика. Запуск остановлен — откликнитесь вручную.",
+        site=site,
     )
 
 
@@ -1025,6 +1207,7 @@ def _notify_captcha(
     card: VacancyCard | VacancyDetails | None = None,
     note: str = "",
     url: str = "",
+    site: str = "hh.ru",
 ) -> None:
     """Письмо о капче: best-effort, сбой отправки не останавливает запуск.
 
@@ -1043,6 +1226,7 @@ def _notify_captcha(
             company=company,
             url=url,
             note=note,
+            site=site,
         )
     except Exception as exc:  # noqa: BLE001 - уведомление не должно ронять запуск
         sent, message = False, f"{type(exc).__name__}: {exc}"
@@ -1062,7 +1246,7 @@ def _save_problem_screenshot(
     logger: RunLogger,
     kind: str,
 ) -> None:
-    """Сохраняет скриншот проблемного состояния — по нему видно, что показал hh.ru.
+    """Сохраняет скриншот проблемного состояния — по нему видно, что показал сайт.
 
     Диагностика не должна ронять запуск: любые сбои здесь только логируются.
     """
@@ -1193,6 +1377,7 @@ def _remember_processing(
     outcome: str,
     reason: str = "",
     profile: str | None = None,
+    channel: str = "",
 ) -> None:
     """Записывает вакансию в дневной отчёт, чтобы не проходить её снова.
 
@@ -1213,6 +1398,7 @@ def _remember_processing(
             status=outcome,
             reason=reason,
             profile=profile,
+            channel=channel,
         )
     except ProcessedError as exc:
         vid = vacancy_id(card.url)
@@ -1275,7 +1461,12 @@ def _is_login_page(page: Page) -> bool:
         url = page.url.lower()
     except PlaywrightError:
         return False
-    return "account/login" in url or url.rstrip("/").endswith("/login")
+    return (
+        "account/login" in url
+        or url.rstrip("/").endswith("/login")
+        or "account.habr.com" in url
+        or "/ident/" in url
+    )
 
 
 def _page_closed(page: Page) -> bool:

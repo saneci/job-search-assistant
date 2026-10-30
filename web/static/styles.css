@@ -205,17 +205,80 @@ body {
     align-items: center;
 }
 
+/* Двухуровневый фильтр: у каждой грани (статус, источник) своя строка с подписью. */
+.filter-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px 20px;
+    align-items: center;
+    flex: 1 1 100%;
+}
+
+.filter-row--tail {
+    gap: 12px;
+}
+
+/* Грань фильтра: подпись и её значения переносятся вместе. */
+.filter-facet {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: center;
+    min-width: 0;
+}
+
+.filter-label {
+    font-size: .85rem;
+    font-weight: 600;
+    color: var(--muted-strong);
+}
+
+/* Сброс всех фильтров: та же форма, что у кнопок граней. Виден, только когда
+   включён хотя бы один фильтр. */
+.filter-reset {
+    padding: 6px 16px;
+    border: 1.5px solid var(--filter-border);
+    border-radius: 20px;
+    background: var(--filter-bg);
+    font: inherit;
+    font-size: .85rem;
+    font-weight: 500;
+    color: var(--filter-text);
+    cursor: pointer;
+    white-space: nowrap;
+    transition: border-color .15s, color .15s;
+}
+
+.filter-reset:hover:not(:disabled) {
+    border-color: var(--filter-hover);
+    color: var(--filter-hover);
+}
+
+.filter-reset:disabled {
+    border-color: var(--filter-border);
+    background: var(--surface-2);
+    color: var(--muted-light);
+    cursor: not-allowed;
+}
+
+.filter-reset:focus-visible {
+    outline: 2px solid var(--filter-hover);
+    outline-offset: 2px;
+}
+
 .filter-btn {
     padding: 6px 16px;
     border: 1.5px solid var(--filter-border);
     border-radius: 20px;
     background: var(--filter-bg);
     cursor: pointer;
+    /* Кнопка иначе берёт шрифт браузера, а не шрифт страницы. */
+    font: inherit;
     font-size: .85rem;
     font-weight: 500;
     color: var(--filter-text);
     text-decoration: none;
-    transition: all .15s;
+    transition: background .15s, border-color .15s, color .15s;
     white-space: nowrap;
 }
 
