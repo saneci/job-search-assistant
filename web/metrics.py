@@ -42,6 +42,9 @@ STATUS_COLORS = {
 # Статусы, которые означают отправленный отклик и его исход: ожидание ответа,
 # приглашение, отказ и оффер.
 RESPONSE_STATUSES = ("sent", "invite", "rejected", "offer")
+# Финальные исходы: запись, дошедшая до оффера или отказа, показывается в своём
+# исходе даже если по ней было приглашение.
+FINAL_STATUSES = ("rejected", "offer")
 
 # Каналы поиска: у записей старых отчётов поля нет — они идут как unknown.
 CHANNEL_LABELS = {
@@ -66,6 +69,21 @@ def profile_value(value: Any) -> str:
 def profile_key(record: Mapping[str, Any]) -> str:
     """Нормализованное имя резюме записи."""
     return profile_value(record.get("profile", ""))
+
+
+def effective_status(record: Mapping[str, Any]) -> str:
+    """Статус записи для графиков с учётом факта приглашения.
+
+    `invited_at` ставится один раз и не сбрасывается. Поэтому запись, у которой
+    статус позже откатили в `sent` или `skipped`, всё равно считается дошедшей
+    до приглашения. Оффер и отказ — финальные исходы, их не перекрываем.
+    """
+    status = str(record.get("status", "") or "unknown")
+    if status in FINAL_STATUSES:
+        return status
+    if str(record.get("invited_at", "")).strip():
+        return "invite"
+    return status
 
 
 def _vacancy_key(record: Mapping[str, Any], index: int) -> tuple[str, ...]:
@@ -123,8 +141,16 @@ def _percent(part: int, whole: int) -> float:
     return round(part * 100 / whole, 2)
 
 
-def _rate_text(value: float | None) -> str:
-    return "—" if value is None else f"{value:.1f}%"
+def _rate_text(value: float | None, *, has_data: bool = True) -> str:
+    """Проценты для карточек конверсий: прочерк только в пустом отчёте.
+
+    Пока в отчётах есть вакансии, все четыре карточки показывают проценты:
+    при нулевом знаменателе это «0.0%», а не прочерк. Иначе в одной строке
+    соседствуют «0.0%» и «—», и непонятно, где ошибка данных, а где ноль.
+    """
+    if value is None:
+        return "0.0%" if has_data else "—"
+    return f"{value:.1f}%"
 
 
 def _plural(count: int, one: str, few: str, many: str) -> str:
@@ -151,15 +177,26 @@ def _format_updated(value: str) -> str:
 
 
 def _pie_css(segments: list[tuple[int, str]], total: int) -> str:
-    """CSS conic-gradient по реальным долям; пустой отчёт — нейтральный круг."""
+    """CSS conic-gradient по реальным долям; пустой отчёт — нейтральный круг.
+
+    У каждого стопа одна позиция: запись «цвет начало%» понимают все браузеры.
+    Двойные позиции «цвет начало% конец%» поддерживают не все, и тогда браузер
+    отбрасывает весь градиент — круг остаётся без заливки.
+    """
     if total <= 0:
         return "var(--surface-2)"
     stops: list[str] = []
     cumulative = 0.0
     for count, color in segments:
+        if count <= 0:
+            # Пустой сегмент не рисуется, иначе появляются стопы нулевой ширины.
+            continue
         start = cumulative
         cumulative += count * 100 / total
-        stops.append(f"{color} {start:.2f}% {cumulative:.2f}%")
+        stops.append(f"{color} {start:.2f}%")
+        stops.append(f"{color} {cumulative:.2f}%")
+    if not stops:
+        return "var(--surface-2)"
     return "conic-gradient(" + ", ".join(stops) + ")"
 
 
@@ -185,6 +222,9 @@ def build_metrics(
 
     Все статусы считаются как есть: `sent` — отправленные отклики (включая
     отклики, отправленные вручную), `rejected` и `offer` — их исход.
+    Факт приглашения берётся из `invited_at`: запись с датой приглашения
+    считается приглашённой, даже если статус позже откатили в `sent` или
+    `skipped`. Оффер и отказ перекрывают этот факт как финальные исходы.
     """
     rows = dedupe_vacancies(vacancies)
     total = len(rows)
@@ -194,7 +234,7 @@ def build_metrics(
         for name in ("hh", "habr", "external", "unknown")
         if channel_counts.get(name)
     ]
-    raw_counts = Counter(str(row.get("status", "") or "unknown") for row in rows)
+    raw_counts = Counter(effective_status(row) for row in rows)
     counts = {status: raw_counts.get(status, 0) for status in STATUS_ORDER}
     unknown = total - sum(counts.values())
     if unknown:
@@ -246,7 +286,9 @@ def build_metrics(
         "rejected": _rate(rejected, responses),
         "ignore": _rate(sent, responses),
     }
-    rate_text = {key: _rate_text(value) for key, value in rates.items()}
+    rate_text = {
+        key: _rate_text(value, has_data=total > 0) for key, value in rates.items()
+    }
     updated_text = _format_updated(updated_at)
     words = {
         "vacancies": _plural(total, "вакансия", "вакансии", "вакансий"),
@@ -255,7 +297,7 @@ def build_metrics(
         "responses": _plural(responses, "отклик", "отклика", "откликов"),
         "offers": _plural(offers, "оффер", "оффера", "офферов"),
         "invites": _plural(invites, "приглашение", "приглашения", "приглашений"),
-        "invites_total": _plural(
+        "invited_total": _plural(
             invited_total, "приглашение", "приглашения", "приглашений"
         ),
         "rejected": _plural(rejected, "отказ", "отказа", "отказов"),

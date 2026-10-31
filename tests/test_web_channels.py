@@ -81,7 +81,7 @@ def test_report_page_filters_by_channel(client: TestClient) -> None:
     response = client.get("/report")
 
     assert response.status_code == 200
-    assert 'id="channelGroup"' in response.text
+    assert 'id="channelMenu"' in response.text
     assert 'data-channel="habr"' in response.text
     assert 'data-channel="external"' in response.text
     assert 'id="filterReset"' in response.text

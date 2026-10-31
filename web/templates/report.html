@@ -5,619 +5,9 @@
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <meta name="color-scheme" content="light dark">
         <title>Отчёт по вакансиям</title>
-        <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
-        <link rel="stylesheet" href="/static/styles.css">
-        <style>
-            .header-top {
-                display: flex;
-                align-items: flex-start;
-                justify-content: space-between;
-                gap: 16px;
-            }
-
-            .summary-grid {
-                display: grid;
-                grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-                gap: 12px;
-                margin-bottom: 24px;
-            }
-
-            .summary-card {
-                background: var(--surface);
-                border-radius: 12px;
-                padding: 16px 20px;
-                box-shadow: var(--shadow-card);
-                border-left: 4px solid #ccc;
-                transition: transform .15s, box-shadow .15s, background .2s ease;
-            }
-
-            .summary-card:hover {
-                transform: translateY(-2px);
-                box-shadow: var(--shadow-card-hover);
-            }
-
-            .summary-card .label {
-                font-size: .8rem;
-                text-transform: uppercase;
-                letter-spacing: .5px;
-                color: var(--muted);
-                font-weight: 600;
-            }
-
-            .summary-card .value {
-                font-size: 1.8rem;
-                font-weight: 700;
-                margin-top: 4px;
-            }
-
-            .card-sent {
-                border-left-color: #2e7d32;
-            }
-
-            .card-sent .value {
-                color: #2e7d32;
-            }
-
-            .card-invite {
-                border-left-color: #00838f;
-            }
-
-            .card-invite .value {
-                color: #00838f;
-            }
-
-            .card-offer {
-                border-left-color: #1565c0;
-            }
-
-            .card-offer .value {
-                color: #1565c0;
-            }
-
-            [data-theme="dark"] .card-offer {
-                border-left-color: #7fb6f0;
-            }
-
-            [data-theme="dark"] .card-offer .value {
-                color: #7fb6f0;
-            }
-
-            .card-skipped {
-                border-left-color: #e65100;
-            }
-
-            .card-skipped .value {
-                color: #e65100;
-            }
-
-            .card-queued {
-                border-left-color: #1565c0;
-            }
-
-            .card-queued .value {
-                color: #1565c0;
-            }
-
-            .card-excluded {
-                border-left-color: #6a1b9a;
-            }
-
-            .card-excluded .value {
-                color: #6a1b9a;
-            }
-
-            .card-error {
-                border-left-color: #c62828;
-            }
-
-            .card-error .value {
-                color: #c62828;
-            }
-
-            .card-rejected {
-                border-left-color: #ad1457;
-            }
-
-            .card-rejected .value {
-                color: #ad1457;
-            }
-
-            .search-input {
-                flex: 1;
-                min-width: 200px;
-                padding: 8px 16px;
-                border: 1.5px solid var(--filter-border);
-                border-radius: 20px;
-                font-size: .85rem;
-                outline: none;
-                transition: border-color .15s, background .2s ease, color .2s ease;
-                background: var(--filter-bg);
-                color: var(--text);
-            }
-
-            .search-input:focus {
-                border-color: var(--filter-hover);
-            }
-
-            .search-input::placeholder {
-                color: var(--muted-light);
-            }
-
-            /* Крестик очистки в поле поиска: курсор-рука, как у ссылок и кнопок. */
-            .search-input::-webkit-search-cancel-button {
-                cursor: pointer;
-            }
-
-            .table-wrapper {
-                background: var(--surface);
-                border-radius: 12px;
-                box-shadow: var(--shadow-card);
-                overflow-x: auto;
-                transition: background .2s ease;
-            }
-
-            table {
-                width: 100%;
-                border-collapse: collapse;
-                font-size: .88rem;
-            }
-
-            thead {
-                position: sticky;
-                top: 0;
-                z-index: 2;
-            }
-
-            th {
-                background: var(--surface-2);
-                text-align: left;
-                padding: 14px 16px;
-                font-weight: 600;
-                font-size: .78rem;
-                text-transform: uppercase;
-                letter-spacing: .5px;
-                color: var(--muted-strong);
-                border-bottom: 2px solid var(--border);
-                white-space: nowrap;
-            }
-
-            td {
-                padding: 12px 16px;
-                border-bottom: 1px solid var(--border-soft);
-                vertical-align: top;
-            }
-
-            tr:last-child td {
-                border-bottom: none;
-            }
-
-            tbody tr {
-                transition: background .12s;
-            }
-
-            tbody tr:hover {
-                background: var(--row-hover);
-            }
-
-            .vacancy-link {
-                color: var(--link);
-                text-decoration: none;
-                font-weight: 500;
-            }
-
-            .vacancy-link:hover {
-                text-decoration: underline;
-            }
-
-            .title-cell {
-                font-weight: 500;
-                color: var(--text);
-                max-width: 320px;
-            }
-
-            .company-cell {
-                color: var(--muted-strong);
-                font-size: .85rem;
-                max-width: 200px;
-            }
-
-            .profile-cell {
-                color: var(--muted-strong);
-                font-size: .85rem;
-                max-width: 200px;
-            }
-
-            .profile-cell.empty {
-                color: var(--muted-empty);
-                font-style: italic;
-            }
-
-            .reason-cell {
-                color: var(--muted);
-                font-size: .82rem;
-                max-width: 380px;
-                line-height: 1.45;
-            }
-
-            .reason-cell.empty {
-                color: var(--muted-empty);
-                font-style: italic;
-            }
-
-            .time-cell {
-                white-space: nowrap;
-                font-size: .82rem;
-                color: var(--muted-soft);
-            }
-
-            .empty-state {
-                text-align: center;
-                padding: 60px 20px;
-                color: var(--muted-light);
-                font-size: 1rem;
-            }
-
-            .empty-state .icon {
-                font-size: 2.5rem;
-                margin-bottom: 8px;
-            }
-
-            .loader {
-                text-align: center;
-                padding: 40px;
-                color: var(--muted);
-            }
-
-            .loader .spinner {
-                width: 32px;
-                height: 32px;
-                border: 3px solid var(--spinner-border);
-                border-top-color: var(--spinner-top);
-                border-radius: 50%;
-                animation: spin .8s linear infinite;
-                margin: 0 auto 12px;
-            }
-
-            @keyframes spin {
-                to {
-                    transform: rotate(360deg);
-                }
-            }
-
-            .error-box {
-                background: #ffebee;
-                color: #c62828;
-                padding: 20px;
-                border-radius: 12px;
-                border-left: 4px solid #c62828;
-                margin-bottom: 20px;
-            }
-
-            [data-theme="dark"] .error-box {
-                background: #3a1a1c;
-                color: #f08a8a;
-                border-left-color: #f08a8a;
-            }
-
-            /* Селект статуса: цвет зависит от статуса вакансии. */
-            .status-select {
-                padding: 6px 12px;
-                border-radius: 20px;
-                font-size: .78rem;
-                font-weight: 600;
-                text-transform: uppercase;
-                letter-spacing: .3px;
-                border: 1px solid transparent;
-                cursor: pointer;
-                outline: none;
-                appearance: none;
-                -webkit-appearance: none;
-                background-image: url("data:image/svg+xml;charset=UTF-8,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3e%3cpolyline points='6 9 12 15 18 9'%3e%3c/polyline%3e%3c/svg%3e");
-                background-repeat: no-repeat;
-                background-position: right 6px center;
-                background-size: 12px;
-                padding-right: 24px;
-                transition: opacity 0.2s;
-            }
-
-            .status-select:disabled {
-                opacity: 0.5;
-                cursor: wait;
-            }
-
-            /* Цвета для селектов (светлая тема) */
-            .status-select.sent {
-                background-color: #e8f5e9;
-                color: #2e7d32;
-                border-color: #c8e6c9;
-            }
-
-            .status-select.skipped {
-                background-color: #fff3e0;
-                color: #e65100;
-                border-color: #ffe0b2;
-            }
-
-            .status-select.queued {
-                background-color: #e3f2fd;
-                color: #1565c0;
-                border-color: #bbdefb;
-            }
-
-            .status-select.excluded {
-                background-color: #f3e5f5;
-                color: #6a1b9a;
-                border-color: #e1bee7;
-            }
-
-            .status-select.error {
-                background-color: #ffebee;
-                color: #c62828;
-                border-color: #ffcdd2;
-            }
-
-            .status-select.rejected {
-                background-color: #fce4ec;
-                color: #ad1457;
-                border-color: #f8bbd0;
-            }
-
-            .status-select.offer {
-                background-color: #e0f7fa;
-                color: #006064;
-                border-color: #b2ebf2;
-            }
-
-            .status-select.invite {
-                background-color: #e0f2f1;
-                color: #00695c;
-                border-color: #b2dfdb;
-            }
-
-            /* Цвета для селектов (тёмная тема) */
-            [data-theme="dark"] .status-select.sent {
-                background-color: #1e3a24;
-                color: #7fd18a;
-                border-color: #2e5a38;
-            }
-
-            [data-theme="dark"] .status-select.skipped {
-                background-color: #3a2a15;
-                color: #f0b070;
-                border-color: #5a3e22;
-            }
-
-            [data-theme="dark"] .status-select.queued {
-                background-color: #142a44;
-                color: #7fb6f0;
-                border-color: #224e6c;
-            }
-
-            [data-theme="dark"] .status-select.excluded {
-                background-color: #2b1a3a;
-                color: #c39ae6;
-                border-color: #462b5e;
-            }
-
-            [data-theme="dark"] .status-select.error {
-                background-color: #3a1a1c;
-                color: #f08a8a;
-                border-color: #5e2a2c;
-            }
-
-            [data-theme="dark"] .status-select.offer {
-                background-color: #12383a;
-                color: #7fd8d8;
-                border-color: #1f5a5c;
-            }
-
-            [data-theme="dark"] .status-select.invite {
-                background-color: #0f2f30;
-                color: #6fd1c8;
-                border-color: #1c4d4e;
-            }
-
-            [data-theme="dark"] .status-select.rejected {
-                background-color: #3a1a2b;
-                color: #f08ab0;
-                border-color: #5a2941;
-            }
-
-            @media (max-width: 768px) {
-                .summary-grid {
-                    grid-template-columns: repeat(2, 1fr);
-                }
-
-                .summary-card .value {
-                    font-size: 1.4rem;
-                }
-
-                th, td {
-                    padding: 10px 12px;
-                }
-
-                .title-cell, .company-cell, .profile-cell, .reason-cell {
-                    max-width: 220px;
-                }
-            }
-
-            @media (max-width: 480px) {
-                .summary-grid {
-                    grid-template-columns: 1fr 1fr;
-                    gap: 8px;
-                }
-
-                .summary-card {
-                    padding: 12px 14px;
-                }
-
-                .summary-card .value {
-                    font-size: 1.2rem;
-                }
-
-                .summary-card .label {
-                    font-size: .7rem;
-                }
-
-                .filter-btn {
-                    padding: 5px 12px;
-                    font-size: .78rem;
-                }
-            }
-
-            /* Выбор даты и файла в хедере: дропдаун с чекбоксами и обычный select. */
-            .header-filters {
-                display: flex;
-                flex-wrap: wrap;
-                align-items: center;
-                gap: 12px;
-                margin-top: 16px;
-                font-size: .9rem;
-            }
-
-            .date-filter {
-                position: relative;
-                display: inline-flex;
-                align-items: center;
-                gap: 8px;
-            }
-
-            .header-select {
-                font: inherit;
-                font-size: .9rem;
-                color: var(--header-text);
-                background: var(--btn-toggle-bg);
-                border: 1px solid var(--btn-toggle-hover);
-                border-radius: 8px;
-                padding: 6px 12px;
-                cursor: pointer;
-                max-width: 320px;
-            }
-
-            .header-select:hover {
-                background: var(--btn-toggle-hover);
-            }
-
-            .date-panel {
-                position: absolute;
-                top: calc(100% + 6px);
-                left: 0;
-                z-index: 20;
-                min-width: 220px;
-                max-height: 320px;
-                overflow-y: auto;
-                padding: 10px 12px;
-                border-radius: 12px;
-                background: var(--surface);
-                color: var(--text);
-                border: 1px solid var(--border);
-                box-shadow: var(--shadow-card-hover);
-            }
-
-            .date-option {
-                display: flex;
-                align-items: center;
-                gap: 8px;
-                padding: 4px 0;
-                font-size: .9rem;
-                cursor: pointer;
-            }
-
-            .date-option input {
-                cursor: pointer;
-            }
-
-            /* Терминальный статус: селект заблокирован, но не выглядит «загружается». */
-            .status-select.is-terminal:disabled {
-                opacity: .9;
-                cursor: not-allowed;
-            }
-
-            .modal-backdrop {
-                position: fixed;
-                inset: 0;
-                z-index: 1000;
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                padding: 20px;
-                background: rgba(8, 15, 25, .55);
-                backdrop-filter: blur(2px);
-            }
-
-            .modal-backdrop[hidden] {
-                display: none;
-            }
-
-            .modal-card {
-                width: 100%;
-                max-width: 460px;
-                padding: 24px;
-                border: 1px solid var(--border);
-                border-radius: 16px;
-                background: var(--surface);
-                color: var(--text);
-                box-shadow: 0 18px 48px rgba(0, 0, 0, .28);
-            }
-
-            .modal-icon {
-                margin-bottom: 10px;
-                font-size: 1.8rem;
-                line-height: 1;
-            }
-
-            .modal-card h2 {
-                margin: 0 0 10px;
-                font-size: 1.2rem;
-                line-height: 1.3;
-            }
-
-            .modal-card p {
-                margin: 0;
-                color: var(--muted-strong);
-                line-height: 1.55;
-            }
-
-            .modal-actions {
-                display: flex;
-                justify-content: flex-end;
-                gap: 10px;
-                margin-top: 22px;
-            }
-
-            .modal-btn {
-                font: inherit;
-                font-size: .9rem;
-                padding: 9px 16px;
-                border-radius: 10px;
-                border: 1px solid var(--filter-border);
-                cursor: pointer;
-            }
-
-            .modal-btn-cancel {
-                background: var(--surface-2);
-                color: var(--text);
-            }
-
-            .modal-btn-cancel:hover {
-                border-color: var(--muted-light);
-            }
-
-            .modal-btn-confirm {
-                background: var(--filter-active-bg);
-                border-color: var(--filter-active-bg);
-                color: var(--filter-active-text);
-            }
-
-            .modal-btn-confirm:hover {
-                filter: brightness(1.12);
-            }
-
-            .modal-btn:focus-visible {
-                outline: 2px solid var(--link);
-                outline-offset: 2px;
-            }
-        </style>
+        <link rel="icon" href="{{ asset_url('favicon.svg') }}" type="image/svg+xml">
+        <link rel="stylesheet" href="{{ asset_url('base.css') }}">
+        <link rel="stylesheet" href="{{ asset_url('report.css') }}">
     </head>
     <body>
         <div class="container">
@@ -627,8 +17,8 @@
                         <h1>📋 Отчёт по обработанным вакансиям</h1>
                         <div class="meta" id="headerMeta">Загрузка данных…</div>
                     </div>
-                    <div style="display: flex; gap: 12px; align-items: center; flex-shrink: 0;">
-                        <a href="/" class="theme-toggle" style="text-decoration: none;" title="На главную"
+                    <div class="header-actions header-actions--fixed">
+                        <a href="/" class="theme-toggle theme-toggle--link" title="На главную"
                            aria-label="На главную">
                             🏠
                         </a>
@@ -637,19 +27,105 @@
                         </button>
                     </div>
                 </div>
-                <div class="header-filters">
-                    <div class="date-filter">
-                        <button class="header-select" id="dateToggle" type="button" aria-expanded="false">
-                            Дата: <span id="dateLabel">за всё время</span> ▾
-                        </button>
-                        <div class="date-panel" id="datePanel" hidden>
-                            <label class="date-option">
-                                <input type="checkbox" id="dateAll" checked> Выбрать всё
-                            </label>
-                            <div id="dateList"></div>
-                        </div>
+            </div>
+
+            <div class="filters filters--inline" role="group" aria-label="Фильтры отчёта">
+                <button class="filter-reset" id="filterReset" type="button" disabled>
+                    Сбросить фильтры
+                </button>
+
+                <div class="dropdown" id="dateFilter">
+                    <button class="dropdown-toggle" id="dateToggle" type="button"
+                            aria-haspopup="true" aria-expanded="false" aria-controls="datePanel">
+                        <span class="dropdown-title">Дата:</span>
+                        <span class="dropdown-value" id="dateLabel">за всё время</span>
+                        <span class="dropdown-caret" aria-hidden="true"></span>
+                    </button>
+                    <div class="dropdown-menu" id="datePanel" hidden>
+                        <label class="dropdown-check">
+                            <input type="checkbox" id="dateAll" checked> Выбрать всё
+                        </label>
+                        <div id="dateList"></div>
                     </div>
                 </div>
+
+                <div class="dropdown" id="statusFilter">
+                    <button class="dropdown-toggle" id="statusToggle" type="button"
+                            aria-haspopup="true" aria-expanded="false" aria-controls="statusMenu">
+                        <span class="dropdown-title">Статус:</span>
+                        <span class="dropdown-value" id="statusLabel">Все</span>
+                        <span class="dropdown-caret" aria-hidden="true"></span>
+                    </button>
+                    <div class="dropdown-menu" id="statusMenu" role="menu" hidden>
+                        <button class="dropdown-option checked" type="button" data-status="all"
+                                role="menuitemradio" aria-checked="true"><span class="option-check"
+                                                                               aria-hidden="true">✓</span><span
+                            class="option-label">Все</span></button>
+                        <button class="dropdown-option" type="button" data-status="sent"
+                                role="menuitemradio" aria-checked="false"><span class="option-check"
+                                                                                aria-hidden="true">✓</span><span
+                            class="option-label">Отправлено</span></button>
+                        <button class="dropdown-option" type="button" data-status="queued"
+                                role="menuitemradio" aria-checked="false"><span class="option-check"
+                                                                                aria-hidden="true">✓</span><span
+                            class="option-label">В очереди</span></button>
+                        <button class="dropdown-option" type="button" data-status="excluded"
+                                role="menuitemradio" aria-checked="false"><span class="option-check"
+                                                                                aria-hidden="true">✓</span><span
+                            class="option-label">Исключено</span></button>
+                        <button class="dropdown-option" type="button" data-status="skipped"
+                                role="menuitemradio" aria-checked="false"><span class="option-check"
+                                                                                aria-hidden="true">✓</span><span
+                            class="option-label">Не подходит</span></button>
+                        <button class="dropdown-option" type="button" data-status="rejected"
+                                role="menuitemradio" aria-checked="false"><span class="option-check"
+                                                                                aria-hidden="true">✓</span><span
+                            class="option-label">Отказ</span></button>
+                        <button class="dropdown-option" type="button" data-status="offer"
+                                role="menuitemradio" aria-checked="false"><span class="option-check"
+                                                                                aria-hidden="true">✓</span><span
+                            class="option-label">Оффер</span></button>
+                        <button class="dropdown-option" type="button" data-status="error"
+                                role="menuitemradio" aria-checked="false"><span class="option-check"
+                                                                                aria-hidden="true">✓</span><span
+                            class="option-label">Ошибки</span></button>
+                    </div>
+                </div>
+                <div class="dropdown" id="channelFilter">
+                    <button class="dropdown-toggle" id="channelToggle" type="button"
+                            aria-haspopup="true" aria-expanded="false" aria-controls="channelMenu">
+                        <span class="dropdown-title">Источник:</span>
+                        <span class="dropdown-value" id="channelLabel">Все</span>
+                        <span class="dropdown-caret" aria-hidden="true"></span>
+                    </button>
+                    <div class="dropdown-menu" id="channelMenu" role="menu" hidden>
+                        <button class="dropdown-option checked" type="button" data-channel="all"
+                                role="menuitemradio" aria-checked="true"><span class="option-check"
+                                                                               aria-hidden="true">✓</span><span
+                            class="option-label">Все</span></button>
+                        <button class="dropdown-option" type="button" data-channel="hh"
+                                role="menuitemradio" aria-checked="false"><span class="option-check"
+                                                                                aria-hidden="true">✓</span><span
+                            class="option-label">hh.ru</span></button>
+                        <button class="dropdown-option" type="button" data-channel="habr"
+                                role="menuitemradio" aria-checked="false"><span class="option-check"
+                                                                                aria-hidden="true">✓</span><span
+                            class="option-label">Habr Career</span></button>
+                        <button class="dropdown-option" type="button" data-channel="external"
+                                role="menuitemradio" aria-checked="false"><span class="option-check"
+                                                                                aria-hidden="true">✓</span><span
+                            class="option-label">Сайт компании</span></button>
+                        <button class="dropdown-option" type="button" data-channel="unknown"
+                                role="menuitemradio" aria-checked="false"><span class="option-check"
+                                                                                aria-hidden="true">✓</span><span
+                            class="option-label">Без канала</span></button>
+                    </div>
+                </div>
+
+                <input type="search" class="search-input" id="searchInput" name="q"
+                       autocomplete="off" spellcheck="false" aria-label="Поиск по вакансиям"
+                       placeholder="🔍 Поиск по названию, компании или причине…">
+                <span class="count-badge" id="countBadge" aria-live="polite"></span>
             </div>
 
             <div class="summary-grid" id="summaryGrid">
@@ -687,65 +163,13 @@
                 </div>
             </div>
 
-            <div class="filters" role="group" aria-label="Фильтры отчёта">
-                <div class="filter-row">
-                    <div class="filter-facet">
-                        <span class="filter-label" id="statusFilterLabel">Статус</span>
-                        <div class="filter-group" id="filterGroup" role="group"
-                             aria-labelledby="statusFilterLabel">
-                        <button class="filter-btn active" type="button" data-status="all"
-                                aria-pressed="true">Все</button>
-                        <button class="filter-btn" type="button" data-status="sent"
-                                aria-pressed="false">Отправлено</button>
-                        <button class="filter-btn" type="button" data-status="queued"
-                                aria-pressed="false">В очереди</button>
-                        <button class="filter-btn" type="button" data-status="excluded"
-                                aria-pressed="false">Исключено</button>
-                        <button class="filter-btn" type="button" data-status="skipped"
-                                aria-pressed="false">Не подходит</button>
-                        <button class="filter-btn" type="button" data-status="rejected"
-                                aria-pressed="false">Отказ</button>
-                        <button class="filter-btn" type="button" data-status="offer"
-                                aria-pressed="false">Оффер</button>
-                        <button class="filter-btn" type="button" data-status="error"
-                                aria-pressed="false">Ошибки</button>
-                        </div>
-                    </div>
-                    <div class="filter-facet">
-                        <span class="filter-label" id="channelFilterLabel">Источник</span>
-                        <div class="filter-group" id="channelGroup" role="group"
-                             aria-labelledby="channelFilterLabel">
-                        <button class="filter-btn active" type="button" data-channel="all"
-                                aria-pressed="true">Все</button>
-                        <button class="filter-btn" type="button" data-channel="hh"
-                                aria-pressed="false">hh.ru</button>
-                        <button class="filter-btn" type="button" data-channel="habr"
-                                aria-pressed="false">Habr Career</button>
-                        <button class="filter-btn" type="button" data-channel="external"
-                                aria-pressed="false">Сайт компании</button>
-                        <button class="filter-btn" type="button" data-channel="unknown"
-                                aria-pressed="false">Без канала</button>
-                        </div>
-                    </div>
-                </div>
-                <div class="filter-row filter-row--tail">
-                    <button class="filter-reset" id="filterReset" type="button" disabled>
-                        Сбросить фильтры
-                    </button>
-                    <input type="search" class="search-input" id="searchInput" name="q"
-                           autocomplete="off" spellcheck="false" aria-label="Поиск по вакансиям"
-                           placeholder="🔍 Поиск по названию, компании или причине…">
-                    <span class="count-badge" id="countBadge" aria-live="polite"></span>
-                </div>
-            </div>
-
             <div class="table-wrapper">
                 <div class="loader" id="loader">
                     <div class="spinner"></div>
                     <div>Загрузка отчёта…</div>
                 </div>
-                <div class="error-box" id="errorBox" style="display:none;"></div>
-                <table id="vacancyTable" style="display:none;">
+                <div class="error-box" id="errorBox" hidden></div>
+                <table id="vacancyTable" hidden>
                     <thead>
                     <tr>
                         <th>Резюме</th>
@@ -758,7 +182,7 @@
                     </thead>
                     <tbody id="tableBody"></tbody>
                 </table>
-                <div class="empty-state" id="emptyState" style="display:none;">
+                <div class="empty-state" id="emptyState" hidden>
                     <div class="icon">🔍</div>
                     <div>Ничего не найдено. Попробуйте изменить фильтр или поисковый запрос.</div>
                 </div>
@@ -779,8 +203,8 @@
             </div>
         </div>
 
-        <script src="/static/script.js"></script>
-        <script src="/static/filters.js"></script>
+        <script src="{{ asset_url('script.js') }}"></script>
+        <script src="{{ asset_url('filters.js') }}"></script>
         <script>
             /* ---------- Глобальные переменные ---------- */
             const STATUS_LABELS = {
@@ -830,6 +254,7 @@
             let currentChannel = 'all';
             let currentQuery = '';
             let selectedFiles = [];      // выбранные даты = файлы дня ([] — все файлы)
+            let datesNone = false;       // даты сняты: пустой список files иначе значил бы «все»
             let reportsIndex = [];       // файлы дня: имя, дата, обновление, итоги
             let terminalResolve = null;  // ожидающий ответ модального окна
             let terminalFocus = null;    // куда вернуть фокус после закрытия
@@ -851,9 +276,16 @@
                 emptyState: document.getElementById('emptyState'),
                 countBadge: document.getElementById('countBadge'),
                 searchInput: document.getElementById('searchInput'),
-                filterGroup: document.getElementById('filterGroup'),
-                channelGroup: document.getElementById('channelGroup'),
+                statusFilter: document.getElementById('statusFilter'),
+                statusToggle: document.getElementById('statusToggle'),
+                statusMenu: document.getElementById('statusMenu'),
+                statusLabel: document.getElementById('statusLabel'),
+                channelFilter: document.getElementById('channelFilter'),
+                channelToggle: document.getElementById('channelToggle'),
+                channelMenu: document.getElementById('channelMenu'),
+                channelLabel: document.getElementById('channelLabel'),
                 filterReset: document.getElementById('filterReset'),
+                dateFilter: document.getElementById('dateFilter'),
                 dateToggle: document.getElementById('dateToggle'),
                 dateLabel: document.getElementById('dateLabel'),
                 datePanel: document.getElementById('datePanel'),
@@ -946,12 +378,12 @@
                 els.countBadge.textContent = `Показано ${filtered.length} из ${allVacancies.length}`;
 
                 if (filtered.length === 0) {
-                    els.emptyState.style.display = 'block';
-                    els.table.style.display = 'none';
+                    els.emptyState.hidden = false;
+                    els.table.hidden = true;
                     return;
                 }
-                els.emptyState.style.display = 'none';
-                els.table.style.display = 'table';
+                els.emptyState.hidden = true;
+                els.table.hidden = false;
 
                 const frag = document.createDocumentFragment();
                 for (const v of filtered) {
@@ -1120,12 +552,14 @@
             /* ---------- Состояние фильтров: статус И канал, поиск, даты ---------- */
             /* Чистые функции фильтров живут в /static/filters.js, здесь только DOM. */
             function currentFilters() {
-                return {
+                const filters = {
                     status: currentStatus,
                     channel: currentChannel,
                     query: currentQuery,
                     files: selectedFiles.slice()
                 };
+                if (datesNone) filters.datesNone = true;
+                return filters;
             }
 
             function applyFilters(filters) {
@@ -1133,7 +567,8 @@
                 currentChannel = filters.channel;
                 currentQuery = filters.query;
                 selectedFiles = filters.files.slice();
-                els.dateAll.checked = selectedFiles.length === 0;
+                datesNone = filters.datesNone === true;
+                els.dateAll.checked = !datesNone && selectedFiles.length === 0;
             }
 
             function readFiltersFromUrl() {
@@ -1157,7 +592,7 @@
                 const url = window.location.pathname + (query ? `?${query}` : '');
                 window.history.replaceState(null, '', url);
                 try {
-                    if (!hasSelectedFilters(filters, {includeFiles: true})) {
+                    if (!hasSelectedFilters(filters, {includeFiles: true}) && !filters.datesNone) {
                         window.localStorage.removeItem(FILTER_STORAGE_KEY);
                     } else {
                         window.localStorage.setItem(FILTER_STORAGE_KEY, JSON.stringify(filters));
@@ -1167,17 +602,22 @@
                 }
             }
 
-            function setGroupState(group, key, value) {
-                group.querySelectorAll('.filter-btn').forEach(btn => {
-                    const active = btn.dataset[key] === value;
-                    btn.classList.toggle('active', active);
-                    btn.setAttribute('aria-pressed', String(active));
+            /* Меню статуса и источника: один выбор, как в фильтре резюме на метриках.
+               Активный пункт получает галочку, кнопка — короткую подпись выбора. */
+            function syncMenu(menu, label, key, value) {
+                let text = 'Все';
+                menu.querySelectorAll('.dropdown-option').forEach(option => {
+                    const active = option.dataset[key] === value;
+                    option.classList.toggle('checked', active);
+                    option.setAttribute('aria-checked', String(active));
+                    if (active) text = option.querySelector('.option-label').textContent.trim();
                 });
+                label.textContent = text;
             }
 
             function renderFilterControls() {
-                setGroupState(els.filterGroup, 'status', currentStatus);
-                setGroupState(els.channelGroup, 'channel', currentChannel);
+                syncMenu(els.statusMenu, els.statusLabel, 'status', currentStatus);
+                syncMenu(els.channelMenu, els.channelLabel, 'channel', currentChannel);
                 els.searchInput.value = currentQuery;
                 els.filterReset.disabled = !hasSelectedFilters(currentFilters());
             }
@@ -1204,17 +644,19 @@
                 renderTable();
             }
 
-            els.filterGroup.addEventListener('click', (event) => {
-                const btn = event.target.closest('.filter-btn');
-                if (!btn || !els.filterGroup.contains(btn)) return;
-                currentStatus = btn.dataset.status;
+            els.statusMenu.addEventListener('click', (event) => {
+                const option = event.target.closest('[data-status]');
+                if (!option) return;
+                currentStatus = option.dataset.status;
+                closeDropdowns();
                 onFiltersChanged();
             });
 
-            els.channelGroup.addEventListener('click', (event) => {
-                const btn = event.target.closest('.filter-btn');
-                if (!btn || !els.channelGroup.contains(btn)) return;
-                currentChannel = btn.dataset.channel;
+            els.channelMenu.addEventListener('click', (event) => {
+                const option = event.target.closest('[data-channel]');
+                if (!option) return;
+                currentChannel = option.dataset.channel;
+                closeDropdowns();
                 onFiltersChanged();
             });
 
@@ -1231,22 +673,46 @@
                 await loadVacancies();
             });
 
-            /* Дропдаун «Дата»: чекбоксы по датам в едином стиле с фильтрами. */
-            els.dateToggle.addEventListener('click', () => {
-                const nextHidden = !els.datePanel.hidden;
-                els.datePanel.hidden = nextHidden;
-                els.dateToggle.setAttribute('aria-expanded', String(!nextHidden));
+            /* Дропдауны панели фильтров: дата, статус и источник. Открыт только один,
+               клик вне панели и Escape закрывают меню. */
+            const DROPDOWNS = [
+                {root: els.dateFilter, toggle: els.dateToggle, menu: els.datePanel},
+                {root: els.statusFilter, toggle: els.statusToggle, menu: els.statusMenu},
+                {root: els.channelFilter, toggle: els.channelToggle, menu: els.channelMenu}
+            ];
+
+            function setDropdown(dropdown, open) {
+                dropdown.menu.hidden = !open;
+                dropdown.toggle.setAttribute('aria-expanded', String(open));
+            }
+
+            function closeDropdowns(except) {
+                DROPDOWNS.forEach(dropdown => {
+                    if (dropdown !== except) setDropdown(dropdown, false);
+                });
+            }
+
+            DROPDOWNS.forEach(dropdown => {
+                dropdown.toggle.addEventListener('click', () => {
+                    const open = dropdown.menu.hidden;
+                    closeDropdowns(dropdown);
+                    setDropdown(dropdown, open);
+                });
             });
 
             document.addEventListener('click', (event) => {
-                const inside = event.target instanceof Element && event.target.closest('.date-filter');
-                if (!els.datePanel.hidden && !inside) {
-                    els.datePanel.hidden = true;
-                    els.dateToggle.setAttribute('aria-expanded', 'false');
-                }
+                const inside = event.target instanceof Element && event.target.closest('.dropdown');
+                if (!inside) closeDropdowns();
+            });
+
+            document.addEventListener('keydown', (event) => {
+                if (event.key === 'Escape') closeDropdowns();
             });
 
             els.dateAll.addEventListener('change', async () => {
+                // «Выбрать всё» работает в обе стороны: снятая галочка означает
+                // «ни одна дата не выбрана», а не «все даты».
+                datesNone = !els.dateAll.checked;
                 selectedFiles = [];
                 renderDateOptions();
                 renderFilterControls();
@@ -1256,6 +722,7 @@
 
             /* ---------- Выбор даты: под капотом это файлы дня ---------- */
             function dateLabelText() {
+                if (datesNone) return 'даты не выбраны';
                 if (selectedFiles.length === 0) return 'за всё время';
                 if (selectedFiles.length === 1) {
                     const report = reportsIndex.find(item => item.name === selectedFiles[0]);
@@ -1268,26 +735,28 @@
                 els.dateList.innerHTML = '';
                 for (const report of reportsIndex) {
                     const label = document.createElement('label');
-                    label.className = 'date-option';
+                    label.className = 'dropdown-check';
                     const box = document.createElement('input');
                     box.type = 'checkbox';
                     // Дата и файл дня — одно и то же: значение чекбокса — имя файла.
                     box.value = report.name;
-                    box.checked = selectedFiles.length === 0 || selectedFiles.includes(report.name);
+                    box.checked = !datesNone
+                        && (selectedFiles.length === 0 || selectedFiles.includes(report.name));
                     box.addEventListener('change', onDateChange);
                     label.appendChild(box);
                     label.appendChild(document.createTextNode(` ${report.date} (${report.total})`));
                     els.dateList.appendChild(label);
                 }
-                els.dateAll.checked = selectedFiles.length === 0;
+                els.dateAll.checked = !datesNone && selectedFiles.length === 0;
                 els.dateLabel.textContent = dateLabelText();
             }
 
             async function onDateChange() {
                 const boxes = Array.from(els.dateList.querySelectorAll('input[type=checkbox]'));
                 selectedFiles = boxes.filter(box => box.checked).map(box => box.value);
+                datesNone = false;
                 // Отмечены все даты — это то же самое, что «все даты».
-                if (boxes.length && selectedFiles.length === boxes.length) selectedFiles = [];
+                if (selectedFiles.length && selectedFiles.length === boxes.length) selectedFiles = [];
                 renderDateOptions();
                 renderFilterControls();
                 persistFilters();
@@ -1307,8 +776,17 @@
             }
 
             async function loadVacancies() {
-                els.loader.style.display = 'block';
-                els.errorBox.style.display = 'none';
+                els.loader.hidden = false;
+                els.errorBox.hidden = true;
+                if (datesNone) {
+                    // Даты сняты: показывать нечего, поэтому сервер не спрашиваем.
+                    allVacancies = [];
+                    renderSummary(null);
+                    renderHeader({updated_at: '', vacancies: []});
+                    els.loader.hidden = true;
+                    renderTable();
+                    return;
+                }
                 const query = selectedFiles.length
                     ? `?files=${encodeURIComponent(selectedFiles.join(','))}`
                     : '';
@@ -1328,7 +806,7 @@
                     .pop() || '';
                 renderHeader({updated_at: updated, vacancies: allVacancies});
 
-                els.loader.style.display = 'none';
+                els.loader.hidden = true;
                 renderTable();
             }
 
@@ -1338,8 +816,8 @@
                     restoreFilters();
                     await loadVacancies();
                 } catch (err) {
-                    els.loader.style.display = 'none';
-                    els.errorBox.style.display = 'block';
+                    els.loader.hidden = true;
+                    els.errorBox.hidden = false;
                     els.errorBox.innerHTML = `<strong>Ошибка загрузки данных.</strong><br>Причина: ${escapeHtml(err.message)}<br><br>Убедитесь, что сервер FastAPI запущен.`;
                     console.error(err);
                 }

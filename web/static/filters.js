@@ -10,7 +10,7 @@
 
     // Каналы записи. `unknown` — записи старых отчётов без поля channel.
     const CHANNELS = new Set(['all', 'hh', 'habr', 'external', 'unknown']);
-    const URL_KEYS = ['status', 'channel', 'q', 'date'];
+    const URL_KEYS = ['status', 'channel', 'q', 'date', 'dates'];
 
     function defaultFilters() {
         return {status: 'all', channel: 'all', query: '', files: []};
@@ -34,6 +34,10 @@
         if (Array.isArray(raw.files)) {
             filters.files = raw.files.filter(name => typeof name === 'string' && name);
         }
+        /* «Даты сняты» — отдельное состояние: пустой список files значит «все даты».
+           Поле появляется только когда оно включено, чтобы состояние по умолчанию
+           оставалось коротким. */
+        if (raw.datesNone === true && filters.files.length === 0) filters.datesNone = true;
         return filters;
     }
 
@@ -72,6 +76,7 @@
         if (filters.channel !== 'all') params.set('channel', filters.channel);
         if (filters.query) params.set('q', filters.query);
         if (filters.files.length) params.set('date', filters.files.join(','));
+        if (filters.datesNone) params.set('dates', 'none');
         return params;
     }
 
@@ -80,13 +85,15 @@
     function parseSearchParams(search, statuses) {
         const params = new URLSearchParams(search || '');
         if (!URL_KEYS.some(key => params.has(key))) return null;
-        return normalizeFilters({
+        const raw = {
             status: params.get('status'),
             channel: params.get('channel'),
             query: params.get('q') || '',
             files: (params.get('date') || '').split(',').map(name => name.trim())
                 .filter(Boolean)
-        }, statuses);
+        };
+        if (params.get('dates') === 'none') raw.datesNone = true;
+        return normalizeFilters(raw, statuses);
     }
 
     return {

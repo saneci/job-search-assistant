@@ -5,114 +5,9 @@
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <meta name="color-scheme" content="light dark">
         <title>Мониторинг поиска работы</title>
-        <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
-        <link rel="stylesheet" href="/static/styles.css">
-        <style>
-            /* Сетка навигации */
-            .nav-grid {
-                display: grid;
-                grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
-                gap: 20px;
-                margin-bottom: 24px;
-            }
-
-            .nav-card {
-                display: flex;
-                flex-direction: column;
-                justify-content: space-between;
-                background: var(--surface);
-                border-radius: 12px;
-                padding: 28px 28px 24px;
-                box-shadow: var(--shadow-card);
-                border-left: 4px solid var(--muted);
-                text-decoration: none;
-                color: inherit;
-                transition: transform .15s, box-shadow .15s, background .2s ease;
-            }
-
-            .nav-card:hover {
-                transform: translateY(-3px);
-                box-shadow: var(--shadow-card-hover);
-            }
-
-            .nav-card.funnel {
-                border-left-color: var(--accent-funnel);
-            }
-
-            .nav-card.report {
-                border-left-color: var(--accent-report);
-            }
-
-            .nav-card .icon {
-                font-size: 2.2rem;
-                line-height: 1;
-                margin-bottom: 16px;
-            }
-
-            .nav-card h2 {
-                font-size: 1.2rem;
-                font-weight: 600;
-                margin-bottom: 8px;
-                color: var(--text);
-            }
-
-            .nav-card p {
-                font-size: .92rem;
-                color: var(--muted-strong);
-                margin-bottom: 20px;
-                flex: 1;
-            }
-
-            .nav-card .cta {
-                display: inline-flex;
-                align-items: center;
-                gap: 8px;
-                font-size: .88rem;
-                font-weight: 600;
-                color: var(--link);
-            }
-
-            .nav-card .cta .arrow {
-                transition: transform .15s ease;
-            }
-
-            .nav-card:hover .cta .arrow {
-                transform: translateX(4px);
-            }
-
-            .nav-card.funnel .cta {
-                color: var(--accent-funnel);
-            }
-
-            .nav-card.report .cta {
-                color: var(--accent-report);
-            }
-
-            /* Нижняя подсказка */
-            .hint {
-                background: var(--surface);
-                border-radius: 12px;
-                padding: 18px 24px;
-                box-shadow: var(--shadow-card);
-                font-size: .88rem;
-                color: var(--muted-strong);
-            }
-
-            .hint strong {
-                color: var(--text);
-            }
-
-            /* Адаптивность */
-            @media (max-width: 768px) {
-                .nav-grid {
-                    grid-template-columns: 1fr;
-                }
-
-                .nav-card {
-                    padding: 22px 20px;
-                }
-            }
-        </style>
+        <link rel="icon" href="{{ asset_url('favicon.svg') }}" type="image/svg+xml">
+        <link rel="stylesheet" href="{{ asset_url('base.css') }}">
+        <link rel="stylesheet" href="{{ asset_url('index.css') }}">
     </head>
     <body>
         <div class="container">
@@ -164,6 +59,6 @@
             </div>
         </div>
 
-        <script src="/static/script.js"></script>
+        <script src="{{ asset_url('script.js') }}"></script>
     </body>
 </html>

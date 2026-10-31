@@ -1,5 +1,6 @@
 /* Общие стили всех страниц: палитра темы, сброс, контейнер, хедер, фильтры
-   и кнопка переключения темы. Стили конкретных блоков остаются в шаблонах. */
+   и кнопка переключения темы. Стили конкретных страниц — в отдельных файлах:
+   metrics.css, report.css, index.css. */
 
 :root {
     /* Поверхности и текст */
@@ -49,8 +50,14 @@
     --color-skipped: #e65100;
     --color-excluded: #6a1b9a;
     --color-queued: #1565c0;
-    --color-offer: #1565c0;
-    --color-invite: #00838f;
+    /* Оффер и приглашение — те же цвета, что у статусов графика: оффер
+       золотой, приглашение бирюзовое (#11f0ec). В круге и легенде они
+       различаются не оттенком, а цветом. */
+    --color-offer: #9a6700;
+    /* Яркая бирюза для заливок и линий. Для текста на светлом фоне нужен
+       тёмный вариант: #11f0ec на белом даёт контраст 1.4:1 и не читается. */
+    --color-invite: #11f0ec;
+    --color-invite-ink: #0b7a77;
     --color-error: #c62828;
 }
 
@@ -96,8 +103,9 @@
     --color-skipped: #f0b070;
     --color-excluded: #c39ae6;
     --color-queued: #7fb6f0;
-    --color-offer: #7fb6f0;
-    --color-invite: #6fd1c8;
+    --color-offer: #f5c542;
+    --color-invite: #11f0ec;
+    --color-invite-ink: #11f0ec;
     --color-error: #f08a8a;
 }
 
@@ -144,6 +152,28 @@ body {
 
 .theme-toggle:active {
     transform: scale(.95);
+}
+
+/* Кнопки в шапке: домашняя ссылка и переключатель темы. */
+.header-actions {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+/* Блок кнопок не сжимается, когда заголовок длинный. */
+.header-actions--fixed {
+    flex-shrink: 0;
+}
+
+/* Ссылка с видом кнопки: подчёркивание не нужно. */
+.theme-toggle--link {
+    text-decoration: none;
+}
+
+/* Атрибут hidden скрывает элемент, даже если у класса есть свой display. */
+[hidden] {
+    display: none !important;
 }
 
 /* Хедер: градиентная шапка, общая для всех страниц. */
@@ -207,35 +237,7 @@ body {
     align-items: center;
 }
 
-/* Двухуровневый фильтр: у каждой грани (статус, источник) своя строка с подписью. */
-.filter-row {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 10px 20px;
-    align-items: center;
-    flex: 1 1 100%;
-}
-
-.filter-row--tail {
-    gap: 12px;
-}
-
-/* Грань фильтра: подпись и её значения переносятся вместе. */
-.filter-facet {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 10px;
-    align-items: center;
-    min-width: 0;
-}
-
-.filter-label {
-    font-size: .85rem;
-    font-weight: 600;
-    color: var(--muted-strong);
-}
-
-/* Сброс всех фильтров: та же форма, что у кнопок граней. Виден, только когда
+/* Сброс всех фильтров: та же форма, что у кнопок меню. Виден, только когда
    включён хотя бы один фильтр. */
 .filter-reset {
     padding: 6px 16px;

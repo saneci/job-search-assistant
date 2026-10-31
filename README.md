@@ -79,21 +79,20 @@
 | [features](docs/features/README.md)               | Требования к продукту             |
 | [configuration](docs/tutorials/configuration.md)  | Настройка окружения               |
 | [troubleshooting](docs/how-to/troubleshooting.md) | Проблемы и их решения             |
+| [testing](docs/how-to/testing.md)                 | Тесты и проверки перед сдачей     |
 | [aitunnel](docs/reference/aitunnel.md)            | Документация LLM-провайдера       |
 
 ## Тесты
 
-1. Установить зависимости
-    ```bash
-    ./.venv/Scripts/pip.exe install -r requirements-dev.txt
-    ```
-2. Запусить тесты
-    ```bash
-    ./.venv/Scripts/pytest.exe -q
-    ```
+Установите зависимости разработки и запустите набор:
 
-Логика фильтров отчёта проверяется через Node (если он установлен): `pytest` вызывает
-`node --test tests/js/filters.test.mjs` и пропускает проверку, когда Node нет в `PATH`.
+```bash
+./.venv/Scripts/python.exe -m pip install -r requirements-dev.txt
+./.venv/Scripts/python.exe -m pytest -q
+```
+
+Проверки `pyflakes`, JS-тесты на Node и правила оформления тестов описаны в
+[docs/how-to/testing.md](docs/how-to/testing.md).
 
 ## Ограничения
 
