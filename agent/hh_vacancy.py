@@ -12,7 +12,7 @@ from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import Locator, Page, TimeoutError as PlaywrightTimeoutError
 
 from .browser import NAVIGATION_TIMEOUT_MS, CaptchaError, PageLoadError, detect_captcha
-from .models import VacancyCard, VacancyDetails
+from .models import OTHER_RESUME_REASON, VacancyCard, VacancyDetails
 
 TITLE_SELECTORS = ("h1[data-qa='vacancy-title']", "h1.bloko-header-1", "h1")
 DESCRIPTION_SELECTORS = (
@@ -109,6 +109,8 @@ DIRECT_TEXT_SCRIPT = (
 
 STATUS_SENT = "sent"
 STATUS_ALREADY_RESPONDED = "already_responded"
+# Отклик по вакансии уже отправлен другим резюме: повторно не откликаемся.
+STATUS_OTHER_RESUME = "other_resume"
 STATUS_CAPTCHA = "captcha"
 STATUS_NO_FORM = "no_form"
 STATUS_UNKNOWN = "unknown"
@@ -118,12 +120,14 @@ STATUS_UNKNOWN = "unknown"
 PAGE_BLOCKED = "blocked"
 PAGE_INVITED = "invited"
 PAGE_REJECTED = "rejected"
+# Кнопка «Отклик другим резюме»: по вакансии уже есть отклик другого резюме.
+PAGE_OTHER_RESUME = "other_resume"
 BLOCKED_TITLE = "У вас нет доступа к этой вакансии"
 INVITED_TITLE = "Вас пригласили"
 REJECTED_TITLE = "Вам отказали"
 
 RESPOND_RE = re.compile(r"^\s*откликнуться\s*$", re.IGNORECASE)
-# Кнопка «Отклик другим резюме»: отклик другим профилем уже есть, текущим — ещё нет.
+# Кнопка «Отклик другим резюме»: отклик по вакансии уже отправлен другим резюме.
 OTHER_RESUME_RE = re.compile(r"^\s*отклик другим резюме\s*$", re.IGNORECASE)
 OTHER_RESUME_SELECTORS = (
     "[data-qa='vacancy-response-link-other-resume']",
@@ -482,7 +486,7 @@ def open_vacancy(page: Page, card: VacancyCard) -> VacancyDetails:
 
     company_name = company.splitlines()[0].strip() if company else ""
     blocker = detect_page_blocker(page)
-    if blocker in (PAGE_BLOCKED, PAGE_INVITED, PAGE_REJECTED):
+    if blocker in (PAGE_BLOCKED, PAGE_INVITED, PAGE_REJECTED, PAGE_OTHER_RESUME):
         # На такой странице нет ни описания, ни формы отклика: вакансию
         # пропускаем сразу, без разбора и без обращения к LLM.
         return VacancyDetails(
@@ -513,19 +517,22 @@ def detect_page_blocker(page: Page) -> str | None:
     """Ищет на странице вакансии повод не откликаться автоматически.
 
     Кроме теста, анкеты и внешней формы ловим состояния самой страницы:
-    вакансия больше недоступна («У вас нет доступа к этой вакансии») и
-    работодатель уже пригласил откликнуться («Вас пригласили»). Это не
-    отложенные вакансии, а пройденные: отклик там не нужен.
+    вакансия больше недоступна («У вас нет доступа к этой вакансии»),
+    работодатель уже пригласил откликнуться («Вас пригласили») и отклик по
+    вакансии уже отправлен другим резюме (кнопка «Отклик другим резюме»).
+    Это не отложенные вакансии, а пройденные: отклик там не нужен.
     """
     if _has_exact_text(page, BLOCKED_TITLE):
         return PAGE_BLOCKED
-    if _has_exact_text(page, REJECTED_TITLE) and not _has_other_resume_action(page):
-        # Работодатель отказал по отклику: вакансия пройдена, статус rejected.
-        # Кнопка «Отклик другим резюме» означает, что отказ относится к другому
-        # резюме: текущим резюме ещё можно откликнуться.
-        return PAGE_REJECTED
     if _has_exact_text(page, INVITED_TITLE):
         return PAGE_INVITED
+    if _has_other_resume_action(page):
+        # Отклик по вакансии уже есть у другого резюме: повторно им не
+        # откликаемся и вакансию пропускаем.
+        return PAGE_OTHER_RESUME
+    if _has_exact_text(page, REJECTED_TITLE):
+        # Работодатель отказал по отклику текущего резюме: статус rejected.
+        return PAGE_REJECTED
     if _has_selector(page, QUESTIONNAIRE_SELECTORS) or _has_role_name(page, QUESTIONNAIRE_ACTION_RE):
         return "questionnaire"
     if _has_selector(page, TEST_SELECTORS) or _has_role_name(page, TEST_ACTION_RE):
@@ -609,9 +616,9 @@ def respond(
 
     button = _find_action(page, RESPOND_BUTTON_SELECTORS, RESPOND_RE)
     if button is None:
-        # Отклик другим резюме уже есть: hh.ru предлагает откликнуться текущим.
-        button = _find_action(page, OTHER_RESUME_SELECTORS, OTHER_RESUME_RE)
-    if button is None:
+        if _has_other_resume_action(page):
+            # Отклик по вакансии уже отправлен другим резюме: повторно не откликаемся.
+            return _result(STATUS_OTHER_RESUME, reason=OTHER_RESUME_REASON)
         if _is_already_responded(page):
             return _result(STATUS_ALREADY_RESPONDED)
         return _result(STATUS_NO_FORM, page)
@@ -947,8 +954,9 @@ def response_state(page: Page) -> dict[str, object]:
 def _is_already_responded(page: Page) -> bool:
     """Отклик уже отправлен именно текущим резюме.
 
-    Если hh.ru предлагает «Отклик другим резюме», отклик другого профиля не
-    делает вакансию пройденной: текущим резюме ещё можно откликнуться.
+    Кнопка «Отклик другим резюме» означает отклик другого профиля: такую
+    вакансию агент пропускает со статусом `skipped` (состояние страницы
+    `other_resume`), а не отправляет отклик текущим резюме.
     """
     if _has_other_resume_action(page):
         return False

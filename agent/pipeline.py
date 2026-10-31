@@ -33,6 +33,7 @@ from .hh_vacancy import (
     STATUS_ALREADY_RESPONDED,
     STATUS_CAPTCHA,
     STATUS_NO_FORM,
+    STATUS_OTHER_RESUME,
     STATUS_SENT,
     STATUS_UNKNOWN,
     VacancyParseError,
@@ -45,6 +46,8 @@ from .llm import LLMClient, LLMError
 from .logging_setup import RunLogger, prune_logs
 from .models import (
     ALREADY_RESPONDED_REASON,
+    INVITED_OTHER_RESUME_REASON,
+    OTHER_RESUME_REASON,
     REJECTED_REASON,
     STATUS_ERROR as OUTCOME_ERROR,
     STATUS_EXCLUDED as OUTCOME_EXCLUDED,
@@ -163,11 +166,12 @@ def _letter_has_project_link(letter: str, links: tuple[str, ...]) -> bool:
 
 
 # Состояния страницы вакансии, при которых отклик не нужен: код → (статус
-# записи, причина в отчёте за день). Приглашение и недоступная вакансия —
-# `skipped`, отказ работодателя — отдельный статус `rejected`.
+# записи, причина в отчёте за день). Приглашение, недоступная вакансия и отклик
+# другого резюме — `skipped`, отказ работодателя — отдельный статус `rejected`.
 PAGE_STATUS_REASONS: dict[str, tuple[str, str]] = {
-    "invited": (OUTCOME_SKIPPED, "Вас пригласили на эту вакансию"),
+    "invited": (OUTCOME_SKIPPED, INVITED_OTHER_RESUME_REASON),
     "blocked": (OUTCOME_SKIPPED, "У вас нет доступа к этой вакансии"),
+    "other_resume": (OUTCOME_SKIPPED, OTHER_RESUME_REASON),
     "rejected": (OUTCOME_REJECTED, REJECTED_REASON),
 }
 
@@ -733,7 +737,9 @@ def _process_and_remember(
     """Обрабатывает вакансию и записывает результат в дневной отчёт."""
     channel = channel or _channel_for(config)
     counters = _counters(stats)
+    skipped_before = len(stats.skipped)
     outcome_channel = _process_vacancy(page, config, profile, llm, stats, logger, card)
+    _mark_invited_resume(processed, logger, config, channel, card, skipped_before, stats)
     outcome = _outcome(counters, _counters(stats))
     if outcome:
         _remember_processing(
@@ -745,6 +751,41 @@ def _process_and_remember(
             _profile_name(config, channel),
             channel=outcome_channel or channel.name,
         )
+
+
+def _mark_invited_resume(
+    processed: ProcessedStore,
+    logger: RunLogger,
+    config: AppConfig,
+    channel: Channel,
+    card: VacancyCard,
+    skipped_before: int,
+    stats: RunStats,
+) -> None:
+    """Ставит `invite` записи резюме, по которому пришло приглашение на интервью.
+
+    hh.ru показывает «Вас пригласили» на странице вакансии, не уточняя резюме.
+    Приглашение приходит по уже отправленному отклику, поэтому статус меняется
+    только у записей этой вакансии с другим резюме и статусом `sent`.
+    Состояние «Вас пригласили» узнаём по причине пропуска, которую добавила
+    обработка вакансии: `_process_vacancy` возвращает только канал отчёта.
+    """
+    skipped = stats.skipped[skipped_before:]
+    if not any(item.reason == INVITED_OTHER_RESUME_REASON for item in skipped):
+        return
+    try:
+        updated = processed.invite_other_resume(
+            url=card.url,
+            title=card.title,
+            company=card.company,
+            profile=_profile_name(config, channel),
+        )
+    except ProcessedError as exc:
+        logger.event("processed_error", url=card.url, error=str(exc))
+        return
+    if updated:
+        # Названия резюме — данные пользователя: в журнал пишем только количество.
+        logger.event("invited_other_resume", url=card.url, resumes=len(updated))
 
 
 def _ensure_session_alive(page: Page) -> None:
@@ -1067,6 +1108,27 @@ def _process_vacancy(
         )
         log.info(f"отклик отправлен (всего {stats.sent_count} из {config.pipeline.limit_per_run})")
         _pause(config, logger, "после отправки отклика")
+        return
+
+    if status == STATUS_OTHER_RESUME:
+        # Отклик по вакансии уже есть у другого резюме: повторно не откликаемся.
+        # В файл дня — skipped с причиной, лимит откликов не тратим.
+        log.event(
+            "already_responded_other_resume",
+            url=details.url,
+            status=OUTCOME_SKIPPED,
+            reason=OTHER_RESUME_REASON,
+        )
+        stats.skipped.append(
+            SkippedVacancy(
+                title=details.title,
+                company=details.company,
+                url=details.url,
+                reason=OTHER_RESUME_REASON,
+                probability=decision.probability,
+            )
+        )
+        log.info("пропуск: по вакансии уже есть отклик другим резюме")
         return
 
     if status == STATUS_ALREADY_RESPONDED:

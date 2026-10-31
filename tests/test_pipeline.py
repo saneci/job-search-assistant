@@ -33,6 +33,7 @@ from agent.pipeline import (
     _outcome,
     _outcome_reason,
     _plural,
+    _process_and_remember,
     _process_vacancies,
     _process_vacancy,
     _profile_name,
@@ -277,9 +278,60 @@ def test_invited_vacancy_is_skipped_without_queue(tmp_path: Path, monkeypatch) -
     )
     logger.close()
 
-    assert set(PAGE_STATUS_REASONS) == {"blocked", "invited", "rejected"}
-    assert [item.reason for item in stats.skipped] == ["Вас пригласили на эту вакансию"]
+    assert set(PAGE_STATUS_REASONS) == {"blocked", "invited", "rejected", "other_resume"}
+    assert [item.reason for item in stats.skipped] == [
+        "Уже получено приглашение на интервью по другому резюме"
+    ]
     assert stats.queued == []
+
+
+def test_invited_vacancy_marks_other_resume_invite(tmp_path: Path, monkeypatch) -> None:
+    """«Вас пригласили»: другому резюме по этой вакансии ставится invite."""
+    config = with_resume(make_config(tmp_path), "Team Lead")
+    card = VacancyCard(title="Java", company="Ozon", url="https://hh.ru/vacancy/12")
+    details = VacancyDetails(
+        url=card.url,
+        title=card.title,
+        company=card.company,
+        salary="",
+        description="",
+        blocker="invited",
+    )
+    store = ProcessedStore(tmp_path / "report", today=date(2026, 10, 21))
+    store.record(
+        url=card.url,
+        title=card.title,
+        company=card.company,
+        status="sent",
+        profile="Java Developer",
+        channel="hh",
+    )
+    monkeypatch.setattr("agent.pipeline.open_vacancy", lambda page, vacancy: details)
+    stats = make_stats()
+    logger = RunLogger(tmp_path / "logs", run_id="invited-other-resume")
+
+    _process_and_remember(
+        page=None,  # type: ignore[arg-type]
+        config=config,
+        profile=None,  # type: ignore[arg-type]
+        llm=None,  # type: ignore[arg-type]
+        stats=stats,
+        logger=logger,
+        processed=store,
+        card=card,
+        channel=channel_for(config),
+    )
+    logger.close()
+
+    rows = json.loads(store.path.read_text(encoding="utf-8"))["vacancies"]
+    other = [row for row in rows if row.get("profile") == "Java Developer"]
+    assert [row["status"] for row in other] == ["invite"]
+    assert other[0]["reason"] == "По отклику пришло приглашение на интервью"
+    # Приглашение не обработка вакансии: счётчик попыток не растёт.
+    assert other[0]["attempts"] == 1
+    assert [item.reason for item in stats.skipped] == [
+        "Уже получено приглашение на интервью по другому резюме"
+    ]
 
 
 def test_rejected_vacancy_gets_own_status(tmp_path: Path, monkeypatch) -> None:

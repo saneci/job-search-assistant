@@ -22,6 +22,7 @@ from .logging_setup import RunLogger
 from .models import (
     RETRYABLE_STATUSES,
     STATUSES,
+    STATUS_INVITE,
     STATUS_OFFER,
     STATUS_REJECTED,
     STATUS_SENT,
@@ -141,6 +142,7 @@ NOT_RETRYABLE_HELP = {
     STATUS_SENT: "отклик уже отправлен",
     STATUS_REJECTED: "пришёл отказ по отправленному отклику",
     STATUS_OFFER: "по отклику получен оффер",
+    STATUS_INVITE: "пришло приглашение на собеседование",
 }
 
 

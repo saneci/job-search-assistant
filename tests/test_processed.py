@@ -46,6 +46,7 @@ def test_file_has_header_with_summary(tmp_path: Path) -> None:
         "error": 0,
         "rejected": 0,
         "offer": 0,
+        "invite": 0,
     }
     assert payload["vacancies"][0]["title"] == "Java-разработчик"
     assert payload["vacancies"][0]["status"] == "sent"
@@ -53,6 +54,43 @@ def test_file_has_header_with_summary(tmp_path: Path) -> None:
     assert payload["vacancies"][0]["profile"] == ""
     assert payload["vacancies"][0]["created_at"]
     assert payload["vacancies"][0]["updated_at"]
+
+
+def test_invite_other_resume_marks_only_other_profile(tmp_path: Path) -> None:
+    """Приглашение: invite получает запись другого резюме со статусом sent."""
+    store = ProcessedStore(tmp_path, today=date(2026, 10, 21))
+    url = "https://hh.ru/vacancy/1"
+    store.record(
+        url=url,
+        title="Java-разработчик",
+        company="Ozon",
+        status="sent",
+        profile="Java Developer",
+        channel="hh",
+    )
+    store.record(
+        url=url,
+        title="Java-разработчик",
+        company="Ozon",
+        status="skipped",
+        profile="Team Lead",
+        channel="hh",
+    )
+
+    updated = store.invite_other_resume(
+        url=url, title="Java-разработчик", company="Ozon", profile="Team Lead"
+    )
+
+    assert updated == ["Java Developer"]
+    rows = {
+        row["profile"]: row
+        for row in json.loads(store.path.read_text(encoding="utf-8"))["vacancies"]
+    }
+    assert rows["Java Developer"]["status"] == "invite"
+    assert rows["Java Developer"]["reason"] == "По отклику пришло приглашение на интервью"
+    # Правка статуса не обработка вакансии: счётчик попыток не растёт.
+    assert rows["Java Developer"]["attempts"] == 1
+    assert rows["Team Lead"]["status"] == "skipped"
 
 
 def test_roll_to_switches_report_file(tmp_path: Path) -> None:

@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from .hh_search import profile_key, vacancy_keys
-from .models import STATUSES
+from .models import INVITE_REASON, STATUSES, STATUS_INVITE, STATUS_SENT
 
 DATE_FORMAT = "%Y-%m-%d"
 
@@ -124,6 +124,47 @@ class ProcessedStore:
         return found
 
 
+    def invite_other_resume(
+        self,
+        *,
+        url: str,
+        title: str,
+        company: str,
+        profile: str,
+    ) -> list[str]:
+        """Ставит `invite` записям той же вакансии, сделанным другими резюме.
+
+        Приглашение на собеседование приходит по отклику, поэтому меняются
+        только записи со статусом `sent` (переход `sent → invite`). Запись
+        текущего резюме не трогаем: её статус пишет вызывающий код.
+        Возвращает названия резюме, которым проставлен статус `invite`.
+        """
+        del title, company  # вакансию опознаём по ссылке: она есть в записи
+        current = profile_key(profile)
+        updated: list[str] = []
+        seen: set[int] = set()
+        for _path, record in list(self._records.values()):
+            if id(record) in seen:
+                continue
+            seen.add(id(record))
+            if str(record.get("status", "")) != STATUS_SENT:
+                continue
+            if not _same_url(record, url):
+                continue
+            other = str(record.get("profile", ""))
+            if not other or profile_key(other) == current:
+                continue
+            self._update(
+                record,
+                status=STATUS_INVITE,
+                reason=INVITE_REASON,
+                profile=other,
+                channel=str(record.get("channel", "")),
+                count_attempt=False,
+            )
+            updated.append(other)
+        return updated
+
     def record(
         self,
         *,
@@ -183,12 +224,14 @@ class ProcessedStore:
         reason: str,
         profile: str | None = None,
         channel: str = "",
+        count_attempt: bool = True,
     ) -> bool:
         """Обновляет запись о вакансии: повтор увеличивает счётчик попыток.
 
         По ключу `(url, profile)` должна остаться одна запись. Поэтому вакансия
         удаляется из всех дневных файлов, а обновлённая запись попадает в отчёт
-        сегодняшней даты.
+        сегодняшней даты. `count_attempt=False` — правка статуса без обработки
+        вакансии: счётчик попыток не растёт.
         """
         now = _now()
         if channel in ("habr", "external"):
@@ -201,7 +244,8 @@ class ProcessedStore:
             item.get("created_at") or item.get("updated_at") or now
         )
         item["status"] = status
-        item["attempts"] = int(item.get("attempts", 1)) + 1
+        if count_attempt:
+            item["attempts"] = int(item.get("attempts", 1)) + 1
         item["updated_at"] = now
         if channel:
             item["channel"] = channel
@@ -256,6 +300,11 @@ def _file_date(path: Path) -> date | None:
         return datetime.strptime(path.stem, DATE_FORMAT).date()
     except ValueError:
         return None
+
+
+def _same_url(row: dict[str, Any], url: str) -> bool:
+    """Запись относится к этой вакансии: ссылки совпадают."""
+    return bool(url) and str(row.get("url", "")) == url
 
 
 def _same_vacancy(row: dict[str, Any], item: dict[str, Any]) -> bool:
