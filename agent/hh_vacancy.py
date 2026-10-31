@@ -519,8 +519,10 @@ def detect_page_blocker(page: Page) -> str | None:
     """
     if _has_exact_text(page, BLOCKED_TITLE):
         return PAGE_BLOCKED
-    if _has_exact_text(page, REJECTED_TITLE):
+    if _has_exact_text(page, REJECTED_TITLE) and not _has_other_resume_action(page):
         # Работодатель отказал по отклику: вакансия пройдена, статус rejected.
+        # Кнопка «Отклик другим резюме» означает, что отказ относится к другому
+        # резюме: текущим резюме ещё можно откликнуться.
         return PAGE_REJECTED
     if _has_exact_text(page, INVITED_TITLE):
         return PAGE_INVITED
@@ -606,6 +608,9 @@ def respond(
         return _result(STATUS_CAPTCHA)
 
     button = _find_action(page, RESPOND_BUTTON_SELECTORS, RESPOND_RE)
+    if button is None:
+        # Отклик другим резюме уже есть: hh.ru предлагает откликнуться текущим.
+        button = _find_action(page, OTHER_RESUME_SELECTORS, OTHER_RESUME_RE)
     if button is None:
         if _is_already_responded(page):
             return _result(STATUS_ALREADY_RESPONDED)
@@ -823,8 +828,11 @@ def _wait_for_response_result(
 
         scope = _response_scope(page)
         # Сначала проверяем явный успех: заголовки описания вакансии не должны
-        # давать ложное срабатывание на словах «тест»/«анкета».
-        if _has_success(page):
+        # давать ложное срабатывание на словах «тест»/«анкета». Старый текст об
+        # отклике другого резюме подтверждением не считается, пока открыта форма:
+        # ждём её закрытия до конца таймаута, hh.ru отвечает медленно.
+        stale = _has_other_resume_action(page) and not _modal_hidden(page)
+        if _has_success(page) and not stale:
             return STATUS_SENT
         blocker = detect_response_blocker(scope)
         if blocker:
@@ -937,7 +945,48 @@ def response_state(page: Page) -> dict[str, object]:
 
 
 def _is_already_responded(page: Page) -> bool:
+    """Отклик уже отправлен именно текущим резюме.
+
+    Если hh.ru предлагает «Отклик другим резюме», отклик другого профиля не
+    делает вакансию пройденной: текущим резюме ещё можно откликнуться.
+    """
+    if _has_other_resume_action(page):
+        return False
     return _has_success(page)
+
+
+def _has_other_resume_action(page: Page) -> bool:
+    """Видна ли кнопка «Отклик другим резюме».
+
+    Кнопка появляется, когда отклик уже отправлен другим резюме. Текст
+    проверяется отдельно: data-qa на hh.ru меняется, подпись стабильнее.
+    """
+    for selector in OTHER_RESUME_SELECTORS:
+        try:
+            items = page.locator(selector)
+            total = min(items.count(), 5)
+        except (PlaywrightError, AttributeError):
+            continue
+        for index in range(total):
+            item = items.nth(index)
+            if not _is_visible(item):
+                continue
+            try:
+                text = " ".join((item.inner_text() or "").split())
+            except (PlaywrightError, AttributeError):
+                continue
+            if OTHER_RESUME_RE.match(text):
+                return True
+    for role in ("button", "link"):
+        try:
+            items = page.get_by_role(role, name=OTHER_RESUME_RE)
+            total = min(items.count(), 10)
+        except (PlaywrightError, AttributeError):
+            continue
+        for index in range(total):
+            if _is_visible(items.nth(index)):
+                return True
+    return False
 
 
 def _find_action(
