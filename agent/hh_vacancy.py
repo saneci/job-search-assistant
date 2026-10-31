@@ -12,7 +12,7 @@ from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import Locator, Page, TimeoutError as PlaywrightTimeoutError
 
 from .browser import NAVIGATION_TIMEOUT_MS, CaptchaError, PageLoadError, detect_captcha
-from .models import OTHER_RESUME_REASON, VacancyCard, VacancyDetails
+from .models import REJECTED_REASON, VacancyCard, VacancyDetails
 
 TITLE_SELECTORS = ("h1[data-qa='vacancy-title']", "h1.bloko-header-1", "h1")
 DESCRIPTION_SELECTORS = (
@@ -109,8 +109,8 @@ DIRECT_TEXT_SCRIPT = (
 
 STATUS_SENT = "sent"
 STATUS_ALREADY_RESPONDED = "already_responded"
-# Отклик по вакансии уже отправлен другим резюме: повторно не откликаемся.
-STATUS_OTHER_RESUME = "other_resume"
+# Текущего резюме нет в форме отклика: им уже откликались, пришёл отказ.
+STATUS_REJECTED = "rejected"
 STATUS_CAPTCHA = "captcha"
 STATUS_NO_FORM = "no_form"
 STATUS_UNKNOWN = "unknown"
@@ -118,11 +118,16 @@ STATUS_UNKNOWN = "unknown"
 # Состояния самой страницы вакансии. Это не «блокеры» теста/анкеты: такие
 # вакансии не откладываем, а помечаем пройденными (skipped или rejected).
 PAGE_BLOCKED = "blocked"
+# Экран «Вам недоступна эта вакансия»: резюме заблокировано или доступ закрыт.
+PAGE_UNAVAILABLE = "unavailable"
 PAGE_INVITED = "invited"
 PAGE_REJECTED = "rejected"
 # Кнопка «Отклик другим резюме»: по вакансии уже есть отклик другого резюме.
 PAGE_OTHER_RESUME = "other_resume"
+# Состояния страницы, при которых вакансию пропускаем сразу после открытия.
+PAGE_STATES = (PAGE_BLOCKED, PAGE_UNAVAILABLE, PAGE_INVITED, PAGE_REJECTED, PAGE_OTHER_RESUME)
 BLOCKED_TITLE = "У вас нет доступа к этой вакансии"
+UNAVAILABLE_TITLE = "Вам недоступна эта вакансия"
 INVITED_TITLE = "Вас пригласили"
 REJECTED_TITLE = "Вам отказали"
 
@@ -185,6 +190,12 @@ SUCCESS_TEXTS = (
 
 RESPONSE_UI_WAIT_SECONDS = 10
 RESPONSE_RESULT_WAIT_SECONDS = 15
+
+# Сколько ждём готовность страницы вакансии: заголовок или экран-состояние.
+PAGE_READY_WAIT_SECONDS = 15
+# Как часто проверяем готовность: браузер отвечает быстро, пауза нужна, чтобы
+# не крутить проверки вхолостую.
+PAGE_READY_POLL_MS = 500
 
 # После вставки письма hh.ru перерисовывает форму: если кликнуть «Откликнуться»
 # сразу, React ещё не применил текст, и нажатие уходит в пустоту.
@@ -473,10 +484,12 @@ def open_vacancy(page: Page, card: VacancyCard) -> VacancyDetails:
     if detect_captcha(page):
         raise CaptchaError(f"hh.ru показал капчу на странице вакансии: {card.url}")
 
-    try:
-        page.wait_for_selector(", ".join(TITLE_SELECTORS), timeout=15000)
-    except PlaywrightTimeoutError:
-        pass
+    # Ждём готовность страницы: заголовок вакансии или экран-состояние (нет
+    # доступа, приглашение, чужой отклик). Что появилось раньше, то и решает:
+    # пропуск не простаивает в таймауте.
+    state = _wait_for_page_ready(page)
+    if state is not None:
+        return _page_state_details(card, state)
 
     title = _first_text(page, TITLE_SELECTORS) or card.title
     company = _first_text(page, COMPANY_SELECTORS) or card.company
@@ -486,17 +499,10 @@ def open_vacancy(page: Page, card: VacancyCard) -> VacancyDetails:
 
     company_name = company.splitlines()[0].strip() if company else ""
     blocker = detect_page_blocker(page)
-    if blocker in (PAGE_BLOCKED, PAGE_INVITED, PAGE_REJECTED, PAGE_OTHER_RESUME):
+    if blocker in PAGE_STATES:
         # На такой странице нет ни описания, ни формы отклика: вакансию
         # пропускаем сразу, без разбора и без обращения к LLM.
-        return VacancyDetails(
-            url=card.url,
-            title=title,
-            company=company_name,
-            salary=salary,
-            description="",
-            blocker=blocker,
-        )
+        return _page_state_details(card, blocker)
 
     description = _first_text(page, DESCRIPTION_SELECTORS)
     if not description:
@@ -513,32 +519,85 @@ def open_vacancy(page: Page, card: VacancyCard) -> VacancyDetails:
     )
 
 
+def _page_state_details(card: VacancyCard, state: str) -> VacancyDetails:
+    """Запись вакансии, которую надо сразу пропустить: данных страницы не читаем.
+
+    На экране состояния нет ни названия вакансии, ни описания, поэтому в отчёт
+    идут название и компания из карточки выдачи.
+    """
+    return VacancyDetails(
+        url=card.url,
+        title=card.title,
+        company=card.company,
+        salary=card.salary,
+        description="",
+        blocker=state,
+    )
+
+
 def detect_page_blocker(page: Page) -> str | None:
     """Ищет на странице вакансии повод не откликаться автоматически.
 
     Кроме теста, анкеты и внешней формы ловим состояния самой страницы:
-    вакансия больше недоступна («У вас нет доступа к этой вакансии»),
-    работодатель уже пригласил откликнуться («Вас пригласили») и отклик по
-    вакансии уже отправлен другим резюме (кнопка «Отклик другим резюме»).
-    Это не отложенные вакансии, а пройденные: отклик там не нужен.
+    вакансия больше недоступна («У вас нет доступа к этой вакансии»,
+    «Вам недоступна эта вакансия»), работодатель уже пригласил откликнуться
+    («Вас пригласили») и отклик по вакансии уже отправлен другим резюме
+    (кнопка «Отклик другим резюме»). Это не отложенные вакансии, а пройденные:
+    отклик там не нужен.
     """
-    if _has_exact_text(page, BLOCKED_TITLE):
-        return PAGE_BLOCKED
-    if _has_exact_text(page, INVITED_TITLE):
-        return PAGE_INVITED
-    if _has_other_resume_action(page):
-        # Отклик по вакансии уже есть у другого резюме: повторно им не
-        # откликаемся и вакансию пропускаем.
-        return PAGE_OTHER_RESUME
-    if _has_exact_text(page, REJECTED_TITLE):
-        # Работодатель отказал по отклику текущего резюме: статус rejected.
-        return PAGE_REJECTED
+    state = _detect_page_state(page)
+    if state is not None:
+        return state
     if _has_selector(page, QUESTIONNAIRE_SELECTORS) or _has_role_name(page, QUESTIONNAIRE_ACTION_RE):
         return "questionnaire"
     if _has_selector(page, TEST_SELECTORS) or _has_role_name(page, TEST_ACTION_RE):
         return "test"
     if _has_role_name(page, EXTERNAL_ACTION_RE):
         return "external_form"
+    return None
+
+
+def _wait_for_page_ready(page: Page) -> str | None:
+    """Ждёт заголовок вакансии или экран-состояние — что появится раньше.
+
+    Возвращает состояние страницы, при котором отклик не нужен, иначе None.
+    Заголовок обычно появляется сразу, а приглашение и отказ могут отрисоваться
+    позже: проверяем оба признака в одном ожидании, чтобы вакансия с готовым
+    приглашением или отказом пропускалась сразу, а не после таймаута.
+    """
+    deadline = time.monotonic() + PAGE_READY_WAIT_SECONDS
+    while True:
+        state = _detect_page_state(page)
+        if state is not None:
+            return state
+        if _has_selector(page, TITLE_SELECTORS):
+            return None
+        if time.monotonic() >= deadline:
+            return None
+        page.wait_for_timeout(PAGE_READY_POLL_MS)
+
+
+def _detect_page_state(page: Page) -> str | None:
+    """Состояние самой страницы, при котором отклик уже не нужен."""
+    if _has_exact_text(page, BLOCKED_TITLE):
+        return PAGE_BLOCKED
+    if _has_text(page, UNAVAILABLE_TITLE):
+        # Резюме заблокировано или вакансия закрыта для просмотра.
+        return PAGE_UNAVAILABLE
+    if _has_text_outside_description(page, INVITED_TITLE):
+        return PAGE_INVITED
+    other_resume = _has_other_resume_action(page)
+    rejected = _has_text_outside_description(page, REJECTED_TITLE)
+    if rejected and other_resume:
+        # «Вам отказали» вместе с «Отклик другим резюме»: чей это отказ, решает
+        # список резюме в форме отклика, поэтому вакансию не пропускаем.
+        return None
+    if other_resume:
+        # Отклик по вакансии уже есть у другого резюме, отказа нет: пропускаем.
+        return PAGE_OTHER_RESUME
+    if rejected:
+        # Работодатель отказал по отклику текущего резюме: статус rejected.
+        return PAGE_REJECTED
     return None
 
 
@@ -615,10 +674,13 @@ def respond(
         return _result(STATUS_CAPTCHA)
 
     button = _find_action(page, RESPOND_BUTTON_SELECTORS, RESPOND_RE)
+    other_resume = False
     if button is None:
-        if _has_other_resume_action(page):
-            # Отклик по вакансии уже отправлен другим резюме: повторно не откликаемся.
-            return _result(STATUS_OTHER_RESUME, reason=OTHER_RESUME_REASON)
+        # Кнопка «Отклик другим резюме»: по вакансии уже есть отклик другого
+        # резюме. Открываем форму и смотрим список резюме — есть ли текущее.
+        button = _find_action(page, OTHER_RESUME_SELECTORS, OTHER_RESUME_RE)
+        other_resume = button is not None
+    if button is None:
         if _is_already_responded(page):
             return _result(STATUS_ALREADY_RESPONDED)
         return _result(STATUS_NO_FORM, page)
@@ -649,7 +711,15 @@ def respond(
 
     # Резюме выбираем до письма: hh.ru привязывает отклик к выбранному резюме.
     if _resume_name:
-        select_resume(scope, _resume_name)
+        try:
+            select_resume(scope, _resume_name)
+        except ResumeNotFoundError:
+            if not other_resume:
+                raise
+            # Форму открыли кнопкой «Отклик другим резюме», а текущего резюме в
+            # списке нет: им уже откликались, значит по нему пришёл отказ.
+            _dismiss(page)
+            return _result(STATUS_REJECTED, reason=REJECTED_REASON)
 
     # Письмо вставляем, если форма позволяет (по ТЗ).
     if _fill_letter(page, scope, letter):
@@ -1052,6 +1122,45 @@ def _has_exact_text(scope: Locator | Page, text: str) -> bool:
     """Есть ли видимый элемент с точно таким текстом (без учёта соседних)."""
     try:
         locator = scope.get_by_text(text, exact=True)
+        count = min(locator.count(), 10)
+    except PlaywrightError:
+        return False
+    for index in range(count):
+        if _is_visible(locator.nth(index)):
+            return True
+    return False
+
+
+def _has_text_outside_description(page: Page, text: str) -> bool:
+    """Есть ли видимая фраза вне описания вакансии.
+
+    Описание может содержать «Вам отказали» или «Вас пригласили» как часть
+    текста вакансии, поэтому его не учитываем: состояние ищем только в
+    интерфейсе страницы.
+    """
+    try:
+        locator = page.get_by_text(text)
+        count = min(locator.count(), 10)
+    except PlaywrightError:
+        return False
+    for index in range(count):
+        item = locator.nth(index)
+        if not _is_visible(item):
+            continue
+        if _inside_description(item):
+            continue
+        return True
+    return False
+
+
+def _has_text(scope: Locator | Page, text: str) -> bool:
+    """Есть ли видимый элемент, в тексте которого встречается эта фраза.
+
+    hh.ru может показать заголовок вместе с пояснением в одном блоке, поэтому
+    экран «Вам недоступна эта вакансия» ищем по вхождению, а не по равенству.
+    """
+    try:
+        locator = scope.get_by_text(text)
         count = min(locator.count(), 10)
     except PlaywrightError:
         return False

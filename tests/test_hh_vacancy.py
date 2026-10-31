@@ -13,6 +13,7 @@ from agent.hh_vacancy import (
     detect_page_blocker,
     detect_response_blocker,
     match_resume,
+    open_vacancy,
     response_notice,
     response_state,
     resume_name,
@@ -20,6 +21,7 @@ from agent.hh_vacancy import (
     select_resume,
     set_resume_name,
 )
+from agent.models import VacancyCard
 
 
 class FakeElement:
@@ -157,9 +159,25 @@ class FakeTextPage:
     def __init__(self, mapping: dict[str, list[FakeElement]] | None = None) -> None:
         self.url = "https://hh.ru/vacancy/1"
         self._mapping = mapping or {}
+        self.selector_waits = 0
+
+    def goto(self, url: str, **kwargs: Any) -> None:
+        return None
+
+    def wait_for_timeout(self, milliseconds: int) -> None:
+        return None
+
+    def wait_for_selector(self, selector: str, timeout: int | None = None) -> None:
+        self.selector_waits += 1
 
     def get_by_text(self, text: str, exact: bool = False) -> FakeTextList:
-        return FakeTextList(self._mapping.get(text, []))
+        if exact:
+            return FakeTextList(self._mapping.get(text, []))
+        found: list[FakeElement] = []
+        for label, items in self._mapping.items():
+            if text in label:
+                found.extend(items)
+        return FakeTextList(found)
 
     def get_by_role(self, role: str, name: Any = None) -> FakeTextList:
         return FakeTextList([])
@@ -175,6 +193,67 @@ def test_detects_blocked_vacancy() -> None:
     )
 
     assert detect_page_blocker(page) == "blocked"  # type: ignore[arg-type]
+
+
+def test_detects_unavailable_vacancy() -> None:
+    """«Вам недоступна эта вакансия» — резюме заблокировано, вакансию пропускаем."""
+    page = FakeTextPage(
+        {"Вам недоступна эта вакансия": [FakeElement("Вам недоступна эта вакансия")]}
+    )
+
+    assert detect_page_blocker(page) == "unavailable"  # type: ignore[arg-type]
+
+
+def test_detects_unavailable_vacancy_in_explanation_block() -> None:
+    """Заголовок вместе с пояснением в одном блоке — тоже недоступная вакансия."""
+    text = "Вам недоступна эта вакансия. Войдите как пользователь, у которого есть доступ."
+    page = FakeTextPage({text: [FakeElement(text)]})
+
+    assert detect_page_blocker(page) == "unavailable"  # type: ignore[arg-type]
+
+
+def test_open_vacancy_skips_state_before_waiting_title(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Страницу-состояние пропускаем до ожидания заголовка: не тратим таймаут."""
+    page = FakeTextPage(
+        {"Вам недоступна эта вакансия": [FakeElement("Вам недоступна эта вакансия")]}
+    )
+    card = VacancyCard(title="Java", company="Ozon", url="https://hh.ru/vacancy/1")
+    monkeypatch.setattr("agent.hh_vacancy.detect_captcha", lambda page: False)
+
+    details = open_vacancy(page, card)  # type: ignore[arg-type]
+
+    assert details.blocker == "unavailable"
+    # Данные для отчёта берутся из карточки: на экране состояния их нет.
+    assert details.title == "Java"
+    assert details.company == "Ozon"
+    assert details.description == ""
+    assert page.selector_waits == 0
+
+
+def test_rejected_text_in_description_is_ignored() -> None:
+    """«Вам отказали» внутри описания вакансии — не состояние страницы."""
+    text = "Если Вам отказали, попробуйте откликнуться другим резюме."
+    page = FakeTextPage({text: [FakeElement(text, in_description=True)]})
+
+    assert detect_page_blocker(page) is None  # type: ignore[arg-type]
+
+
+def test_rejected_badge_with_extra_words_is_detected() -> None:
+    """Отказ, отрисованный вместе с датой в одном блоке, — тоже отказ."""
+    text = "Вам отказали 12 октября"
+    page = FakeTextPage({text: [FakeElement(text)]})
+
+    assert detect_page_blocker(page) == "rejected"  # type: ignore[arg-type]
+
+
+def test_invited_text_in_description_is_ignored() -> None:
+    """«Вас пригласили» внутри описания вакансии — не приглашение."""
+    text = "Если Вас пригласили на собеседование, напишите нам."
+    page = FakeTextPage({text: [FakeElement(text, in_description=True)]})
+
+    assert detect_page_blocker(page) is None  # type: ignore[arg-type]
 
 
 def test_detects_rejected_vacancy() -> None:

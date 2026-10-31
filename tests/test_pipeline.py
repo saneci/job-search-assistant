@@ -9,10 +9,21 @@ from pathlib import Path
 import pytest
 
 from agent.config import AppConfig, NotificationConfig, load_config
-from agent.hh_vacancy import ResumeNotFoundError
+from agent.hh_vacancy import (
+    ResumeNotFoundError,
+    ResponseResult,
+    STATUS_REJECTED,
+    STATUS_SENT,
+)
 from agent.llm import DecisionResult, GenerationResult
 from agent.logging_setup import RunLogger
-from agent.models import SentVacancy, SkippedVacancy, VacancyCard, VacancyDetails
+from agent.models import (
+    REJECTED_REASON,
+    SentVacancy,
+    SkippedVacancy,
+    VacancyCard,
+    VacancyDetails,
+)
 from agent.pipeline import (
     OUTCOME_ERROR,
     OUTCOME_EXCLUDED,
@@ -278,7 +289,13 @@ def test_invited_vacancy_is_skipped_without_queue(tmp_path: Path, monkeypatch) -
     )
     logger.close()
 
-    assert set(PAGE_STATUS_REASONS) == {"blocked", "invited", "rejected", "other_resume"}
+    assert set(PAGE_STATUS_REASONS) == {
+        "blocked",
+        "unavailable",
+        "invited",
+        "rejected",
+        "other_resume",
+    }
     assert [item.reason for item in stats.skipped] == [
         "Уже получено приглашение на интервью по другому резюме"
     ]
@@ -332,6 +349,109 @@ def test_invited_vacancy_marks_other_resume_invite(tmp_path: Path, monkeypatch) 
     assert [item.reason for item in stats.skipped] == [
         "Уже получено приглашение на интервью по другому резюме"
     ]
+
+
+def test_unavailable_vacancy_is_skipped_with_reason(tmp_path: Path, monkeypatch) -> None:
+    """«Вам недоступна эта вакансия» → skipped, updated_at — момент обработки."""
+    config = with_resume(make_config(tmp_path), "Team Lead")
+    card = VacancyCard(title="Java", company="Ozon", url="https://hh.ru/vacancy/13")
+    details = VacancyDetails(
+        url=card.url,
+        title=card.title,
+        company=card.company,
+        salary="",
+        description="",
+        blocker="unavailable",
+    )
+    report = tmp_path / "report"
+    report.mkdir()
+    (report / "2026-10-21.json").write_text(
+        json.dumps(
+            {
+                "date": "2026-10-21",
+                "updated_at": "2026-10-21T09:00:00+03:00",
+                "summary": {},
+                "vacancies": [
+                    {
+                        "url": card.url,
+                        "title": card.title,
+                        "company": card.company,
+                        "status": "queued",
+                        "attempts": 1,
+                        "created_at": "2026-10-21T09:00:00+03:00",
+                        "updated_at": "2026-10-21T09:00:00+03:00",
+                        "reason": "нужен ручной отклик",
+                        "profile": "Team Lead",
+                        "channel": "hh",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    store = ProcessedStore(report, today=date(2026, 10, 21))
+    store.load()
+    monkeypatch.setattr("agent.pipeline.open_vacancy", lambda page, vacancy: details)
+    stats = make_stats()
+    logger = RunLogger(tmp_path / "logs", run_id="unavailable")
+
+    _process_and_remember(
+        page=None,  # type: ignore[arg-type]
+        config=config,
+        profile=None,  # type: ignore[arg-type]
+        llm=None,  # type: ignore[arg-type]
+        stats=stats,
+        logger=logger,
+        processed=store,
+        card=card,
+        channel=channel_for(config),
+    )
+    logger.close()
+
+    row = json.loads(store.path.read_text(encoding="utf-8"))["vacancies"][0]
+    assert row["status"] == "skipped"
+    assert row["reason"] == "Вакансия недоступна или заблокирована"
+    # created_at не меняется, updated_at — время последней обработки.
+    assert row["created_at"] == "2026-10-21T09:00:00+03:00"
+    assert row["updated_at"] != "2026-10-21T09:00:00+03:00"
+    assert row["attempts"] == 2
+    assert [item.reason for item in stats.skipped] == ["Вакансия недоступна или заблокирована"]
+
+
+def test_skipped_page_state_does_not_wait_pause(tmp_path: Path, monkeypatch) -> None:
+    """Пауза между действиями не тратится на вакансию, которую пропускаем сразу."""
+    config = make_config(tmp_path)
+    card = VacancyCard(title="Java", company="Ozon", url="https://hh.ru/vacancy/14")
+    details = VacancyDetails(
+        url=card.url,
+        title=card.title,
+        company=card.company,
+        salary="",
+        description="",
+        blocker="unavailable",
+    )
+    monkeypatch.setattr("agent.pipeline.open_vacancy", lambda page, vacancy: details)
+    pauses: list[str] = []
+    monkeypatch.setattr(
+        "agent.pipeline._pause", lambda config, logger, reason: pauses.append(reason)
+    )
+    stats = make_stats()
+    logger = RunLogger(tmp_path / "logs", run_id="skip-without-pause")
+
+    _process_vacancy(
+        page=None,  # type: ignore[arg-type]
+        config=config,
+        profile=None,  # type: ignore[arg-type]
+        llm=None,  # type: ignore[arg-type]
+        stats=stats,
+        logger=logger,
+        card=card,
+    )
+    logger.close()
+
+    assert pauses == []
+    assert [item.reason for item in stats.skipped] == ["Вакансия недоступна или заблокирована"]
 
 
 def test_rejected_vacancy_gets_own_status(tmp_path: Path, monkeypatch) -> None:
@@ -992,6 +1112,203 @@ def test_loop_chain_records_rejection(tmp_path: Path) -> None:
     assert records["summary"]["rejected"] == 1
     assert records["vacancies"][0]["status"] == "rejected"
     assert records["vacancies"][0]["reason"] == "По отклику пришёл отказ"
+
+
+def test_retry_does_not_wait_between_records(tmp_path: Path, monkeypatch) -> None:
+    """--retry не паузит между записями: темп задаёт пауза перед обращением к LLM."""
+    config = make_config(tmp_path)
+    store = ProcessedStore(tmp_path / "report", today=date.today())
+    store.record(url="https://hh.ru/vacancy/1", title="Java", company="Ozon", status="error")
+    store.record(url="https://hh.ru/vacancy/2", title="Go", company="VK", status="error")
+    logger = RunLogger(tmp_path / "logs", run_id="retry-no-pause")
+    stats = make_stats()
+    pauses: list[str] = []
+
+    def fake_process(page, config, profile, llm, stats, logger, card) -> None:
+        del page, config, profile, llm, stats, logger, card
+        return None
+
+    monkeypatch.setattr("agent.pipeline._process_vacancy", fake_process)
+    monkeypatch.setattr(
+        "agent.pipeline._pause", lambda config, logger, reason: pauses.append(reason)
+    )
+
+    _retry_vacancies(
+        _FakePage("https://hh.ru/vacancy/1"),
+        config,
+        Profile(text="Java", examples="", style_rules=""),
+        None,  # type: ignore[arg-type]
+        stats,
+        logger,
+        store,
+        ("error",),
+    )
+    logger.close()
+
+    assert stats.reviewed == 2
+    assert pauses == []
+
+
+def test_llm_skip_does_not_wait_pause(tmp_path: Path, monkeypatch) -> None:
+    """Вакансия не подошла по оценке LLM — паузы нет: ждём только перед откликом."""
+    config = make_config(tmp_path)
+    details = VacancyDetails(
+        url="https://hh.ru/vacancy/138836233",
+        title="Java-разработчик",
+        company="ППК",
+        salary="",
+        description="Java, Spring, PostgreSQL.",
+    )
+    monkeypatch.setattr("agent.pipeline.open_vacancy", lambda page, vacancy: details)
+    pauses: list[str] = []
+    monkeypatch.setattr(
+        "agent.pipeline._pause", lambda config, logger, reason: pauses.append(reason)
+    )
+
+    class FakeLLM:
+        def decide(self, profile, vacancy):
+            return DecisionResult(
+                fits=False,
+                probability=0.1,
+                threshold=0.8,
+                probabilities={"подходит": 0.1, "не подходит": 0.9},
+                chosen="не подходит",
+            )
+
+        def explain_rejection(self, profile, vacancy, probability, threshold):
+            del profile, vacancy, probability, threshold
+            return "не подходит"
+
+    stats = make_stats()
+    logger = RunLogger(tmp_path / "logs", run_id="llm-skip")
+    card = VacancyCard(title=details.title, company=details.company, url=details.url)
+
+    _process_vacancy(
+        _FakePage(details.url),
+        config,
+        Profile(text="Java", examples="", style_rules=""),
+        FakeLLM(),
+        stats,
+        logger,
+        card,
+    )
+    logger.close()
+
+    assert pauses == []
+    assert len(stats.skipped) == 1
+
+
+def test_pause_happens_before_response(tmp_path: Path, monkeypatch) -> None:
+    """Пауза выполняется перед отправкой отклика, а не перед оценкой LLM."""
+    config = make_config(tmp_path)
+    details = VacancyDetails(
+        url="https://hh.ru/vacancy/138836233",
+        title="Java-разработчик",
+        company="ППК",
+        salary="",
+        description="Java, Spring, PostgreSQL.",
+    )
+    monkeypatch.setattr("agent.pipeline.open_vacancy", lambda page, vacancy: details)
+    order: list[str] = []
+
+    class FakeLLM:
+        def decide(self, profile, vacancy):
+            return DecisionResult(
+                fits=True,
+                probability=0.95,
+                threshold=0.8,
+                probabilities={"подходит": 0.95, "не подходит": 0.05},
+                chosen="подходит",
+            )
+
+        def generate(self, profile, vacancy, max_length=1500, signature=""):
+            del profile, vacancy, max_length, signature
+            return GenerationResult(
+                verdict="подходит",
+                reason="ok",
+                cover_letter="Здравствуйте! Готов обсудить вакансию.",
+            )
+
+    def fake_respond(page, letter, captcha_waiter=None):
+        del page, letter, captcha_waiter
+        order.append("respond")
+        return ResponseResult(status=STATUS_SENT)
+
+    monkeypatch.setattr("agent.pipeline.respond", fake_respond)
+    monkeypatch.setattr(
+        "agent.pipeline._pause", lambda config, logger, reason: order.append(reason)
+    )
+    stats = make_stats()
+    logger = RunLogger(tmp_path / "logs", run_id="pause-before-respond")
+    card = VacancyCard(title=details.title, company=details.company, url=details.url)
+
+    _process_vacancy(
+        _FakePage(details.url),
+        config,
+        Profile(text="Java", examples="", style_rules=""),
+        FakeLLM(),
+        stats,
+        logger,
+        card,
+    )
+    logger.close()
+
+    assert order == ["перед отправкой отклика", "respond", "после отправки отклика"]
+
+
+def test_respond_rejected_marks_vacancy_rejected(tmp_path: Path, monkeypatch) -> None:
+    """Резюме уже откликалось (его нет в форме) — вакансия идёт со статусом rejected."""
+    config = make_config(tmp_path)
+    details = VacancyDetails(
+        url="https://hh.ru/vacancy/138836233",
+        title="Java-разработчик",
+        company="ППК",
+        salary="",
+        description="Java, Spring, PostgreSQL.",
+    )
+    monkeypatch.setattr("agent.pipeline.open_vacancy", lambda page, vacancy: details)
+
+    class FakeLLM:
+        def decide(self, profile, vacancy):
+            return DecisionResult(
+                fits=True,
+                probability=0.95,
+                threshold=0.8,
+                probabilities={"подходит": 0.95, "не подходит": 0.05},
+                chosen="подходит",
+            )
+
+        def generate(self, profile, vacancy, max_length=1500, signature=""):
+            del profile, vacancy, max_length, signature
+            return GenerationResult(
+                verdict="подходит",
+                reason="ok",
+                cover_letter="Здравствуйте! Готов обсудить вакансию.",
+            )
+
+    def fake_respond(page, letter, captcha_waiter=None):
+        del page, letter, captcha_waiter
+        return ResponseResult(status=STATUS_REJECTED, reason=REJECTED_REASON)
+
+    monkeypatch.setattr("agent.pipeline.respond", fake_respond)
+    monkeypatch.setattr("agent.pipeline._pause", lambda config, logger, reason: None)
+    stats = make_stats()
+    logger = RunLogger(tmp_path / "logs", run_id="respond-rejected")
+    card = VacancyCard(title=details.title, company=details.company, url=details.url)
+
+    _process_vacancy(
+        _FakePage(details.url),
+        config,
+        Profile(text="Java", examples="", style_rules=""),
+        FakeLLM(),
+        stats,
+        logger,
+        card,
+    )
+    logger.close()
+
+    assert stats.skipped == []
+    assert [item.reason for item in stats.rejected] == ["По отклику пришёл отказ"]
 
 
 def test_retry_statuses_take_config_or_explicit_value(tmp_path: Path) -> None:

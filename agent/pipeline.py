@@ -33,7 +33,7 @@ from .hh_vacancy import (
     STATUS_ALREADY_RESPONDED,
     STATUS_CAPTCHA,
     STATUS_NO_FORM,
-    STATUS_OTHER_RESUME,
+    STATUS_REJECTED,
     STATUS_SENT,
     STATUS_UNKNOWN,
     VacancyParseError,
@@ -49,6 +49,7 @@ from .models import (
     INVITED_OTHER_RESUME_REASON,
     OTHER_RESUME_REASON,
     REJECTED_REASON,
+    UNAVAILABLE_REASON,
     STATUS_ERROR as OUTCOME_ERROR,
     STATUS_EXCLUDED as OUTCOME_EXCLUDED,
     STATUS_QUEUED as OUTCOME_QUEUED,
@@ -171,6 +172,7 @@ def _letter_has_project_link(letter: str, links: tuple[str, ...]) -> bool:
 PAGE_STATUS_REASONS: dict[str, tuple[str, str]] = {
     "invited": (OUTCOME_SKIPPED, INVITED_OTHER_RESUME_REASON),
     "blocked": (OUTCOME_SKIPPED, "У вас нет доступа к этой вакансии"),
+    "unavailable": (OUTCOME_SKIPPED, UNAVAILABLE_REASON),
     "other_resume": (OUTCOME_SKIPPED, OTHER_RESUME_REASON),
     "rejected": (OUTCOME_REJECTED, REJECTED_REASON),
 }
@@ -720,7 +722,6 @@ def _retry_vacancies(
             channel,
         )
         _ensure_session_alive(page)
-        _pause(config, logger, "перед следующей вакансией из отчёта")
 
 
 def _process_and_remember(
@@ -871,8 +872,6 @@ def _process_vacancy(
     except (VacancyParseError, PageLoadError, PlaywrightError) as exc:
         _record_error(stats, logger, page, config, card, exc)
         return
-
-    _pause(config, logger, "после открытия вакансии")
 
     excluded_company = is_company_excluded(details.company, config.search.exclude_companies)
     if excluded_company:
@@ -1077,6 +1076,10 @@ def _process_vacancy(
         else:
             log.info("в письме не было приветствия, добавил «Здравствуйте!»")
 
+    # Пауза перед действием на сайте: только перед отправкой отклика. Вакансии,
+    # которые не подошли по оценке LLM, её не ждут.
+    _pause(config, logger, "перед отправкой отклика")
+
     captcha_waiter = _captcha_waiter(
         page, config, logger, details, site=channel.site_label
     )
@@ -1110,25 +1113,25 @@ def _process_vacancy(
         _pause(config, logger, "после отправки отклика")
         return
 
-    if status == STATUS_OTHER_RESUME:
-        # Отклик по вакансии уже есть у другого резюме: повторно не откликаемся.
-        # В файл дня — skipped с причиной, лимит откликов не тратим.
+    if status == STATUS_REJECTED:
+        # Текущего резюме нет в форме отклика: им уже откликались, значит по
+        # вакансии пришёл отказ. Лимит откликов не тратим.
         log.event(
-            "already_responded_other_resume",
+            "already_rejected",
             url=details.url,
-            status=OUTCOME_SKIPPED,
-            reason=OTHER_RESUME_REASON,
+            status=OUTCOME_REJECTED,
+            reason=REJECTED_REASON,
         )
-        stats.skipped.append(
+        stats.rejected.append(
             SkippedVacancy(
                 title=details.title,
                 company=details.company,
                 url=details.url,
-                reason=OTHER_RESUME_REASON,
+                reason=REJECTED_REASON,
                 probability=decision.probability,
             )
         )
-        log.info("пропуск: по вакансии уже есть отклик другим резюме")
+        log.info("по вакансии уже есть отказ по текущему резюме, вакансия пройдена")
         return
 
     if status == STATUS_ALREADY_RESPONDED:
