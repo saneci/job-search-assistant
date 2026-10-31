@@ -247,3 +247,101 @@ def test_custom_list_without_name_raises() -> None:
 
     assert error.value.resume == "Team Lead"
     assert error.value.options == ("Java Developer",)
+
+
+class HiddenFirstScope:
+    """Перед видимой карточкой резюме стоит скрытая заготовка hh.ru."""
+
+    def __init__(self, options: list[str]) -> None:
+        self.opened = False
+        self.clicked: list[str] = []
+        self._options = [
+            FakeOption(text, on_click=lambda text=text: self.clicked.append(text))
+            for text in options
+        ]
+        self._hidden = FakeOption("", visible=False)
+        self._card = FakeOption("Java Developer", on_click=self._open)
+
+    def _open(self) -> None:
+        self.opened = True
+
+    def locator(self, selector: str) -> FakeList:
+        if selector == "[data-qa*='resume']":
+            return FakeList([self._hidden, self._card])
+        if selector == "[role='option']":
+            return FakeList(self._options if self.opened else [])
+        return FakeList([])
+
+
+class PortalPage:
+    """Портал списка: опции лежат в body, а не внутри модалки."""
+
+    def __init__(self, owner: "PortalScope") -> None:
+        self._owner = owner
+
+    def locator(self, selector: str) -> FakeList:
+        if selector == "[role='option']":
+            return FakeList(self._owner.options if self._owner.opened else [])
+        return FakeList([])
+
+
+class PortalScope:
+    """Модалка с карточкой, а список опций — в портале страницы (вне модалки)."""
+
+    def __init__(self, options: list[str]) -> None:
+        self.opened = False
+        self.options = [
+            FakeOption(text, on_click=lambda text=text: self._clicked.append(text))
+            for text in options
+        ]
+        self._clicked: list[str] = []
+        self._card = FakeOption("Java Developer", on_click=self._open)
+        self.page = PortalPage(self)
+
+    @property
+    def clicked(self) -> list[str]:
+        return self._clicked
+
+    def _open(self) -> None:
+        self.opened = True
+
+    def locator(self, selector: str) -> FakeList:
+        if selector == "[data-qa='resume-title']":
+            return FakeList([self._card])
+        return FakeList([])
+
+
+def test_invisible_first_match_does_not_block_trigger() -> None:
+    """Скрытая заготовка перед карточкой резюме не мешает открыть список."""
+    scope = HiddenFirstScope(["Java Developer", "Team Lead"])
+
+    select_resume(scope, "Team Lead")  # type: ignore[arg-type]
+
+    assert scope.opened is True
+    assert scope.clicked == ["Team Lead"]
+
+
+def test_portal_options_outside_modal_are_selected() -> None:
+    """Опции в портале страницы находятся, хотя внутри модалки их нет."""
+    scope = PortalScope(["Java Developer", "Team Lead"])
+
+    assert resume_options(scope) == []  # type: ignore[arg-type]
+
+    select_resume(scope, "Team Lead")  # type: ignore[arg-type]
+
+    assert scope.clicked == ["Team Lead"]
+
+
+def test_response_scope_prefers_modal_dialog() -> None:
+    """Модалка отклика определяется по aria-modal, а не по первому dialog."""
+    plain = FakeOption("Посторонний диалог")
+    modal = FakeOption("Отклик на вакансию")
+    page = FakeScope(
+        {
+            "[role='dialog']": [plain, modal],
+            "[role='dialog'][aria-modal='true']": [modal],
+        }
+    )
+
+    assert hh_vacancy._response_scope(page) is modal  # type: ignore[arg-type]
+
