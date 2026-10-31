@@ -46,7 +46,11 @@ LETTER_TEXTAREA_SELECTORS = (
     "textarea[name='letter']",
     "textarea",
 )
-MODAL_SELECTORS = ("[data-qa='modal-content']", "[role='dialog']")
+MODAL_SELECTORS = (
+    "[data-qa='modal-content']",
+    "[role='dialog'][aria-modal='true']",
+    "[role='dialog']",
+)
 
 # Информационные сообщения формы отклика. hh.ru объясняет в них, почему отклик
 # нельзя отправить (например, резюме скрыто от работодателей).
@@ -119,6 +123,13 @@ INVITED_TITLE = "Вас пригласили"
 REJECTED_TITLE = "Вам отказали"
 
 RESPOND_RE = re.compile(r"^\s*откликнуться\s*$", re.IGNORECASE)
+# Кнопка «Отклик другим резюме»: отклик другим профилем уже есть, текущим — ещё нет.
+OTHER_RESUME_RE = re.compile(r"^\s*отклик другим резюме\s*$", re.IGNORECASE)
+OTHER_RESUME_SELECTORS = (
+    "[data-qa='vacancy-response-link-other-resume']",
+    "[data-qa*='other-resume']",
+    "[data-qa*='different-resume']",
+)
 LETTER_TOGGLE_RE = re.compile(r"добавить сопроводительное", re.IGNORECASE)
 TEST_ACTION_RE = re.compile(
     r"пройти тест|начать тест|пройти тестирование|запустить тест", re.IGNORECASE
@@ -178,6 +189,7 @@ LETTER_SETTLE_MS = 1000
 # Выпадающий список резюме в форме отклика: нативный select или кастомный список.
 # Порядок важен: сначала точные признаки, затем общий data-qa с «resume».
 RESUME_TRIGGER_SELECTORS = (
+    "[data-qa='resume-title']",
     "[data-qa*='select-resume']",
     "[data-qa*='resume-select']",
     "button[data-qa*='resume']",
@@ -199,6 +211,8 @@ RESUME_OPTION_SELECTORS = (
 # Сколько ждём появления опций после открытия кастомного списка.
 RESUME_OPTIONS_WAIT_MS = 1000
 RESUME_OPTIONS_POLL_MS = 100
+# Сколько элементов одного селектора просматриваем при поиске видимого.
+VISIBLE_SCAN_LIMIT = 20
 
 # Резюме выбирается внутри модалки, поэтому имя задаёт канал на запуск:
 # сигнатура respond остаётся прежней, а повтор с другим резюме создаёт новый канал.
@@ -289,10 +303,23 @@ def _native_resume_select(
     return fallback if fallback is not None else (None, [])
 
 
-def _visible_resume_options(scope: Locator | Page) -> list[str]:
-    """Видимые опции кастомного списка резюме."""
+def _resume_roots(scope: Locator | Page) -> list[Locator | Page]:
+    """Где искать элементы списка резюме: форма отклика и страница.
+
+    hh.ru рисует попап списка в портале `[data-qa='drop-base']` прямо в body,
+    поэтому внутри модалки опций нет: после формы смотрим всю страницу.
+    """
+    roots: list[Locator | Page] = [scope]
+    page = getattr(scope, "page", None)
+    if page is not None and page is not scope:
+        roots.append(page)
+    return roots
+
+
+def _option_texts_in_root(root: Locator | Page) -> list[str]:
+    """Видимые названия опций одного корня."""
     for selector in RESUME_OPTION_SELECTORS:
-        locator = scope.locator(selector)
+        locator = root.locator(selector)
         try:
             total = min(locator.count(), 50)
         except PlaywrightError:
@@ -313,6 +340,15 @@ def _visible_resume_options(scope: Locator | Page) -> list[str]:
     return []
 
 
+def _visible_resume_options(scope: Locator | Page) -> list[str]:
+    """Видимые опции кастомного списка резюме: форма и портал страницы."""
+    for root in _resume_roots(scope):
+        texts = _option_texts_in_root(root)
+        if texts:
+            return texts
+    return []
+
+
 def _wait_for_resume_options(scope: Locator | Page) -> list[str]:
     """Ждёт опции после открытия кастомного списка: анимация и подгрузка."""
     deadline = time.monotonic() + RESUME_OPTIONS_WAIT_MS / 1000
@@ -326,8 +362,17 @@ def _wait_for_resume_options(scope: Locator | Page) -> list[str]:
 def _find_resume_option(scope: Locator | Page, text: str) -> Locator | None:
     """Видимая опция с нужным названием: регистр и пробелы не важны."""
     wanted = _resume_words(text)
+    for root in _resume_roots(scope):
+        option = _find_option_in_root(root, wanted)
+        if option is not None:
+            return option
+    return None
+
+
+def _find_option_in_root(root: Locator | Page, wanted: str) -> Locator | None:
+    """Опция с нужным названием в одном корне."""
     for selector in RESUME_OPTION_SELECTORS:
-        locator = scope.locator(selector)
+        locator = root.locator(selector)
         try:
             total = min(locator.count(), 50)
         except PlaywrightError:
@@ -915,12 +960,24 @@ def _find_action(
 
 
 def _first_visible(scope: Locator | Page, selectors: Sequence[str]) -> Locator | None:
+    """Первый видимый элемент по селекторам.
+
+    Перебираем все совпадения: hh.ru держит перед нужным элементом скрытые
+    заготовки (например, `hidden-resume-warning`), и `.first` давал промах.
+    """
     for selector in selectors:
         locator = scope.locator(selector)
-        # Заглушки в тестах могут не поддерживать `.first`: тогда смотрим сам список.
-        first = getattr(locator, "first", locator)
-        if _is_visible(first):
-            return first
+        try:
+            total = min(locator.count(), VISIBLE_SCAN_LIMIT)
+        except (PlaywrightError, AttributeError):
+            continue
+        for index in range(total):
+            try:
+                item = locator.nth(index)
+            except (PlaywrightError, AttributeError):
+                break
+            if _is_visible(item):
+                return item
     return None
 
 
