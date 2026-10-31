@@ -102,6 +102,18 @@ def test_metrics_api(client: TestClient) -> None:
     assert metrics["rates"]["response"] == 75.0
 
 
+def test_record_date_uses_created_at_only() -> None:
+    """Период воронки считается по `created_at`: других источников даты нет."""
+    record = {
+        "created_at": "2026-10-24T10:00:00+03:00",
+        "updated_at": "2026-10-25T10:00:00+03:00",
+    }
+
+    assert web_main.record_date(record) == date(2026, 10, 24)
+    assert web_main.record_date({"updated_at": "2026-10-25T10:00:00+03:00"}) is None
+    assert web_main.record_date({}) is None
+
+
 @pytest.mark.parametrize(
     ("period", "expected"),
     [
@@ -146,7 +158,7 @@ def test_metrics_page_explains_period_basis(client: TestClient) -> None:
     response = client.get("/metrics")
 
     assert response.status_code == 200
-    assert "Период воронки считается по дате первой обработки вакансии в приложением." in response.text
+    assert "Период воронки считается по дате первой обработки вакансии в приложении" in response.text
 
 
 def test_metrics_api_filters_by_period(

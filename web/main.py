@@ -210,18 +210,14 @@ def period_bounds(period: str, anchor: date) -> tuple[date, date]:
 def record_date(record: dict[str, Any]) -> date | None:
     """Дата создания записи для периода воронки.
 
-    Для старых отчётов, где `created_at` ещё нет, берётся `updated_at`:
-    другой даты в файле не сохранилось.
+    Источник один: `created_at`. Формат отчёта требует это поле, легаси-форматы
+    не поддерживаются: данные старых отчётов приведены к текущему виду.
     """
-    for field in ("created_at", "updated_at"):
-        value = str(record.get(field, "")).strip()
-        if not value:
-            continue
-        try:
-            return datetime.fromisoformat(value).date()
-        except ValueError:
-            continue
-    return None
+    value = str(record.get("created_at", "")).strip()
+    try:
+        return datetime.fromisoformat(value).date()
+    except ValueError:
+        return None
 
 
 def latest_record_date(records: list[dict[str, Any]]) -> date | None:

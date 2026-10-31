@@ -93,14 +93,6 @@ class ProcessedStore:
                 for key in keys:
                     self._seen.setdefault(key, day.strftime(DATE_FORMAT))
                     self._records[key] = (file, record)
-                # Старые вызовы без профиля ищут запись по ключам без резюме.
-                for key in vacancy_keys(
-                    str(record.get("title", "")),
-                    str(record.get("company", "")),
-                    str(record.get("url", "")),
-                    None,
-                ):
-                    self._records.setdefault(key, (file, record))
         return len(self._seen)
 
     def find(
@@ -256,8 +248,6 @@ class ProcessedStore:
         for key in vacancy_keys(title, company, url, profile):
             self._seen.setdefault(key, day)
             self._records[key] = (self.path, item)
-        for key in vacancy_keys(title, company, url, None):
-            self._records[key] = (self.path, item)
 
 
 def _file_date(path: Path) -> date | None:
@@ -292,7 +282,7 @@ def _summary(items: list[dict[str, Any]]) -> dict[str, int]:
 
 
 def _normalize_times(item: dict[str, Any], now: str) -> dict[str, Any]:
-    """Дополняет старую запись датами, не меняя уже известные значения."""
+    """Дополняет запись датами, не меняя уже известные значения."""
     normalized = dict(item)
     created_at = str(
         normalized.get("created_at") or normalized.get("updated_at") or now
