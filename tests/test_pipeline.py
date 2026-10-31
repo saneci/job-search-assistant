@@ -1311,6 +1311,73 @@ def test_respond_rejected_marks_vacancy_rejected(tmp_path: Path, monkeypatch) ->
     assert [item.reason for item in stats.rejected] == ["По отклику пришёл отказ"]
 
 
+def test_retry_pauses_before_response(tmp_path: Path, monkeypatch) -> None:
+    """В --retry порядок тот же: пауза перед откликом, отклик, пауза после."""
+    config = with_resume(make_config(tmp_path), "Team Lead")
+    details = VacancyDetails(
+        url="https://hh.ru/vacancy/1",
+        title="Java",
+        company="Ozon",
+        salary="",
+        description="Java, Spring, PostgreSQL.",
+    )
+    store = ProcessedStore(tmp_path / "report", today=date.today())
+    store.record(
+        url=details.url,
+        title=details.title,
+        company=details.company,
+        status="error",
+        profile="Team Lead",
+        channel="hh",
+    )
+    monkeypatch.setattr("agent.pipeline.open_vacancy", lambda page, vacancy: details)
+    order: list[str] = []
+
+    class FakeLLM:
+        def decide(self, profile, vacancy):
+            return DecisionResult(
+                fits=True,
+                probability=0.95,
+                threshold=0.8,
+                probabilities={"подходит": 0.95, "не подходит": 0.05},
+                chosen="подходит",
+            )
+
+        def generate(self, profile, vacancy, max_length=1500, signature=""):
+            del profile, vacancy, max_length, signature
+            return GenerationResult(
+                verdict="подходит",
+                reason="ok",
+                cover_letter="Здравствуйте! Готов обсудить вакансию.",
+            )
+
+    def fake_respond(page, letter, captcha_waiter=None):
+        del page, letter, captcha_waiter
+        order.append("respond")
+        return ResponseResult(status=STATUS_SENT)
+
+    monkeypatch.setattr("agent.pipeline.respond", fake_respond)
+    monkeypatch.setattr(
+        "agent.pipeline._pause", lambda config, logger, reason: order.append(reason)
+    )
+    stats = make_stats()
+    logger = RunLogger(tmp_path / "logs", run_id="retry-pause")
+
+    _retry_vacancies(
+        _FakePage(details.url),
+        config,
+        Profile(text="Java", examples="", style_rules=""),
+        FakeLLM(),
+        stats,
+        logger,
+        store,
+        ("error",),
+    )
+    logger.close()
+
+    assert order == ["перед отправкой отклика", "respond", "после отправки отклика"]
+
+
 def test_retry_statuses_take_config_or_explicit_value(tmp_path: Path) -> None:
     """--retry без значения берёт набор из retry.statuses, со значением — только он."""
     config = make_config(tmp_path)

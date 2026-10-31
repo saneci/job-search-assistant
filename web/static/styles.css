@@ -50,6 +50,7 @@
     --color-excluded: #6a1b9a;
     --color-queued: #1565c0;
     --color-offer: #1565c0;
+    --color-invite: #00838f;
     --color-error: #c62828;
 }
 
@@ -96,6 +97,7 @@
     --color-excluded: #c39ae6;
     --color-queued: #7fb6f0;
     --color-offer: #7fb6f0;
+    --color-invite: #6fd1c8;
     --color-error: #f08a8a;
 }
 

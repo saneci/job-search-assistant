@@ -137,6 +137,8 @@ class ProcessedStore:
         Приглашение на собеседование приходит по отклику, поэтому меняются
         только записи со статусом `sent` (переход `sent → invite`). Запись
         текущего резюме не трогаем: её статус пишет вызывающий код.
+        Факт приглашения фиксируется в `invited_at` и не сбрасывается, когда
+        запись позже переходит в `offer` или `rejected`.
         Возвращает названия резюме, которым проставлен статус `invite`.
         """
         del title, company  # вакансию опознаём по ссылке: она есть в записи
@@ -154,6 +156,10 @@ class ProcessedStore:
             other = str(record.get("profile", ""))
             if not other or profile_key(other) == current:
                 continue
+            # Дата приглашения ставится один раз: по ней считается «дошло до
+            # приглашения» даже после смены статуса.
+            if not str(record.get("invited_at", "")).strip():
+                record["invited_at"] = _now()
             self._update(
                 record,
                 status=STATUS_INVITE,

@@ -58,6 +58,14 @@
                 color: #2e7d32;
             }
 
+            .card-invite {
+                border-left-color: #00838f;
+            }
+
+            .card-invite .value {
+                color: #00838f;
+            }
+
             .card-offer {
                 border-left-color: #1565c0;
             }
@@ -360,6 +368,12 @@
                 border-color: #b2ebf2;
             }
 
+            .status-select.invite {
+                background-color: #e0f2f1;
+                color: #00695c;
+                border-color: #b2dfdb;
+            }
+
             /* Цвета для селектов (тёмная тема) */
             [data-theme="dark"] .status-select.sent {
                 background-color: #1e3a24;
@@ -395,6 +409,12 @@
                 background-color: #12383a;
                 color: #7fd8d8;
                 border-color: #1f5a5c;
+            }
+
+            [data-theme="dark"] .status-select.invite {
+                background-color: #0f2f30;
+                color: #6fd1c8;
+                border-color: #1c4d4e;
             }
 
             [data-theme="dark"] .status-select.rejected {
@@ -649,6 +669,10 @@
                     <div class="label">Не подходит</div>
                     <div class="value" id="sumSkipped">—</div>
                 </div>
+                <div class="summary-card card-invite">
+                    <div class="label">Приглашения</div>
+                    <div class="value" id="sumInvited">—</div>
+                </div>
                 <div class="summary-card card-offer">
                     <div class="label">Офферы</div>
                     <div class="value" id="sumOffered">—</div>
@@ -761,10 +785,11 @@
             /* ---------- Глобальные переменные ---------- */
             const STATUS_LABELS = {
                 sent: 'Отправлено',
-                skipped: 'Пропущено',
+                skipped: 'Не подходит',
                 queued: 'В очереди',
                 excluded: 'Исключено',
                 error: 'Ошибка',
+                invite: 'Приглашение',
                 rejected: 'Отказ',
                 offer: 'Оффер'
             };
@@ -812,6 +837,7 @@
             const els = {
                 headerMeta: document.getElementById('headerMeta'),
                 sumSent: document.getElementById('sumSent'),
+                sumInvited: document.getElementById('sumInvited'),
                 sumSkipped: document.getElementById('sumSkipped'),
                 sumQueued: document.getElementById('sumQueued'),
                 sumExcluded: document.getElementById('sumExcluded'),
@@ -897,6 +923,7 @@
             function renderSummary(summary) {
                 const s = summary || {};
                 els.sumSent.textContent = s.sent ?? 0;
+                els.sumInvited.textContent = s.invite ?? 0;
                 els.sumSkipped.textContent = s.skipped ?? 0;
                 els.sumQueued.textContent = s.queued ?? 0;
                 els.sumExcluded.textContent = s.excluded ?? 0;

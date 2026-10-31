@@ -146,6 +146,11 @@
                     <div class="value" style="color: var(--color-sent);">{{ metrics.rate_text.response }}</div>
                     <div class="sub">{{ metrics.responses }} {{ metrics.words.responses }} из {{ metrics.total }} {{ metrics.words.vacancies_genitive }}</div>
                 </div>
+                <div class="metric-card" style="border-left-color: var(--color-invite);">
+                    <div class="label">Дошло до приглашения</div>
+                    <div class="value" style="color: var(--color-invite);">{{ metrics.invites_total }}</div>
+                    <div class="sub">{{ metrics.invites_total }} {{ metrics.words.invites_total }} из {{ metrics.responses }} {{ metrics.words.responses }}</div>
+                </div>
                 <div class="metric-card" style="border-left-color: var(--color-offer);">
                     <div class="label">Конверсия в оффер</div>
                     <div class="value" style="color: var(--color-offer);">{{ metrics.rate_text.offer }}</div>

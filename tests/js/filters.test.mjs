@@ -6,7 +6,7 @@ const require = createRequire(import.meta.url);
 const f = require('../../web/static/filters.js');
 
 // Статусы отчёта: в браузере список приходит из STATUS_LABELS.
-const STATUSES = ['sent', 'skipped', 'queued', 'excluded', 'error', 'rejected', 'offer'];
+const STATUSES = ['sent', 'skipped', 'queued', 'excluded', 'error', 'invite', 'rejected', 'offer'];
 
 function vacancy(overrides = {}) {
     return {

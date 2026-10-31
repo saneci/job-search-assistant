@@ -45,6 +45,7 @@ def test_counts_all_statuses() -> None:
     assert metrics["others"] == 4
     assert metrics["rates"] == {
         "response": 50.0,
+        "invite": 0.0,
         "offer": 25.0,
         "rejected": 25.0,
         "ignore": 50.0,
@@ -54,9 +55,10 @@ def test_counts_all_statuses() -> None:
     # Дата — в том же виде, что колонка «Дата» на странице отчёта.
     assert metrics["updated_at_text"] == "2026-10-24 12:00:00"
     assert metrics["updated_text"].startswith("Обновлено: 2026-10-24 12:00:00")
-    assert metrics["pie_legend"][1]["count"] == 1
+    # Пирог: отклики без офферов и приглашений, приглашения, офферы, остальные.
+    assert [item["count"] for item in metrics["pie_legend"]] == [3, 0, 1, 4]
     assert metrics["pie_css"].startswith("conic-gradient(")
-    assert [item["count"] for item in metrics["fate"]] == [2, 1, 1]
+    assert [item["count"] for item in metrics["fate"]] == [2, 0, 1, 1]
     # Подпись «N откликов из M вакансий» требует родительного падежа.
     assert metrics["words"]["vacancies_genitive"] == "вакансий"
 
@@ -103,8 +105,31 @@ def test_sent_status_and_responses_are_labelled_differently() -> None:
     assert labels["sent"] == "Отправлено"
     assert metrics["counts"]["sent"] == 2
     assert metrics["responses"] == 4
-    assert [item["count"] for item in metrics["pie_legend"]] == [3, 1, 0]
+    assert [item["count"] for item in metrics["pie_legend"]] == [3, 0, 1, 0]
     assert metrics["pie_legend"][0]["label"] == "Отклики"
+
+
+def test_invite_is_a_response_and_survives_status_change() -> None:
+    """Приглашение — исход отклика; факт из `invited_at` остаётся после смены статуса."""
+    rows = [
+        row("1", "sent"),
+        row("2", "invite"),
+        row("3", "offer"),
+    ]
+    rows[2]["invited_at"] = "2026-10-25T10:00:00+03:00"
+
+    metrics = build_metrics(rows)
+
+    assert metrics["invites"] == 1
+    assert metrics["responses"] == 3
+    # Оффер пришёл после приглашения: текущий статус уже не invite, но факт виден.
+    assert metrics["invited_total"] == 1
+    assert metrics["rates"]["invite"] == 33.3
+    labels = {item["key"]: item["label"] for item in metrics["pie_legend"]}
+    assert labels["invite"] == "Приглашения"
+    assert [item["count"] for item in metrics["pie_legend"]] == [1, 1, 1, 0]
+    # «Судьба откликов»: без ответа, приглашения, отказы, офферы.
+    assert [item["key"] for item in metrics["fate"]] == ["sent", "invite", "rejected", "offer"]
 
 
 def test_offer_is_a_response() -> None:

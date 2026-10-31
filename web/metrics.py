@@ -13,15 +13,17 @@ from collections import Counter
 from datetime import datetime
 from typing import Any, Iterable, Mapping
 
-STATUS_ORDER = ("skipped", "excluded", "queued", "error", "sent", "rejected", "offer")
+STATUS_ORDER = ("skipped", "excluded", "queued", "error", "sent", "invite", "rejected", "offer")
 STATUS_LABELS = {
     "skipped": "Не подходит",
     "excluded": "Исключено",
     "queued": "В очереди",
     "error": "Ошибки",
     # «Отправлено» — статус вакансии: отклик ушёл, ответа пока нет.
-    # Все отклики вместе с отказами и офферами считаются отдельно (responses).
+    # Все отклики вместе с приглашениями, отказами и офферами считаются
+    # отдельно (responses).
     "sent": "Отправлено",
+    "invite": "Приглашения",
     "rejected": "Отказы",
     "offer": "Офферы",
     "unknown": "Неизвестно",
@@ -32,12 +34,14 @@ STATUS_COLORS = {
     "queued": "var(--color-queued)",
     "error": "var(--color-error)",
     "sent": "var(--color-sent)",
+    "invite": "var(--color-invite)",
     "rejected": "var(--color-rejected)",
     "offer": "var(--color-offer)",
     "unknown": "var(--color-base)",
 }
-# Статусы, которые означают отправленный отклик: ожидание ответа, отказ и оффер.
-RESPONSE_STATUSES = ("sent", "rejected", "offer")
+# Статусы, которые означают отправленный отклик и его исход: ожидание ответа,
+# приглашение, отказ и оффер.
+RESPONSE_STATUSES = ("sent", "invite", "rejected", "offer")
 
 # Каналы поиска: у записей старых отчётов поля нет — они идут как unknown.
 CHANNEL_LABELS = {
@@ -197,18 +201,24 @@ def build_metrics(
         counts["unknown"] = unknown
 
     sent = counts["sent"]
+    invites = counts["invite"]
     rejected = counts["rejected"]
     offers = counts["offer"]
     responses = sum(counts[status] for status in RESPONSE_STATUSES)
     others = total - responses
+    # «Дошло до приглашения»: факт хранится в `invited_at`, поэтому счётчик не
+    # уменьшается, когда запись переходит из `invite` в `offer` или `rejected`.
+    invited_total = sum(1 for row in rows if str(row.get("invited_at", "")).strip())
 
     pie_segments = [
-        (responses - offers, "var(--color-sent)"),
+        (responses - offers - invites, "var(--color-sent)"),
+        (invites, "var(--color-invite)"),
         (offers, "var(--color-offer)"),
         (others, "var(--color-base)"),
     ]
     pie_legend = [
-        _item("responses", "Отклики", responses - offers, total, "var(--color-sent)"),
+        _item("responses", "Отклики", responses - offers - invites, total, "var(--color-sent)"),
+        _item("invite", "Приглашения", invites, total, "var(--color-invite)"),
         _item("offer", "Офферы", offers, total, "var(--color-offer)"),
         _item("others", "Остальные", others, total, "var(--color-base)"),
     ]
@@ -224,12 +234,14 @@ def build_metrics(
 
     fate = [
         _item("sent", "Без ответа", sent, responses, "var(--color-base)"),
+        _item("invite", "Приглашения", invites, responses, "var(--color-invite)"),
         _item("rejected", "Отказы", rejected, responses, "var(--color-rejected)"),
         _item("offer", "Офферы", offers, responses, "var(--color-offer)"),
     ]
 
     rates = {
         "response": _rate(responses, total),
+        "invite": _rate(invites, responses),
         "offer": _rate(offers, responses),
         "rejected": _rate(rejected, responses),
         "ignore": _rate(sent, responses),
@@ -242,6 +254,10 @@ def build_metrics(
         "vacancies_genitive": _plural(total, "вакансии", "вакансий", "вакансий"),
         "responses": _plural(responses, "отклик", "отклика", "откликов"),
         "offers": _plural(offers, "оффер", "оффера", "офферов"),
+        "invites": _plural(invites, "приглашение", "приглашения", "приглашений"),
+        "invites_total": _plural(
+            invited_total, "приглашение", "приглашения", "приглашений"
+        ),
         "rejected": _plural(rejected, "отказ", "отказа", "отказов"),
         "sent": _plural(sent, "отклик", "отклика", "откликов"),
     }
@@ -261,6 +277,8 @@ def build_metrics(
         "words": words,
         "counts": counts,
         "sent": sent,
+        "invites": invites,
+        "invited_total": invited_total,
         "rejected": rejected,
         "offers": offers,
         "responses": responses,

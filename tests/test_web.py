@@ -462,6 +462,78 @@ def test_rejected_status_is_terminal(client: TestClient) -> None:
     assert "терминальный" in second.json()["detail"]
 
 
+def test_invite_status_can_be_set_from_sent(client: TestClient) -> None:
+    """Приглашение ставится из «Отправлено» и запоминает момент приглашения."""
+    response = client.post(
+        "/api/v1/update-status",
+        json={
+            "report_name": "2026-10-24.json",
+            "url": "https://hh.ru/vacancy/1",
+            "status": "invite",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["summary"]["invite"] == 1
+    row = web_main.find_vacancy("https://hh.ru/vacancy/1", None)
+    assert row is not None
+    assert row["status"] == "invite"
+    assert row["invited_at"]
+
+
+def test_invite_requires_sent_status(client: TestClient) -> None:
+    response = client.post(
+        "/api/v1/update-status",
+        json={
+            "report_name": "2026-10-24.json",
+            "url": "https://hh.ru/vacancy/4",
+            "status": "invite",
+        },
+    )
+
+    assert response.status_code == 409
+    assert "только после" in response.json()["detail"]
+
+
+def test_offer_can_be_set_after_invite(client: TestClient) -> None:
+    """Оффер ставится из «Приглашения»: переход invite → offer не терминальный."""
+    invite = client.post(
+        "/api/v1/update-status",
+        json={
+            "report_name": "2026-10-24.json",
+            "url": "https://hh.ru/vacancy/1",
+            "status": "invite",
+        },
+    )
+    offer = client.post(
+        "/api/v1/update-status",
+        json={
+            "report_name": "2026-10-24.json",
+            "url": "https://hh.ru/vacancy/1",
+            "status": "offer",
+        },
+    )
+
+    assert invite.status_code == 200
+    assert offer.status_code == 200
+    assert offer.json()["reason"] == "По отклику пришёл оффер"
+
+
+def test_report_page_shows_invite_status(client: TestClient) -> None:
+    response = client.get("/report")
+
+    assert response.status_code == 200
+    assert "invite: 'Приглашение'" in response.text
+    assert 'id="sumInvited"' in response.text
+
+
+def test_metrics_page_shows_invited_total(client: TestClient) -> None:
+    response = client.get("/metrics")
+
+    assert response.status_code == 200
+    assert "Дошло до приглашения" in response.text
+
+
 def test_static_theme_is_served(client: TestClient) -> None:
     styles = client.get("/static/styles.css")
     script = client.get("/static/script.js")

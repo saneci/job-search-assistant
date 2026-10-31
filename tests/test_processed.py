@@ -92,6 +92,25 @@ def test_invite_other_resume_marks_only_other_profile(tmp_path: Path) -> None:
     assert rows["Java Developer"]["attempts"] == 1
     assert rows["Team Lead"]["status"] == "skipped"
 
+    # Факт приглашения фиксируется один раз и не сбрасывается сменой статуса.
+    invited_at = rows["Java Developer"]["invited_at"]
+    assert invited_at
+    store.record(
+        url=url,
+        title="Java-разработчик",
+        company="Ozon",
+        status="offer",
+        reason="По отклику пришёл оффер",
+        profile="Java Developer",
+        channel="hh",
+    )
+    rows = {
+        row["profile"]: row
+        for row in json.loads(store.path.read_text(encoding="utf-8"))["vacancies"]
+    }
+    assert rows["Java Developer"]["status"] == "offer"
+    assert rows["Java Developer"]["invited_at"] == invited_at
+
 
 def test_roll_to_switches_report_file(tmp_path: Path) -> None:
     """Через полночь записи идут в файл новой даты, а не в файл начала запуска."""

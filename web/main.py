@@ -27,11 +27,21 @@ TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 # Статусы записи: те же, что в отчёте агента (agent/models.py STATUSES).
-STATUSES = ("sent", "skipped", "queued", "excluded", "error", "rejected", "offer")
+STATUSES = (
+    "sent",
+    "skipped",
+    "queued",
+    "excluded",
+    "error",
+    "invite",
+    "rejected",
+    "offer",
+)
 
 # Исход отклика человек ставит вручную: причина всегда одна и та же, попытки
 # отклика не пересчитываем (agent/models.py).
 STATUS_SENT = "sent"
+STATUS_INVITE = "invite"
 STATUS_REJECTED = "rejected"
 STATUS_OFFER = "offer"
 REJECTED_REASON = "По отклику пришёл отказ"
@@ -410,7 +420,9 @@ async def update_status(update: StatusUpdate) -> dict[str, Any]:
     В отчётах одна запись на пару «URL и резюме»: вакансия с этим профилем
     удаляется из всех файлов, а обновлённая запись попадает в файл сегодняшней
     даты. `created_at` при этом не меняется, `updated_at` становится временем
-    правки. `rejected` и `offer` терминальны, `offer` ставится только из `sent`.
+    правки. `rejected` и `offer` терминальны: `invite` ставится только из `sent`,
+    `offer` — из `sent` или `invite`. Момент приглашения пишется в `invited_at`
+    и не сбрасывается при переходе в оффер или отказ.
     """
     if update.status not in STATUSES:
         raise HTTPException(status_code=422, detail=f"Неизвестный статус: {update.status}")
@@ -427,11 +439,19 @@ async def update_status(update: StatusUpdate) -> dict[str, Any]:
             status_code=409,
             detail=f"Статус «{label}» терминальный: изменить его нельзя",
         )
-    if update.status == STATUS_OFFER and current_status != STATUS_SENT:
+    if update.status == STATUS_INVITE and current_status != STATUS_SENT:
         raise HTTPException(
             status_code=409,
             detail=(
-                "Оффер можно поставить только после статуса «Отправлено» "
+                "Приглашение можно поставить только после статуса «Отправлено» "
+                f"(сейчас: {current_status or 'нет статуса'})"
+            ),
+        )
+    if update.status == STATUS_OFFER and current_status not in (STATUS_SENT, STATUS_INVITE):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Оффер можно поставить только после статуса «Отправлено» или «Приглашение» "
                 f"(сейчас: {current_status or 'нет статуса'})"
             ),
         )
@@ -448,6 +468,10 @@ async def update_status(update: StatusUpdate) -> dict[str, Any]:
         vacancy["profile"] = str(vacancy.get("profile") or "")
     vacancy["status"] = update.status
     vacancy["updated_at"] = changed_at
+    if update.status == STATUS_INVITE:
+        # Момент приглашения фиксируется один раз: по нему метрики считают
+        # «дошло до приглашения» и после перехода в оффер или отказ.
+        vacancy["invited_at"] = str(vacancy.get("invited_at") or changed_at)
     if update.status in TERMINAL_STATUSES:
         vacancy["reason"] = (
             REJECTED_REASON if update.status == STATUS_REJECTED else OFFER_REASON
