@@ -59,6 +59,23 @@ def test_metrics_api_has_channels(client: TestClient) -> None:
     assert channels == {"hh": 1, "habr": 1, "external": 1}
 
 
+def test_report_table_columns_are_in_reading_order(client: TestClient) -> None:
+    """Колонки идут от резюме к дате, причина стоит сразу после компании."""
+    text = client.get("/report").text
+    headers = [
+        "<th>Резюме</th>",
+        "<th>Вакансия</th>",
+        "<th>Компания</th>",
+        "<th>Причина / Комментарий</th>",
+        "<th>Статус</th>",
+        "<th>Дата</th>",
+    ]
+    positions = [text.index(header) for header in headers]
+
+    assert positions == sorted(positions)
+    assert "profile-cell" in text
+
+
 def test_report_page_filters_by_channel(client: TestClient) -> None:
     """Канал выбирается фильтром по источнику: отдельной метки в строке нет."""
     response = client.get("/report")

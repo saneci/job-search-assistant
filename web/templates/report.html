@@ -213,6 +213,17 @@
                 max-width: 200px;
             }
 
+            .profile-cell {
+                color: var(--muted-strong);
+                font-size: .85rem;
+                max-width: 200px;
+            }
+
+            .profile-cell.empty {
+                color: var(--muted-empty);
+                font-style: italic;
+            }
+
             .reason-cell {
                 color: var(--muted);
                 font-size: .82rem;
@@ -405,7 +416,7 @@
                     padding: 10px 12px;
                 }
 
-                .title-cell, .company-cell, .reason-cell {
+                .title-cell, .company-cell, .profile-cell, .reason-cell {
                     max-width: 220px;
                 }
             }
@@ -713,10 +724,11 @@
                 <table id="vacancyTable" style="display:none;">
                     <thead>
                     <tr>
+                        <th>Резюме</th>
                         <th>Вакансия</th>
                         <th>Компания</th>
-                        <th>Статус</th>
                         <th>Причина / Комментарий</th>
+                        <th>Статус</th>
                         <th>Дата</th>
                     </tr>
                     </thead>
@@ -918,6 +930,12 @@
                 for (const v of filtered) {
                     const tr = document.createElement('tr');
 
+                    // Резюме: у Habr и внешней формы его нет.
+                    const tdProfile = document.createElement('td');
+                    tdProfile.className = 'profile-cell' + (v.profile ? '' : ' empty');
+                    tdProfile.textContent = v.profile || '—';
+                    tr.appendChild(tdProfile);
+
                     // Вакансия
                     const tdTitle = document.createElement('td');
                     tdTitle.className = 'title-cell';
@@ -1051,13 +1069,15 @@
                     });
 
                     tdStatus.appendChild(select);
-                    tr.appendChild(tdStatus);
 
-                    // Причина
+                    // Причина идёт сразу после компании.
                     const tdReason = document.createElement('td');
                     tdReason.className = 'reason-cell' + (v.reason ? '' : ' empty');
                     tdReason.textContent = v.reason || '—';
                     tr.appendChild(tdReason);
+
+                    // Статус после причины: так проще читать строку.
+                    tr.appendChild(tdStatus);
 
                     // Дата и время
                     const tdTime = document.createElement('td');
