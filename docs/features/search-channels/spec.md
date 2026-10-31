@@ -74,4 +74,4 @@
 - [Feature: Поиск и оценка вакансий](../search-and-evaluating/spec.md)
 - [Feature: Отчёт об обработанных вакансиях](../report/spec.md)
 - [Feature: Повторная обработка вакансий](../retry/spec.md)
-- [Feature: Веб-интерфейс и метрики](../web-ui-and-metrics/spec.md)
+- [Feature: Веб-интерфейс и метрики](../web-ui-metrics/spec.md)
