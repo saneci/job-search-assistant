@@ -26,6 +26,7 @@ from agent.cli import (
     retry_help_requested,
 )
 from agent.config import load_config
+from agent.hh_vacancy import ResumeNotFoundError
 from agent.logging_setup import RunLogger
 
 GENERAL_HELP_TEXT = """Персональный ассистент для поиска работы, который отсеивает нерелевантное и оставляет только то, что стоит вашего внимания
@@ -435,6 +436,38 @@ def test_main_passes_channel_and_retry_to_run(tmp_path: Path, monkeypatch) -> No
 
     assert main(["--config", str(path), "--ch", "habr", "--retry"]) == 0
     assert captured == {"channel": "habr", "retry": RETRY_ALL}
+
+
+def test_main_stops_on_resume_not_found(tmp_path: Path, monkeypatch, capsys) -> None:
+    """Нет резюме в форме: код 1 и понятное сообщение без трейсбека."""
+    data = {
+        "search": {"queries": "Java", "area": "Москва"},
+        "pipeline": {"limit_per_run": 1, "delay_between_actions": {"from": 0, "to": 0}},
+        "llm": {"api_key_env": "TEST_API_KEY"},
+    }
+    path = tmp_path / "config.yaml"
+    path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setenv("TEST_API_KEY", "test-key")
+
+    class FakeLogger:
+        def __enter__(self) -> "FakeLogger":
+            return self
+
+        def __exit__(self, *exc_info: object) -> bool:
+            return False
+
+    def fake_run(*args, **kwargs):
+        del args, kwargs
+        raise ResumeNotFoundError("Team Lead")
+
+    monkeypatch.setattr("agent.cli.RunLogger", lambda *args, **kwargs: FakeLogger())
+    monkeypatch.setattr("agent.cli.run", fake_run)
+
+    assert main(["--config", str(path)]) == 1
+    err = capsys.readouterr().err
+    assert "Запуск прерван" in err
+    assert "Team Lead" in err
+    assert "Traceback" not in err
 
 
 def test_notify_test_sends_to_each_enabled_kind(tmp_path: Path, monkeypatch, capsys) -> None:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from agent.habr_vacancy import detect_page_blocker, respond
+from agent.habr_vacancy import detect_page_blocker, is_authenticated, respond
 from agent.hh_vacancy import (
     STATUS_ALREADY_RESPONDED,
     STATUS_CAPTCHA,
@@ -76,6 +76,74 @@ class FakePage:
 
     def wait_for_timeout(self, milliseconds: int) -> None:
         return
+
+
+class AuthPage:
+    """Страница проверки сессии: меню входа задаётся списком видимостей."""
+
+    def __init__(
+        self,
+        final_url: str,
+        *,
+        menus: list[bool] | None = None,
+        start_url: str | None = None,
+    ) -> None:
+        self.final_url = final_url
+        self.menus = [
+            FakeElement("Войти", visible=visible) for visible in (menus or [])
+        ]
+        self.url = start_url or final_url
+        self.goto_url = ""
+
+    def goto(self, url: str, **kwargs: Any) -> None:
+        del kwargs
+        self.goto_url = url
+        self.url = self.final_url
+
+    def wait_for_timeout(self, milliseconds: int) -> None:
+        del milliseconds
+
+    def locator(self, selector: str) -> FakeList:
+        if selector in (".user-auth-menu", ".user-auth-menu button", ".user-auth-menu a"):
+            return FakeList(self.menus)
+        return FakeList([])
+
+
+def test_habr_guest_is_not_authenticated() -> None:
+    """Гостю шапка показывает видимую кнопку «Войти»."""
+    page: Any = AuthPage("https://career.habr.com/", menus=[False, True])
+
+    assert is_authenticated(page) is False
+
+
+def test_habr_mobile_login_menu_does_not_count() -> None:
+    """Скрытое мобильное меню входа не делает авторизованного гостём."""
+    page: Any = AuthPage("https://career.habr.com/", menus=[False, False])
+
+    assert is_authenticated(page) is True
+
+
+def test_habr_user_is_authenticated() -> None:
+    """У авторизованного пользователя кнопки «Войти» в шапке нет."""
+    page: Any = AuthPage("https://career.habr.com/")
+
+    assert is_authenticated(page) is True
+
+
+def test_habr_login_page_is_not_authenticated() -> None:
+    """Редирект на account.habr.com — сессии точно нет."""
+    page: Any = AuthPage("https://account.habr.com/oauth/authorize/?action=login")
+
+    assert is_authenticated(page) is False
+
+
+def test_habr_session_check_navigates_to_home() -> None:
+    """Проверка сессии не ходит в ленту, а открывает главную канала."""
+    page: Any = AuthPage("https://career.habr.com/", start_url="about:blank")
+
+    is_authenticated(page)
+
+    assert page.goto_url == "https://career.habr.com/"
 
 
 def test_external_response_is_a_blocker() -> None:

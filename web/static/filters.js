@@ -9,7 +9,7 @@
     'use strict';
 
     // Каналы записи. `unknown` — записи старых отчётов без поля channel.
-    const CHANNELS = new Set(['all', 'hh', 'habr', 'unknown']);
+    const CHANNELS = new Set(['all', 'hh', 'habr', 'external', 'unknown']);
     const URL_KEYS = ['status', 'channel', 'q', 'date'];
 
     function defaultFilters() {
@@ -19,7 +19,7 @@
     /* Канал записи: в старых отчётах поля нет — это «Без канала». */
     function channelValue(vacancy) {
         const value = vacancy && vacancy.channel;
-        return value === 'hh' || value === 'habr' ? value : 'unknown';
+        return value === 'hh' || value === 'habr' || value === 'external' ? value : 'unknown';
     }
 
     /* Приводит состояние из адреса или хранилища к допустимому виду.

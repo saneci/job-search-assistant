@@ -1,9 +1,10 @@
 """Расчёт метрик по дневным отчётам (data/report).
 
 Модуль не зависит от FastAPI: на вход идут записи `vacancies` из файлов дня,
-на выходе — готовые числа для шаблона. Одна вакансия учитывается один раз:
-при повторах запись переносится между файлами, поэтому перед подсчётом
-выбирается самая свежая запись по `updated_at` (или названию и компании).
+на выходе — готовые числа для шаблона. Одна запись — это вакансия и резюме:
+разными резюме можно отвечать на одну вакансию, поэтому такие записи считаются
+отдельно. При повторах запись переносится между файлами, поэтому перед
+подсчётом выбирается самая свежая запись по `updated_at` (или названию и компании).
 """
 
 from __future__ import annotations
@@ -39,23 +40,44 @@ STATUS_COLORS = {
 RESPONSE_STATUSES = ("sent", "rejected", "offer")
 
 # Каналы поиска: у записей старых отчётов поля нет — они идут как unknown.
-CHANNEL_LABELS = {"hh": "hh.ru", "habr": "Habr Career", "unknown": "Без канала"}
+CHANNEL_LABELS = {
+    "hh": "hh.ru",
+    "habr": "Habr Career",
+    "external": "Сайт компании",
+    "unknown": "Без канала",
+}
 CHANNEL_COLORS = {
     "hh": "var(--color-sent)",
     "habr": "var(--color-queued)",
+    "external": "var(--color-skipped)",
     "unknown": "var(--color-base)",
 }
 
 
+def profile_value(value: Any) -> str:
+    """Нормализованное имя резюме: регистр, «ё» и лишние пробелы не важны."""
+    return " ".join(str(value or "").lower().replace("ё", "е").split())
+
+
+def profile_key(record: Mapping[str, Any]) -> str:
+    """Нормализованное имя резюме записи."""
+    return profile_value(record.get("profile", ""))
+
+
 def _vacancy_key(record: Mapping[str, Any], index: int) -> tuple[str, ...]:
-    """Ключ вакансии: ссылка, иначе название и компания."""
+    """Ключ записи: вакансия и резюме. Разные резюме — разные записи."""
+    profile = profile_key(record)
     url = str(record.get("url", "")).strip()
     if url:
-        return ("url", url)
+        return ("url", url) if not profile else ("url", url, "profile", profile)
     title = str(record.get("title", "")).strip()
     company = str(record.get("company", "")).strip()
     if title or company:
-        return ("title", title, company)
+        return (
+            ("title", title, company)
+            if not profile
+            else ("title", title, company, "profile", profile)
+        )
     return ("row", str(index))
 
 
@@ -165,7 +187,7 @@ def build_metrics(
     channel_counts = Counter(str(row.get("channel", "") or "unknown") for row in rows)
     channels = [
         _item(name, CHANNEL_LABELS[name], channel_counts.get(name, 0), total, CHANNEL_COLORS[name])
-        for name in ("hh", "habr", "unknown")
+        for name in ("hh", "habr", "external", "unknown")
         if channel_counts.get(name)
     ]
     raw_counts = Counter(str(row.get("status", "") or "unknown") for row in rows)

@@ -37,7 +37,7 @@ career.habr.com). У каналов раздельные сессии и бра�
 
 - `data.paths.session_state` — сессия hh.ru (по умолчанию `data/hh-state.json`).
 - `data.paths.habr_session_state` — сессия career.habr.com (`../../data/habr-state.json`).
-- `data.paths.habr_profile` — постоянный профиль Chrome для Habr (`../../data/browser-profile`): без него
+- `data.paths.habr_profile` — постоянный профиль Chrome для Habr (`../../data/habr-profile`): без него
   hCaptcha на входе не отрисовывается.
 
 Ручной вход на сайт выбранного канала: `./run.sh --login`. В отчётах у каждой вакансии есть поле
@@ -60,7 +60,9 @@ career.habr.com). У каналов раздельные сессии и бра�
 - `search.queries` — строка или список запросов (поиск идёт по каждому отдельно, только для канала `hh`).
 - `search.exclude_keywords` — стоп-слова в названии (отсев без LLM, статус `excluded`),
   `search.exclude_companies` — компании-исключения (тоже `status: excluded`).
-- `pipeline.resume.name` — название резюме для подъёма в поиске (пусто — подъём отключён).
+- `pipeline.resume.name` — название резюме: по нему выбирается резюме в форме отклика hh.ru
+  и поднимается резюме в поиске. Для канала `hh` значение обязательно: пустое останавливает
+  запуск с ошибкой `resume_name_is_empty`. Канал `habr` его не использует.
 - `llm.cover_letter.signature` — подпись с контактами: дописывается кодом через пустую строку
   и считается внутри `llm.cover_letter.max_length`.
 - `llm.cover_letter.pet-projects` — ссылки на проекты: Generation использует их, если вакансия

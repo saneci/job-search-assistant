@@ -314,6 +314,70 @@ def test_update_status_preserves_profile(
     assert data["vacancies"][0]["profile"] == "Java Developer"
 
 
+def test_update_status_keeps_habr_without_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Правка статуса Habr не добавляет пустое поле profile."""
+    monkeypatch.setattr(web_main, "REPORTS_DIR", tmp_path)
+    today = tmp_path / "today.json"
+    monkeypatch.setattr(web_main, "current_report_path", lambda: today)
+    item = vacancy_with_dates(
+        "1", "sent", "2026-10-24T10:00:00+03:00", "2026-10-24T10:00:00+03:00"
+    )
+    item["url"] = "https://career.habr.com/vacancies/1"
+    item["channel"] = "habr"
+    item.pop("profile", None)
+    write_report(tmp_path, "2026-10-24.json", [item])
+    client = TestClient(web_main.app)
+
+    response = client.post(
+        "/api/v1/update-status",
+        json={
+            "report_name": "2026-10-24.json",
+            "url": "https://career.habr.com/vacancies/1",
+            "status": "offer",
+        },
+    )
+
+    assert response.status_code == 200
+    data = json.loads(today.read_text(encoding="utf-8"))
+    assert "profile" not in data["vacancies"][0]
+
+
+def test_update_status_changes_only_selected_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Правка статуса относится к записи выбранного резюме, а не ко всем."""
+    monkeypatch.setattr(web_main, "REPORTS_DIR", tmp_path)
+    monkeypatch.setattr(web_main, "current_report_path", lambda: tmp_path / "today.json")
+    first = vacancy("1", "sent")
+    first["profile"] = "Java Developer"
+    second = vacancy("1", "sent")
+    second["profile"] = "Team Lead"
+    write_report(tmp_path, "2026-10-24.json", [first, second])
+    client = TestClient(web_main.app)
+
+    response = client.post(
+        "/api/v1/update-status",
+        json={
+            "report_name": "2026-10-24.json",
+            "url": "https://hh.ru/vacancy/1",
+            "profile": "Team Lead",
+            "status": "offer",
+        },
+    )
+
+    assert response.status_code == 200
+    old = json.loads((tmp_path / "2026-10-24.json").read_text(encoding="utf-8"))
+    today = json.loads((tmp_path / "today.json").read_text(encoding="utf-8"))
+    assert [(row["profile"], row["status"]) for row in old["vacancies"]] == [
+        ("Java Developer", "sent")
+    ]
+    assert [(row["profile"], row["status"]) for row in today["vacancies"]] == [
+        ("Team Lead", "offer")
+    ]
+
+
 def test_offer_status_can_be_set_manually(client: TestClient) -> None:
     response = client.post(
         "/api/v1/update-status",

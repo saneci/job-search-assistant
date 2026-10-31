@@ -117,13 +117,18 @@ class BrowserSession:
         self._headless = headless
 
     def _launch_persistent(self, launch_options: dict[str, Any]) -> None:
-        """Запускает постоянный профиль Chrome без признаков автоматизации."""
+        """Запускает постоянный профиль Chrome без признаков автоматизации.
+
+        Признак автоматизации убирает ``ignore_default_args`` и init-скрипт.
+        Флаг ``--disable-blink-features=AutomationControlled`` современный Chrome
+        не поддерживает: он пишет предупреждение о нестабильности, поэтому его
+        не передаём.
+        """
         assert self._playwright is not None and self.profile_dir is not None
         self.profile_dir.mkdir(parents=True, exist_ok=True)
         context_options: dict[str, Any] = {
             "user_data_dir": str(self.profile_dir),
             "ignore_default_args": ["--enable-automation"],
-            "args": ["--disable-blink-features=AutomationControlled"],
             "locale": "ru-RU",
             "viewport": {"width": 1680, "height": 1000},
         }
@@ -133,6 +138,25 @@ class BrowserSession:
         self._context.add_init_script(HIDE_WEBDRIVER)
         self._browser = None
         self._restore_cookies()
+
+    def close_blank_pages(self, keep: Page) -> None:
+        """Закрывает служебные about:blank, оставляя рабочую вкладку.
+
+        Постоянный профиль Chrome всегда открывает стартовую about:blank.
+        Закрывать её последней нельзя: Chrome закрывает контекст, и следующий
+        ``new_page`` падает. Поэтому вызываем метод только после появления
+        рабочей страницы.
+        """
+        if self._context is None:
+            return
+        for page in getattr(self._context, "pages", ()):
+            if page is keep:
+                continue
+            try:
+                if page.url == "about:blank":
+                    page.close()
+            except PlaywrightError:
+                continue
 
     def _restore_cookies(self) -> None:
         """Переносит cookie из файла сессии в постоянный профиль.
@@ -213,8 +237,9 @@ class BrowserSession:
         """
         authenticate = check or is_authenticated
         state_exists = self.state_path.exists()
-        # Для постоянного профиля файл сессии не обязателен: cookie живут в профиле.
-        ready = state_exists or check is not None
+        # У hh сессия лежит в файле, у Habr — в постоянном профиле браузера.
+        # Без файла и без профиля проверять нечего: сразу нужен ручной вход.
+        ready = state_exists or self.profile_dir is not None
         self.logger.info(f"Проверяю сессию {name}...")
         page = self.new_page()
         try:
@@ -245,6 +270,7 @@ class BrowserSession:
         authenticated = False
         try:
             page.goto(target, wait_until="domcontentloaded", timeout=NAVIGATION_TIMEOUT_MS)
+            self._wait_for_login_captcha(page, name)
             self.logger.info(
                 f"В открытом окне браузера войдите в аккаунт {name}. "
                 "После входа вернитесь в консоль и нажмите Enter."
@@ -272,9 +298,48 @@ class BrowserSession:
         self.save_state()
         if not authenticated:
             raise BrowserError(
-                "Вход в hh.ru не подтверждён. Войдите в аккаунт до нажатия Enter "
+                f"Вход в {name} не подтверждён. Войдите в аккаунт до нажатия Enter "
                 "и запустите приложение снова."
             )
+
+    def _wait_for_login_captcha(self, page: Page, name: str) -> None:
+        """Ждёт hCaptcha на странице входа Habr, чтобы её было видно человеку.
+
+        Без загруженной капчи Habr отвечает «Необходимо пройти капчу», а сама
+        капча может появиться на секунду позже. Если она не загрузилась,
+        пробуем один раз перезагрузить страницу: hCaptcha иногда падает на
+        первом запросе. Ошибку загрузки не скрываем.
+        """
+        if "habr" not in name.lower():
+            return
+        if self._wait_for_hcaptcha(page):
+            self.logger.info("Капча входа загружена.")
+            return
+        self.logger.info("Капча входа не загрузилась, перезагружаю страницу...")
+        try:
+            page.reload(wait_until="domcontentloaded", timeout=NAVIGATION_TIMEOUT_MS)
+        except PlaywrightError:
+            pass
+        else:
+            if self._wait_for_hcaptcha(page):
+                self.logger.info("Капча входа загружена.")
+                return
+        self.logger.info(
+            "Капча входа не загрузилась. Обновите страницу в браузере, "
+            "иначе Habr не пустит в аккаунт."
+        )
+
+    def _wait_for_hcaptcha(self, page: Page) -> bool:
+        """Ждёт видимую hCaptcha; False — не дождались за отведённое время."""
+        try:
+            page.wait_for_selector(
+                "[data-captcha='hcaptcha'] iframe",
+                state="visible",
+                timeout=7000,
+            )
+        except PlaywrightError:
+            return False
+        return True
 
     def close(self) -> None:
         try:
@@ -367,8 +432,10 @@ def detect_captcha(page: Page) -> bool:
         for selector in (
             "[data-qa='captcha']",
             "#captcha",
-            "iframe[src*='captcha']",
-            "iframe[src*='hcaptcha']",
+            # У Habr виджет reCAPTCHA стоит в форме гостевого отклика и не
+            # блокирует отклик залогиненного пользователя. Проверяем только
+            # страницу капчи и её текстовые признаки, иначе любая форма с
+            # капчей ниже по странице останавливала бы запуск.
             "[id^='h-captcha']",
             "textarea[name='h-captcha-response']",
             "[data-qa*='captcha']",

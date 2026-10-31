@@ -4,13 +4,21 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from agent.hh_vacancy import (
+    ResumeNotFoundError,
     ResponseResult,
     _has_success,
     detect_page_blocker,
     detect_response_blocker,
+    match_resume,
     response_notice,
     response_state,
+    resume_name,
+    resume_options,
+    select_resume,
+    set_resume_name,
 )
 
 
@@ -296,3 +304,44 @@ def test_response_notice_skips_ui_labels() -> None:
 def test_response_result_reason_is_optional() -> None:
     assert ResponseResult(status="sent").reason == ""
 
+
+@pytest.mark.parametrize(
+    ("options", "name", "expected"),
+    [
+        (["Java Developer", "Team Lead"], "Java Developer", "Java Developer"),
+        (["Java Developer", "Team Lead"], "  java   developer ", "Java Developer"),
+        (["Java разработчик"], "Java разрабочик", None),
+        ([], "Java Developer", None),
+    ],
+)
+def test_match_resume_ignores_case_and_spaces(
+    options: list[str], name: str, expected: str | None
+) -> None:
+    assert match_resume(options, name) == expected
+
+
+def test_resume_options_are_read_from_listbox() -> None:
+    scope = FakeScope(
+        {"[role='option']": [FakeElement("Java Developer"), FakeElement("Team Lead")]}
+    )
+
+    assert resume_options(scope) == ["Java Developer", "Team Lead"]  # type: ignore[arg-type]
+
+
+def test_select_resume_raises_when_name_is_missing() -> None:
+    """Нет настроенного резюме в списке — отклик отправлять нельзя."""
+    scope = FakeScope({"[role='option']": [FakeElement("Java Developer")]})
+
+    with pytest.raises(ResumeNotFoundError) as error:
+        select_resume(scope, "Team Lead")  # type: ignore[arg-type]
+
+    assert error.value.resume == "Team Lead"
+    assert error.value.options == ("Java Developer",)
+
+
+def test_set_resume_name_strips_spaces() -> None:
+    set_resume_name("  Java Developer ")
+
+    assert resume_name() == "Java Developer"
+
+    set_resume_name("")

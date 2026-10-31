@@ -33,9 +33,10 @@ test('defaultFilters: пустое состояние', () => {
     });
 });
 
-test('channelValue: hh, habr и записи без источника', () => {
+test('channelValue: hh, habr, external и записи без источника', () => {
     assert.equal(f.channelValue({channel: 'hh'}), 'hh');
     assert.equal(f.channelValue({channel: 'habr'}), 'habr');
+    assert.equal(f.channelValue({channel: 'external'}), 'external');
     assert.equal(f.channelValue({}), 'unknown');
     assert.equal(f.channelValue({channel: 'superjob'}), 'unknown');
     assert.equal(f.channelValue(null), 'unknown');
@@ -80,6 +81,7 @@ test('normalizeFilters: известный статус сохраняется',
 
 test('normalizeFilters: канал проверяется по списку', () => {
     assert.equal(f.normalizeFilters({channel: 'habr'}, STATUSES).channel, 'habr');
+    assert.equal(f.normalizeFilters({channel: 'external'}, STATUSES).channel, 'external');
     assert.equal(f.normalizeFilters({channel: 'unknown'}, STATUSES).channel, 'unknown');
     assert.equal(f.normalizeFilters({channel: 'superjob'}, STATUSES).channel, 'all');
 });

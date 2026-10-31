@@ -61,6 +61,19 @@ def test_counts_all_statuses() -> None:
     assert metrics["words"]["vacancies_genitive"] == "вакансий"
 
 
+def test_same_vacancy_with_different_profiles_counts_twice() -> None:
+    """Одна вакансия с двумя резюме — две записи в метриках."""
+    rows = [row("1", "sent"), row("1", "queued")]
+    rows[0]["profile"] = "Java Developer"
+    rows[1]["profile"] = "Team Lead"
+
+    metrics = build_metrics(rows)
+
+    assert metrics["total"] == 2
+    assert metrics["counts"]["sent"] == 1
+    assert metrics["counts"]["queued"] == 1
+
+
 @pytest.mark.parametrize(
     ("total", "expected"),
     [(1, "вакансии"), (3, "вакансий"), (11, "вакансий"), (21, "вакансии")],

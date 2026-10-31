@@ -19,7 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
-from .metrics import build_metrics, dedupe_vacancies
+from .metrics import build_metrics, dedupe_vacancies, profile_key, profile_value
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 REPORTS_DIR = PROJECT_ROOT / "data" / "report"
@@ -90,6 +90,8 @@ class StatusUpdate(BaseModel):
 
     report_name: str
     url: str
+    # None — старый клиент: профиль не передан, ищем запись по URL.
+    profile: str | None = None
     status: str
 
 
@@ -112,11 +114,16 @@ def current_report_path() -> Path:
     return REPORTS_DIR / f"{date.today().isoformat()}.json"
 
 
-def find_vacancy(url: str) -> dict[str, Any] | None:
-    """Первая запись вакансии по URL во всех отчётах."""
+def find_vacancy(url: str, profile: str | None = None) -> dict[str, Any] | None:
+    """Первая запись вакансии с этим резюме во всех отчётах."""
+    wanted = None if profile is None else profile_value(profile)
     for path in report_files():
         for vacancy in read_report(path)["vacancies"]:
-            if isinstance(vacancy, dict) and str(vacancy.get("url", "")) == url:
+            if (
+                isinstance(vacancy, dict)
+                and str(vacancy.get("url", "")) == url
+                and (wanted is None or profile_key(vacancy) == wanted)
+            ):
                 return vacancy
     return None
 
@@ -404,15 +411,15 @@ async def get_metrics(files: str = "", period: str = "") -> dict[str, Any]:
 async def update_status(update: StatusUpdate) -> dict[str, Any]:
     """Меняет статус вакансии и переносит её в отчёт текущей даты.
 
-    В отчётах одна запись на URL: вакансия удаляется из всех файлов, а
-    обновлённая запись попадает в файл сегодняшней даты. `created_at` при этом
-    не меняется, `updated_at` становится временем правки. `rejected` и `offer`
-    терминальны, `offer` ставится только из `sent`.
+    В отчётах одна запись на пару «URL и резюме»: вакансия с этим профилем
+    удаляется из всех файлов, а обновлённая запись попадает в файл сегодняшней
+    даты. `created_at` при этом не меняется, `updated_at` становится временем
+    правки. `rejected` и `offer` терминальны, `offer` ставится только из `sent`.
     """
     if update.status not in STATUSES:
         raise HTTPException(status_code=422, detail=f"Неизвестный статус: {update.status}")
     report_path(update.report_name)
-    vacancy = find_vacancy(update.url)
+    vacancy = find_vacancy(update.url, update.profile)
     if vacancy is None:
         raise HTTPException(status_code=404, detail="Вакансия не найдена в отчётах")
     vacancy = dict(vacancy)
@@ -438,7 +445,11 @@ async def update_status(update: StatusUpdate) -> dict[str, Any]:
     vacancy["created_at"] = str(
         vacancy.get("created_at") or vacancy.get("updated_at") or changed_at
     )
-    vacancy["profile"] = str(vacancy.get("profile") or "")
+    # У Habr и внешней формы резюме нет: не возвращаем пустое поле в отчёт.
+    if str(vacancy.get("channel", "")) in ("habr", "external"):
+        vacancy.pop("profile", None)
+    else:
+        vacancy["profile"] = str(vacancy.get("profile") or "")
     vacancy["status"] = update.status
     vacancy["updated_at"] = changed_at
     if update.status in TERMINAL_STATUSES:
@@ -450,10 +461,13 @@ async def update_status(update: StatusUpdate) -> dict[str, Any]:
 
     for path in report_files():
         data = read_report(path)
+        wanted = None if update.profile is None else profile_value(update.profile)
         rows = [
             row
             for row in data["vacancies"]
-            if not isinstance(row, dict) or str(row.get("url", "")) != update.url
+            if not isinstance(row, dict)
+            or str(row.get("url", "")) != update.url
+            or (wanted is not None and profile_key(row) != wanted)
         ]
         if len(rows) != len(data["vacancies"]):
             data["vacancies"] = rows
@@ -474,7 +488,7 @@ async def update_status(update: StatusUpdate) -> dict[str, Any]:
         "summary": summary,
         "attempts": vacancy.get("attempts", 0),
         "reason": str(vacancy.get("reason", "")),
-        "profile": vacancy["profile"],
+        "profile": str(vacancy.get("profile", "")),
         "created_at": vacancy["created_at"],
         "updated_at": vacancy["updated_at"],
     }

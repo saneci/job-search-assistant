@@ -5,6 +5,8 @@ import json
 from datetime import date
 from pathlib import Path
 
+import pytest
+
 import agent.processed as processed_module
 from agent.processed import ProcessedStore
 
@@ -425,6 +427,23 @@ def test_profile_is_written_and_preserved_on_update(tmp_path: Path) -> None:
     assert row["profile"] == "Java Developer"
 
 
+@pytest.mark.parametrize("channel", ["habr", "external"])
+def test_habr_records_do_not_store_empty_profile(tmp_path: Path, channel: str) -> None:
+    """У Habr и внешней формы нет резюме: пустое поле не пишется."""
+    store = ProcessedStore(tmp_path, today=date(2026, 10, 21))
+    store.record(
+        url="https://career.habr.com/vacancies/1",
+        title="Java",
+        company="Ozon",
+        status="skipped",
+        profile="",
+        channel=channel,
+    )
+
+    row = read_day(tmp_path, "2026-10-21")["vacancies"][0]
+    assert "profile" not in row
+
+
 def test_created_at_survives_move_and_update(tmp_path: Path) -> None:
     """При переносе в другой файл дата создания не меняется, дата изменения — да."""
     store = ProcessedStore(tmp_path, today=date(2026, 10, 21))
@@ -507,3 +526,120 @@ def test_report_updated_at_changes_on_rewrite(
     assert first == "2026-10-21T10:00:01+03:00"
     assert second == "2026-10-21T10:00:03+03:00"
 
+
+def test_same_vacancy_with_different_profiles_is_two_records(tmp_path: Path) -> None:
+    """Разными резюме можно отвечать на одну вакансию: записи независимы."""
+    store = ProcessedStore(tmp_path, today=date(2026, 10, 21))
+    url = "https://hh.ru/vacancy/1"
+
+    store.record(
+        url=url,
+        title="Java",
+        company="Ozon",
+        status="sent",
+        profile="Java Developer",
+    )
+    store.record(
+        url=url,
+        title="Java",
+        company="Ozon",
+        status="queued",
+        profile="Team Lead",
+    )
+
+    rows = read_day(tmp_path, "2026-10-21")["vacancies"]
+    assert [(row["profile"], row["status"]) for row in rows] == [
+        ("Java Developer", "sent"),
+        ("Team Lead", "queued"),
+    ]
+    assert store.find("Java", "Ozon", url, "Java Developer") == "2026-10-21"
+    assert store.find("Java", "Ozon", url, "Team Lead") == "2026-10-21"
+    assert store.find("Java", "Ozon", url, "Data Scientist") is None
+
+
+def test_retry_updates_only_its_profile(tmp_path: Path) -> None:
+    """Повтор с одним резюме не трогает запись другого резюме."""
+    url = "https://hh.ru/vacancy/1"
+    store = ProcessedStore(tmp_path, today=date(2026, 10, 21))
+    store.record(
+        url=url,
+        title="Java",
+        company="Ozon",
+        status="error",
+        profile="Java Developer",
+    )
+    store.record(
+        url=url,
+        title="Java",
+        company="Ozon",
+        status="error",
+        profile="Team Lead",
+    )
+
+    store.roll_to(date(2026, 10, 22))
+    store.record(
+        url=url,
+        title="Java",
+        company="Ozon",
+        status="sent",
+        profile="Java Developer",
+    )
+
+    yesterday = read_day(tmp_path, "2026-10-21")["vacancies"]
+    today = read_day(tmp_path, "2026-10-22")["vacancies"]
+
+    assert [(row["profile"], row["status"]) for row in yesterday] == [("Team Lead", "error")]
+    assert [(row["profile"], row["status"], row["attempts"]) for row in today] == [
+        ("Java Developer", "sent", 2)
+    ]
+
+
+def test_load_keeps_records_of_different_profiles(tmp_path: Path) -> None:
+    """Загрузка истории не считает записи разных резюме копиями."""
+    url = "https://hh.ru/vacancy/1"
+    row = {
+        "url": url,
+        "title": "Java",
+        "company": "Ozon",
+        "status": "error",
+        "attempts": 1,
+        "created_at": "2026-10-20T10:00:00+03:00",
+        "updated_at": "2026-10-20T10:00:00+03:00",
+    }
+    write_day(
+        tmp_path,
+        "2026-10-20",
+        [dict(row, profile="Java Developer"), dict(row, profile="Team Lead")],
+    )
+
+    store = ProcessedStore(tmp_path, today=date(2026, 10, 21))
+    store.load()
+
+    assert store.dropped_copies == 0
+    assert store.find("Java", "Ozon", url, "Java Developer") == "2026-10-20"
+    assert store.find("Java", "Ozon", url, "Team Lead") == "2026-10-20"
+
+
+def test_profile_key_ignores_case_and_extra_spaces(tmp_path: Path) -> None:
+    """Профиль сравнивается без учёта регистра и лишних пробелов."""
+    store = ProcessedStore(tmp_path, today=date(2026, 10, 21))
+    url = "https://hh.ru/vacancy/1"
+
+    store.record(
+        url=url,
+        title="Java",
+        company="Ozon",
+        status="error",
+        profile="Java Developer",
+    )
+    store.record(
+        url=url,
+        title="Java",
+        company="Ozon",
+        status="sent",
+        profile="  java   developer ",
+    )
+
+    rows = read_day(tmp_path, "2026-10-21")["vacancies"]
+    assert len(rows) == 1
+    assert rows[0]["attempts"] == 2

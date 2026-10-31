@@ -213,6 +213,17 @@
                 max-width: 200px;
             }
 
+            .profile-cell {
+                color: var(--muted-strong);
+                font-size: .85rem;
+                max-width: 200px;
+            }
+
+            .profile-cell.empty {
+                color: var(--muted-empty);
+                font-style: italic;
+            }
+
             .reason-cell {
                 color: var(--muted);
                 font-size: .82rem;
@@ -405,7 +416,7 @@
                     padding: 10px 12px;
                 }
 
-                .title-cell, .company-cell, .reason-cell {
+                .title-cell, .company-cell, .profile-cell, .reason-cell {
                     max-width: 220px;
                 }
             }
@@ -686,6 +697,8 @@
                                 aria-pressed="false">hh.ru</button>
                         <button class="filter-btn" type="button" data-channel="habr"
                                 aria-pressed="false">Habr Career</button>
+                        <button class="filter-btn" type="button" data-channel="external"
+                                aria-pressed="false">Сайт компании</button>
                         <button class="filter-btn" type="button" data-channel="unknown"
                                 aria-pressed="false">Без канала</button>
                         </div>
@@ -711,10 +724,11 @@
                 <table id="vacancyTable" style="display:none;">
                     <thead>
                     <tr>
+                        <th>Резюме</th>
                         <th>Вакансия</th>
                         <th>Компания</th>
-                        <th>Статус</th>
                         <th>Причина / Комментарий</th>
+                        <th>Статус</th>
                         <th>Дата</th>
                     </tr>
                     </thead>
@@ -916,6 +930,12 @@
                 for (const v of filtered) {
                     const tr = document.createElement('tr');
 
+                    // Резюме: у Habr и внешней формы его нет.
+                    const tdProfile = document.createElement('td');
+                    tdProfile.className = 'profile-cell' + (v.profile ? '' : ' empty');
+                    tdProfile.textContent = v.profile || '—';
+                    tr.appendChild(tdProfile);
+
                     // Вакансия
                     const tdTitle = document.createElement('td');
                     tdTitle.className = 'title-cell';
@@ -945,6 +965,7 @@
                     const isTerminal = TERMINAL_STATUSES.has(currentStatus);
                     select.className = 'status-select ' + currentStatus;
                     select.dataset.url = v.url;
+                    select.dataset.profile = v.profile || '';
                     select.dataset.report = v.report_name || '';
                     if (isTerminal) {
                         select.disabled = true;
@@ -973,6 +994,7 @@
                         const oldStatus = currentStatus;
                         const oldClass = target.className;
                         const url = target.dataset.url;
+                        const profile = target.dataset.profile || '';
                         const reportName = target.dataset.report;
 
                         // Терминальный статус фиксируется только после явного подтверждения.
@@ -997,6 +1019,7 @@
                                 body: JSON.stringify({
                                     report_name: reportName,
                                     url: url,
+                                    profile: profile,
                                     status: newStatus
                                 })
                             });
@@ -1014,8 +1037,13 @@
                             const result = await resp.json();
 
                             // Запись перенесена в отчёт текущей даты: обновляем строку и убираем копии.
-                            const vac = allVacancies.find(x => x.url === url && x.report_name === reportName)
-                                || allVacancies.find(x => x.url === url);
+                            const vac = allVacancies.find(
+                                x => x.url === url
+                                    && (x.profile || '') === profile
+                                    && x.report_name === reportName
+                            ) || allVacancies.find(
+                                x => x.url === url && (x.profile || '') === profile
+                            );
                             if (vac) {
                                 vac.status = newStatus;
                                 if (result.report_name) vac.report_name = result.report_name;
@@ -1041,13 +1069,15 @@
                     });
 
                     tdStatus.appendChild(select);
-                    tr.appendChild(tdStatus);
 
-                    // Причина
+                    // Причина идёт сразу после компании.
                     const tdReason = document.createElement('td');
                     tdReason.className = 'reason-cell' + (v.reason ? '' : ' empty');
                     tdReason.textContent = v.reason || '—';
                     tr.appendChild(tdReason);
+
+                    // Статус после причины: так проще читать строку.
+                    tr.appendChild(tdStatus);
 
                     // Дата и время
                     const tdTime = document.createElement('td');

@@ -14,6 +14,7 @@ from agent.config import load_config
 from agent.logging_setup import RunLogger
 from agent.models import VacancyCard, VacancyDetails
 from agent.pipeline import (
+    _process_and_remember,
     _process_vacancies,
     _process_vacancy,
     channel_for,
@@ -51,7 +52,7 @@ def test_habr_channel_uses_own_session_and_profile(tmp_path: Path) -> None:
     assert channel.name == HABR
     assert state_path.name == "habr-state.json"
     assert profile_dir is not None
-    assert profile_dir.name == "browser-profile"
+    assert profile_dir.name == "habr-profile"
 
 
 def test_habr_feed_runs_without_queries_and_boost(
@@ -166,6 +167,131 @@ def test_feed_card_with_response_is_recorded_without_opening(
     assert rows[0]["reason"] == "отклик уже отправлен"
     assert rows[0]["channel"] == "habr"
     assert "skipped_already_responded" in events
+
+
+def test_external_response_record_has_channel(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Пропуск из-за отклика на сайте компании тоже получает источник."""
+    config = load_config(write_config(tmp_path))
+    card = VacancyCard(
+        title="Java-разработчик",
+        company="Ozon",
+        url="https://career.habr.com/vacancies/1000167337",
+        external_response=True,
+    )
+
+    def fake_search(
+        page: Any, query: str, page_index: int
+    ) -> tuple[list[VacancyCard], int | None]:
+        del page, query, page_index
+        return [card], 1
+
+    monkeypatch.setattr("agent.habr_search.open_search_page", fake_search)
+    monkeypatch.setattr("agent.pipeline._ensure_session_alive", lambda page: None)
+
+    stats = make_stats()
+    logger = RunLogger(tmp_path / "logs", run_id="habr-external")
+    store = ProcessedStore(tmp_path / "report", today=date.today())
+    _process_vacancies(
+        page=None,  # type: ignore[arg-type]
+        config=config,
+        profile=None,  # type: ignore[arg-type]
+        llm=None,  # type: ignore[arg-type]
+        stats=stats,
+        logger=logger,
+        processed=store,
+    )
+    logger.close()
+
+    rows = json.loads(store.path.read_text(encoding="utf-8"))["vacancies"]
+    assert rows[0]["status"] == "skipped"
+    assert rows[0]["reason"] == "Отклик на сайте компании"
+    assert rows[0]["channel"] == "external"
+
+
+def test_process_vacancy_returns_external_for_external_blocker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Страница с формой на сайте компании даёт канал отчёта external."""
+    config = load_config(write_config(tmp_path))
+    card = VacancyCard(
+        title="Go-разработчик",
+        company="VK",
+        url="https://career.habr.com/vacancies/1000169504",
+    )
+    details = VacancyDetails(
+        url=card.url,
+        title=card.title,
+        company=card.company,
+        salary="",
+        description="",
+        blocker="external_form",
+    )
+    monkeypatch.setattr("agent.habr_vacancy.open_vacancy", lambda page, vacancy: details)
+    stats = make_stats()
+    logger = RunLogger(tmp_path / "logs", run_id="external-blocker")
+
+    result = _process_vacancy(
+        None,  # type: ignore[arg-type]
+        config,
+        None,  # type: ignore[arg-type]
+        None,  # type: ignore[arg-type]
+        stats,
+        logger,
+        card,
+    )
+    logger.close()
+
+    assert result == "external"
+    assert [item["url"] for item in stats.queued] == [card.url]
+
+
+def test_retry_external_response_gets_external_channel(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Повтор вакансии внешней формы тоже пишет канал external."""
+    config = load_config(write_config(tmp_path))
+    card = VacancyCard(
+        title="Go-разработчик",
+        company="VK",
+        url="https://career.habr.com/vacancies/1000169504",
+    )
+
+    def fake_process(
+        page: Any,
+        config: Any,
+        profile: Any,
+        llm: Any,
+        stats: Any,
+        logger: Any,
+        vacancy: VacancyCard,
+    ) -> str:
+        del page, config, profile, llm, logger, vacancy
+        stats.queued.append({"url": card.url, "reason": "external"})
+        return "external"
+
+    monkeypatch.setattr("agent.pipeline._process_vacancy", fake_process)
+    stats = make_stats()
+    logger = RunLogger(tmp_path / "logs", run_id="retry-external")
+    store = ProcessedStore(tmp_path / "report", today=date.today())
+
+    _process_and_remember(
+        None,  # type: ignore[arg-type]
+        config,
+        None,  # type: ignore[arg-type]
+        None,  # type: ignore[arg-type]
+        stats,
+        logger,
+        store,
+        card,
+        channel_for(config),
+    )
+    logger.close()
+
+    rows = json.loads(store.path.read_text(encoding="utf-8"))["vacancies"]
+    assert rows[0]["status"] == "queued"
+    assert rows[0]["channel"] == "external"
 
 
 def test_channel_flag_overrides_config(tmp_path: Path) -> None:

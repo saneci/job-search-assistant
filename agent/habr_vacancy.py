@@ -16,7 +16,6 @@ from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import Locator, Page, TimeoutError as PlaywrightTimeoutError
 
 from .browser import NAVIGATION_TIMEOUT_MS, CaptchaError, PageLoadError, detect_captcha
-from .habr_search import SUITABLE_URL
 from .hh_vacancy import (
     ResponseResult,
     STATUS_ALREADY_RESPONDED,
@@ -29,8 +28,13 @@ from .hh_vacancy import (
 from .models import VacancyCard, VacancyDetails
 
 HABR_BASE_URL = "https://career.habr.com"
-# Ручной вход открываем на главной: кнопка «Войти» ведёт на account.habr.com.
-LOGIN_URL = f"{HABR_BASE_URL}/"
+HOME_URL = f"{HABR_BASE_URL}/"
+# Ручной вход открываем сразу на OAuth-странице: она ведёт на account.habr.com,
+# где рисуется hCaptcha. Лишний клик по «Войти» только откладывает её загрузку.
+LOGIN_URL = f"{HABR_BASE_URL}/users/auth/tmid"
+# Гостю Habr показывает меню входа. У авторизованного пользователя его нет:
+# это устойчивый признак сессии, не зависящий от адреса ленты.
+USER_AUTH_MENU_SELECTOR = ".user-auth-menu"
 
 TITLE_SELECTORS = ("h1.page-title__title", "h1")
 DESCRIPTION_SELECTORS = (".vacancy-description__text", ".style-ugc")
@@ -45,7 +49,6 @@ RESPONSE_MESSAGE_SELECTOR = ".vacancy-response__message"
 
 RESPOND_RE = re.compile(r"^\s*откликнуться\s*$", re.IGNORECASE)
 SUBMIT_RE = re.compile(r"дополнить\s+отклик", re.IGNORECASE)
-LOGIN_LINK = "Войти"
 
 # Отрисовка после загрузки и ожидание формы отклика.
 RENDER_WAIT_MS = 1500
@@ -157,15 +160,29 @@ def response_state(page: Page) -> dict[str, object]:
 
 
 def is_authenticated(page: Page) -> bool:
-    """Проверяет вход на Habr, не уводя пользователя с текущей страницы."""
+    """Проверяет вход на Habr по видимой кнопке «Войти» в шапке.
+
+    Контейнер ``.user-auth-menu`` сам по себе не говорит о госте. Гостя
+    выдаёт видимая кнопка или ссылка «Войти». Проверяем все элементы: первым
+    в разметке идёт мобильный, он скрыт на десктопе и не должен считаться
+    признаком гостя.
+    """
     try:
-        if "career.habr.com" not in page.url:
-            page.goto(SUITABLE_URL, wait_until="domcontentloaded", timeout=NAVIGATION_TIMEOUT_MS)
+        if "career.habr.com" not in page.url or "account.habr.com" in page.url.lower():
+            page.goto(HOME_URL, wait_until="domcontentloaded", timeout=NAVIGATION_TIMEOUT_MS)
             page.wait_for_timeout(1000)
         if "account.habr.com" in page.url.lower():
             return False
-        login = page.get_by_role("link", name=LOGIN_LINK).first
-        return not _is_visible(login)
+        for selector in (
+            f"{USER_AUTH_MENU_SELECTOR} button",
+            f"{USER_AUTH_MENU_SELECTOR} a",
+        ):
+            controls = page.locator(selector)
+            for index in range(min(controls.count(), 5)):
+                control = controls.nth(index)
+                if _is_visible(control) and "войти" in (control.inner_text() or "").strip().lower():
+                    return False
+        return True
     except PlaywrightError:
         return False
 

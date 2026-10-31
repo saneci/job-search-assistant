@@ -175,6 +175,225 @@ RESPONSE_RESULT_WAIT_SECONDS = 15
 # сразу, React ещё не применил текст, и нажатие уходит в пустоту.
 LETTER_SETTLE_MS = 1000
 
+# Выпадающий список резюме в форме отклика: нативный select или кастомный список.
+# Порядок важен: сначала точные признаки, затем общий data-qa с «resume».
+RESUME_TRIGGER_SELECTORS = (
+    "[data-qa*='select-resume']",
+    "[data-qa*='resume-select']",
+    "button[data-qa*='resume']",
+    "[data-qa*='resume']",
+    "[role='combobox']",
+)
+RESUME_SELECT_SELECTORS = (
+    "select[data-qa*='resume']",
+    "select[name*='resume']",
+    "[data-qa*='select-resume'] select",
+    "[role='combobox'] select",
+    "select",
+)
+RESUME_OPTION_SELECTORS = (
+    "[role='option']",
+    "[data-qa*='resume-option']",
+    "option",
+)
+# Сколько ждём появления опций после открытия кастомного списка.
+RESUME_OPTIONS_WAIT_MS = 1000
+RESUME_OPTIONS_POLL_MS = 100
+
+# Резюме выбирается внутри модалки, поэтому имя задаёт канал на запуск:
+# сигнатура respond остаётся прежней, а повтор с другим резюме создаёт новый канал.
+_resume_name = ""
+
+
+class ResumeNotFoundError(RuntimeError):
+    """В форме отклика нет резюме с настроенным названием."""
+
+    def __init__(self, resume: str, options: Sequence[str] = ()) -> None:
+        super().__init__(f"в форме отклика нет резюме «{resume}»")
+        self.resume = resume
+        self.options = tuple(options)
+
+
+def set_resume_name(name: str) -> None:
+    """Задаёт резюме, которое агент выбирает в форме отклика."""
+    global _resume_name
+    _resume_name = (name or "").strip()
+
+
+def resume_name() -> str:
+    """Резюме, которое агент выбирает в форме отклика."""
+    return _resume_name
+
+
+def _resume_words(text: str) -> str:
+    """Нормализация названия резюме для сравнения."""
+    return " ".join((text or "").lower().replace("ё", "е").split())
+
+
+def match_resume(options: Sequence[str], name: str) -> str | None:
+    """Название опции, совпадающее с резюме: регистр и пробелы не важны."""
+    wanted = _resume_words(name)
+    for option in options:
+        if _resume_words(option) == wanted:
+            return option
+    return None
+
+
+def _option_texts(select: Locator) -> list[str]:
+    """Названия опций нативного select: они не считаются видимыми до открытия."""
+    try:
+        options = select.locator("option")
+        total = min(options.count(), 50)
+    except PlaywrightError:
+        return []
+    texts: list[str] = []
+    for index in range(total):
+        try:
+            text = (options.nth(index).inner_text() or "").strip()
+        except PlaywrightError:
+            continue
+        if text:
+            texts.append(text)
+    return texts
+
+
+def _native_resume_select(
+    scope: Locator | Page, name: str = ""
+) -> tuple[Locator | None, list[str]]:
+    """Нативный select с резюме и его опции; без него — (None, []).
+
+    Если в форме несколько select, предпочитаем тот, где есть нужное имя:
+    название резюме надёжнее порядка элементов.
+    """
+    fallback: tuple[Locator, list[str]] | None = None
+    for selector in RESUME_SELECT_SELECTORS:
+        locator = scope.locator(selector)
+        try:
+            total = min(locator.count(), 5)
+        except PlaywrightError:
+            continue
+        for index in range(total):
+            select = locator.nth(index)
+            if not _is_visible(select):
+                continue
+            texts = _option_texts(select)
+            if not texts:
+                continue
+            if fallback is None:
+                fallback = (select, texts)
+            if name and match_resume(texts, name) is not None:
+                return select, texts
+    if name:
+        # Нужного имени нет: это может быть не резюме, а другой select формы.
+        return None, fallback[1] if fallback is not None else []
+    return fallback if fallback is not None else (None, [])
+
+
+def _visible_resume_options(scope: Locator | Page) -> list[str]:
+    """Видимые опции кастомного списка резюме."""
+    for selector in RESUME_OPTION_SELECTORS:
+        locator = scope.locator(selector)
+        try:
+            total = min(locator.count(), 50)
+        except PlaywrightError:
+            continue
+        texts: list[str] = []
+        for index in range(total):
+            item = locator.nth(index)
+            if not _is_visible(item):
+                continue
+            try:
+                text = (item.inner_text() or "").strip()
+            except PlaywrightError:
+                continue
+            if text:
+                texts.append(text)
+        if texts:
+            return texts
+    return []
+
+
+def _wait_for_resume_options(scope: Locator | Page) -> list[str]:
+    """Ждёт опции после открытия кастомного списка: анимация и подгрузка."""
+    deadline = time.monotonic() + RESUME_OPTIONS_WAIT_MS / 1000
+    while True:
+        options = _visible_resume_options(scope)
+        if options or time.monotonic() >= deadline:
+            return options
+        time.sleep(RESUME_OPTIONS_POLL_MS / 1000)
+
+
+def _find_resume_option(scope: Locator | Page, text: str) -> Locator | None:
+    """Видимая опция с нужным названием: регистр и пробелы не важны."""
+    wanted = _resume_words(text)
+    for selector in RESUME_OPTION_SELECTORS:
+        locator = scope.locator(selector)
+        try:
+            total = min(locator.count(), 50)
+        except PlaywrightError:
+            continue
+        for index in range(total):
+            item = locator.nth(index)
+            if not _is_visible(item):
+                continue
+            try:
+                value = (item.inner_text() or "").strip()
+            except PlaywrightError:
+                continue
+            if _resume_words(value) == wanted:
+                return item
+    return None
+
+
+def resume_options(scope: Locator | Page) -> list[str]:
+    """Названия резюме из выпадающего списка формы отклика.
+
+    Нативный select отдаёт опции без открытия списка, кастомный — только
+    видимые опции: перед их чтением список нужно открыть.
+    """
+    _select, options = _native_resume_select(scope)
+    if options:
+        return options
+    return _visible_resume_options(scope)
+
+
+def select_resume(scope: Locator | Page, name: str) -> None:
+    """Выбирает резюме по названию; без совпадения — ResumeNotFoundError."""
+    select, options = _native_resume_select(scope, name)
+    if select is not None:
+        matched = match_resume(options, name)
+        if matched is None:
+            raise ResumeNotFoundError(name, options)
+        try:
+            select.select_option(label=matched)
+        except PlaywrightError as exc:
+            raise ResumeNotFoundError(name, options) from exc
+        return
+
+    # Кастомный список: опции появляются только после клика по триггеру.
+    native_options = options
+    options = _visible_resume_options(scope)
+    if not options:
+        trigger = _first_visible(scope, RESUME_TRIGGER_SELECTORS)
+        if trigger is not None:
+            try:
+                trigger.click()
+            except PlaywrightError:
+                trigger = None
+            if trigger is not None:
+                options = _wait_for_resume_options(scope)
+
+    matched = match_resume(options, name)
+    if matched is None:
+        raise ResumeNotFoundError(name, options or native_options)
+    option = _find_resume_option(scope, matched)
+    if option is None:
+        raise ResumeNotFoundError(name, options or native_options)
+    try:
+        option.click()
+    except PlaywrightError as exc:
+        raise ResumeNotFoundError(name, options or native_options) from exc
+
 
 class VacancyParseError(RuntimeError):
     """Не удалось разобрать страницу вакансии."""
@@ -370,6 +589,10 @@ def respond(
         reason = response_notice(page)
         _dismiss(page)
         return _result(blocker, reason=reason)
+
+    # Резюме выбираем до письма: hh.ru привязывает отклик к выбранному резюме.
+    if _resume_name:
+        select_resume(scope, _resume_name)
 
     # Письмо вставляем, если форма позволяет (по ТЗ).
     if _fill_letter(page, scope, letter):
@@ -693,9 +916,11 @@ def _find_action(
 
 def _first_visible(scope: Locator | Page, selectors: Sequence[str]) -> Locator | None:
     for selector in selectors:
-        locator = scope.locator(selector).first
-        if _is_visible(locator):
-            return locator
+        locator = scope.locator(selector)
+        # Заглушки в тестах могут не поддерживать `.first`: тогда смотрим сам список.
+        first = getattr(locator, "first", locator)
+        if _is_visible(first):
+            return first
     return None
 
 
@@ -725,7 +950,7 @@ def _has_exact_text(scope: Locator | Page, text: str) -> bool:
 def _is_visible(locator: Locator) -> bool:
     try:
         return locator.count() > 0 and locator.is_visible()
-    except PlaywrightError:
+    except (PlaywrightError, AttributeError):
         return False
 
 

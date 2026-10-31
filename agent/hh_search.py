@@ -113,20 +113,34 @@ def match_keyword(text: str, keywords: Sequence[str]) -> str | None:
     return None
 
 
-def vacancy_keys(title: str, company: str, url: str) -> tuple[str, ...]:
-    """Ключи вакансии для дедупликации между запросами и страницами выдачи.
+def profile_key(profile: str) -> str:
+    """Нормализованное имя резюме для ключа дедупликации."""
+    return " ".join((profile or "").lower().replace("ё", "е").split())
+
+
+def vacancy_keys(
+    title: str,
+    company: str,
+    url: str,
+    profile: str | None = "",
+) -> tuple[str, ...]:
+    """Ключи записи для дедупликации: вакансия и название резюме.
 
     Первый ключ — id вакансии из URL, второй — «название + компания». Второй
     нужен потому, что работодатели публикуют одну и ту же вакансию несколько раз
-    (разные id, одинаковые название и компания).
+    (разные id, одинаковые название и компания). Профиль входит в каждый ключ:
+    разными резюме можно отвечать на одну вакансию, и такие записи независимы.
+    `profile=None` — старый режим поиска без учёта резюме.
     """
     keys: list[str] = []
+    # Пустой профиль — старые ключи без резюме: так работали прошлые отчёты.
+    suffix = f":profile:{profile_key(profile)}" if profile else ""
     vid = vacancy_id(url)
     if vid:
-        keys.append(f"id:{vid}")
+        keys.append(f"id:{vid}{suffix}")
     text = " ".join(f"{title} {company}".lower().replace("ё", "е").split())
     if text:
-        keys.append(f"text:{text}")
+        keys.append(f"text:{text}{suffix}")
     return tuple(keys)
 
 

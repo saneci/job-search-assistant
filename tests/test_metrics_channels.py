@@ -37,6 +37,15 @@ def test_channels_are_counted() -> None:
     assert by_key["habr"]["label"] == "Habr Career"
 
 
+def test_external_response_is_its_own_channel() -> None:
+    """Отклик на сайте компании — канал external, а не habr."""
+    metrics = build_metrics([vacancy("https://career.habr.com/vacancies/4", "skipped", "external")])
+
+    by_key = {item["key"]: item for item in metrics["channels"]}
+    assert by_key["external"]["count"] == 1
+    assert by_key["external"]["label"] == "Сайт компании"
+
+
 def test_old_records_go_to_unknown_channel() -> None:
     metrics = build_metrics([vacancy("https://hh.ru/vacancy/4", "sent")])
 
