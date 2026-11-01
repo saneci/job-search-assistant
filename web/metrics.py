@@ -13,15 +13,17 @@ from collections import Counter
 from datetime import datetime
 from typing import Any, Iterable, Mapping
 
-STATUS_ORDER = ("skipped", "excluded", "queued", "error", "sent", "rejected", "offer")
+STATUS_ORDER = ("skipped", "excluded", "queued", "error", "sent", "invite", "rejected", "offer")
 STATUS_LABELS = {
     "skipped": "Не подходит",
     "excluded": "Исключено",
     "queued": "В очереди",
     "error": "Ошибки",
     # «Отправлено» — статус вакансии: отклик ушёл, ответа пока нет.
-    # Все отклики вместе с отказами и офферами считаются отдельно (responses).
+    # Все отклики вместе с приглашениями, отказами и офферами считаются
+    # отдельно (responses).
     "sent": "Отправлено",
+    "invite": "Приглашения",
     "rejected": "Отказы",
     "offer": "Офферы",
     "unknown": "Неизвестно",
@@ -32,12 +34,17 @@ STATUS_COLORS = {
     "queued": "var(--color-queued)",
     "error": "var(--color-error)",
     "sent": "var(--color-sent)",
+    "invite": "var(--color-invite)",
     "rejected": "var(--color-rejected)",
     "offer": "var(--color-offer)",
     "unknown": "var(--color-base)",
 }
-# Статусы, которые означают отправленный отклик: ожидание ответа, отказ и оффер.
-RESPONSE_STATUSES = ("sent", "rejected", "offer")
+# Статусы, которые означают отправленный отклик и его исход: ожидание ответа,
+# приглашение, отказ и оффер.
+RESPONSE_STATUSES = ("sent", "invite", "rejected", "offer")
+# Финальные исходы: запись, дошедшая до оффера или отказа, показывается в своём
+# исходе даже если по ней было приглашение.
+FINAL_STATUSES = ("rejected", "offer")
 
 # Каналы поиска: у записей старых отчётов поля нет — они идут как unknown.
 CHANNEL_LABELS = {
@@ -62,6 +69,21 @@ def profile_value(value: Any) -> str:
 def profile_key(record: Mapping[str, Any]) -> str:
     """Нормализованное имя резюме записи."""
     return profile_value(record.get("profile", ""))
+
+
+def effective_status(record: Mapping[str, Any]) -> str:
+    """Статус записи для графиков с учётом факта приглашения.
+
+    `invited_at` ставится один раз и не сбрасывается. Поэтому запись, у которой
+    статус позже откатили в `sent` или `skipped`, всё равно считается дошедшей
+    до приглашения. Оффер и отказ — финальные исходы, их не перекрываем.
+    """
+    status = str(record.get("status", "") or "unknown")
+    if status in FINAL_STATUSES:
+        return status
+    if str(record.get("invited_at", "")).strip():
+        return "invite"
+    return status
 
 
 def _vacancy_key(record: Mapping[str, Any], index: int) -> tuple[str, ...]:
@@ -119,8 +141,16 @@ def _percent(part: int, whole: int) -> float:
     return round(part * 100 / whole, 2)
 
 
-def _rate_text(value: float | None) -> str:
-    return "—" if value is None else f"{value:.1f}%"
+def _rate_text(value: float | None, *, has_data: bool = True) -> str:
+    """Проценты для карточек конверсий: прочерк только в пустом отчёте.
+
+    Пока в отчётах есть вакансии, все четыре карточки показывают проценты:
+    при нулевом знаменателе это «0.0%», а не прочерк. Иначе в одной строке
+    соседствуют «0.0%» и «—», и непонятно, где ошибка данных, а где ноль.
+    """
+    if value is None:
+        return "0.0%" if has_data else "—"
+    return f"{value:.1f}%"
 
 
 def _plural(count: int, one: str, few: str, many: str) -> str:
@@ -147,15 +177,26 @@ def _format_updated(value: str) -> str:
 
 
 def _pie_css(segments: list[tuple[int, str]], total: int) -> str:
-    """CSS conic-gradient по реальным долям; пустой отчёт — нейтральный круг."""
+    """CSS conic-gradient по реальным долям; пустой отчёт — нейтральный круг.
+
+    У каждого стопа одна позиция: запись «цвет начало%» понимают все браузеры.
+    Двойные позиции «цвет начало% конец%» поддерживают не все, и тогда браузер
+    отбрасывает весь градиент — круг остаётся без заливки.
+    """
     if total <= 0:
         return "var(--surface-2)"
     stops: list[str] = []
     cumulative = 0.0
     for count, color in segments:
+        if count <= 0:
+            # Пустой сегмент не рисуется, иначе появляются стопы нулевой ширины.
+            continue
         start = cumulative
         cumulative += count * 100 / total
-        stops.append(f"{color} {start:.2f}% {cumulative:.2f}%")
+        stops.append(f"{color} {start:.2f}%")
+        stops.append(f"{color} {cumulative:.2f}%")
+    if not stops:
+        return "var(--surface-2)"
     return "conic-gradient(" + ", ".join(stops) + ")"
 
 
@@ -181,6 +222,9 @@ def build_metrics(
 
     Все статусы считаются как есть: `sent` — отправленные отклики (включая
     отклики, отправленные вручную), `rejected` и `offer` — их исход.
+    Факт приглашения берётся из `invited_at`: запись с датой приглашения
+    считается приглашённой, даже если статус позже откатили в `sent` или
+    `skipped`. Оффер и отказ перекрывают этот факт как финальные исходы.
     """
     rows = dedupe_vacancies(vacancies)
     total = len(rows)
@@ -190,25 +234,31 @@ def build_metrics(
         for name in ("hh", "habr", "external", "unknown")
         if channel_counts.get(name)
     ]
-    raw_counts = Counter(str(row.get("status", "") or "unknown") for row in rows)
+    raw_counts = Counter(effective_status(row) for row in rows)
     counts = {status: raw_counts.get(status, 0) for status in STATUS_ORDER}
     unknown = total - sum(counts.values())
     if unknown:
         counts["unknown"] = unknown
 
     sent = counts["sent"]
+    invites = counts["invite"]
     rejected = counts["rejected"]
     offers = counts["offer"]
     responses = sum(counts[status] for status in RESPONSE_STATUSES)
     others = total - responses
+    # «Дошло до приглашения»: факт хранится в `invited_at`, поэтому счётчик не
+    # уменьшается, когда запись переходит из `invite` в `offer` или `rejected`.
+    invited_total = sum(1 for row in rows if str(row.get("invited_at", "")).strip())
 
     pie_segments = [
-        (responses - offers, "var(--color-sent)"),
+        (responses - offers - invites, "var(--color-sent)"),
+        (invites, "var(--color-invite)"),
         (offers, "var(--color-offer)"),
         (others, "var(--color-base)"),
     ]
     pie_legend = [
-        _item("responses", "Отклики", responses - offers, total, "var(--color-sent)"),
+        _item("responses", "Отклики", responses - offers - invites, total, "var(--color-sent)"),
+        _item("invite", "Приглашения", invites, total, "var(--color-invite)"),
         _item("offer", "Офферы", offers, total, "var(--color-offer)"),
         _item("others", "Остальные", others, total, "var(--color-base)"),
     ]
@@ -224,17 +274,21 @@ def build_metrics(
 
     fate = [
         _item("sent", "Без ответа", sent, responses, "var(--color-base)"),
+        _item("invite", "Приглашения", invites, responses, "var(--color-invite)"),
         _item("rejected", "Отказы", rejected, responses, "var(--color-rejected)"),
         _item("offer", "Офферы", offers, responses, "var(--color-offer)"),
     ]
 
     rates = {
         "response": _rate(responses, total),
+        "invite": _rate(invites, responses),
         "offer": _rate(offers, responses),
         "rejected": _rate(rejected, responses),
         "ignore": _rate(sent, responses),
     }
-    rate_text = {key: _rate_text(value) for key, value in rates.items()}
+    rate_text = {
+        key: _rate_text(value, has_data=total > 0) for key, value in rates.items()
+    }
     updated_text = _format_updated(updated_at)
     words = {
         "vacancies": _plural(total, "вакансия", "вакансии", "вакансий"),
@@ -242,6 +296,10 @@ def build_metrics(
         "vacancies_genitive": _plural(total, "вакансии", "вакансий", "вакансий"),
         "responses": _plural(responses, "отклик", "отклика", "откликов"),
         "offers": _plural(offers, "оффер", "оффера", "офферов"),
+        "invites": _plural(invites, "приглашение", "приглашения", "приглашений"),
+        "invited_total": _plural(
+            invited_total, "приглашение", "приглашения", "приглашений"
+        ),
         "rejected": _plural(rejected, "отказ", "отказа", "отказов"),
         "sent": _plural(sent, "отклик", "отклика", "откликов"),
     }
@@ -261,6 +319,8 @@ def build_metrics(
         "words": words,
         "counts": counts,
         "sent": sent,
+        "invites": invites,
+        "invited_total": invited_total,
         "rejected": rejected,
         "offers": offers,
         "responses": responses,

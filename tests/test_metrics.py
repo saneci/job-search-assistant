@@ -45,6 +45,7 @@ def test_counts_all_statuses() -> None:
     assert metrics["others"] == 4
     assert metrics["rates"] == {
         "response": 50.0,
+        "invite": 0.0,
         "offer": 25.0,
         "rejected": 25.0,
         "ignore": 50.0,
@@ -54,9 +55,10 @@ def test_counts_all_statuses() -> None:
     # Дата — в том же виде, что колонка «Дата» на странице отчёта.
     assert metrics["updated_at_text"] == "2026-10-24 12:00:00"
     assert metrics["updated_text"].startswith("Обновлено: 2026-10-24 12:00:00")
-    assert metrics["pie_legend"][1]["count"] == 1
+    # Пирог: отклики без офферов и приглашений, приглашения, офферы, остальные.
+    assert [item["count"] for item in metrics["pie_legend"]] == [3, 0, 1, 4]
     assert metrics["pie_css"].startswith("conic-gradient(")
-    assert [item["count"] for item in metrics["fate"]] == [2, 1, 1]
+    assert [item["count"] for item in metrics["fate"]] == [2, 0, 1, 1]
     # Подпись «N откликов из M вакансий» требует родительного падежа.
     assert metrics["words"]["vacancies_genitive"] == "вакансий"
 
@@ -103,8 +105,31 @@ def test_sent_status_and_responses_are_labelled_differently() -> None:
     assert labels["sent"] == "Отправлено"
     assert metrics["counts"]["sent"] == 2
     assert metrics["responses"] == 4
-    assert [item["count"] for item in metrics["pie_legend"]] == [3, 1, 0]
+    assert [item["count"] for item in metrics["pie_legend"]] == [3, 0, 1, 0]
     assert metrics["pie_legend"][0]["label"] == "Отклики"
+
+
+def test_invite_is_a_response_and_survives_status_change() -> None:
+    """Приглашение — исход отклика; факт из `invited_at` остаётся после смены статуса."""
+    rows = [
+        row("1", "sent"),
+        row("2", "invite"),
+        row("3", "offer"),
+    ]
+    rows[2]["invited_at"] = "2026-10-25T10:00:00+03:00"
+
+    metrics = build_metrics(rows)
+
+    assert metrics["invites"] == 1
+    assert metrics["responses"] == 3
+    # Оффер пришёл после приглашения: текущий статус уже не invite, но факт виден.
+    assert metrics["invited_total"] == 1
+    assert metrics["rates"]["invite"] == 33.3
+    labels = {item["key"]: item["label"] for item in metrics["pie_legend"]}
+    assert labels["invite"] == "Приглашения"
+    assert [item["count"] for item in metrics["pie_legend"]] == [1, 1, 1, 0]
+    # «Судьба откликов»: без ответа, приглашения, отказы, офферы.
+    assert [item["key"] for item in metrics["fate"]] == ["sent", "invite", "rejected", "offer"]
 
 
 def test_offer_is_a_response() -> None:
@@ -168,3 +193,75 @@ def test_unknown_status_is_counted_separately() -> None:
     assert metrics["counts"]["unknown"] == 1
     assert metrics["distribution"][-1]["key"] == "unknown"
     assert metrics["others"] == 1
+
+
+def test_pie_css_stops_are_portable() -> None:
+    """Стопы градиента — по одной позиции: двойные понимают не все браузеры."""
+    metrics = build_metrics(
+        [row("1", "sent"), row("2", "offer"), row("3", "skipped")]
+    )
+
+    css = metrics["pie_css"]
+    assert css.startswith("conic-gradient(")
+    stops = css.removeprefix("conic-gradient(").removesuffix(")").split(", ")
+    assert stops
+    for stop in stops:
+        # «цвет 0.00%» — одна позиция, «цвет 0.00% 9.34%» — две, несовместимые.
+        assert stop.count("%") == 1
+
+
+def test_zero_count_in_legend_is_a_number() -> None:
+    """Ноль в легенде — число: график показывает реальный счётчик, а не прочерк."""
+    metrics = build_metrics([row("1", "sent")])
+
+    fate = {item["key"]: item for item in metrics["fate"]}
+    assert fate["invite"]["count"] == 0
+    assert fate["sent"]["count"] == 1
+    # Прочерк остался только в карточках, где делить не на что.
+    assert metrics["rate_text"]["invite"] == "0.0%"
+    assert build_metrics([])["rate_text"]["invite"] == "—"
+
+
+def test_invited_at_marks_record_as_invited_after_status_rollback() -> None:
+    """Дата приглашения важнее откатанного статуса.
+
+    `invited_at` ставится один раз и не сбрасывается: если статус вернули в
+    `sent` или `skipped`, запись всё равно считается приглашённой. Оффер и
+    отказ остаются финальными исходами.
+    """
+    rows = [
+        row("1", "sent"),
+        row("2", "skipped"),
+        row("3", "invite"),
+        row("4", "rejected"),
+        row("5", "offer"),
+    ]
+    for index in (0, 1, 2, 4):
+        rows[index]["invited_at"] = "2026-10-25T10:00:00+03:00"
+
+    metrics = build_metrics(rows)
+
+    # Приглашения: sent, skipped и invite с датой приглашения; оффер — в офферах.
+    assert metrics["counts"]["invite"] == 3
+    assert metrics["counts"]["sent"] == 0
+    assert metrics["counts"]["skipped"] == 0
+    assert metrics["invites"] == 3
+    assert metrics["offers"] == 1
+    assert metrics["rejected"] == 1
+    fate = {item["key"]: item["count"] for item in metrics["fate"]}
+    assert fate == {"sent": 0, "invite": 3, "rejected": 1, "offer": 1}
+
+
+def test_cards_show_percents_when_there_are_no_responses() -> None:
+    """Все четыре карточки единообразны: нет откликов — везде проценты, а не прочерк."""
+    metrics = build_metrics([row("1", "skipped"), row("2", "queued")])
+
+    assert metrics["responses"] == 0
+    assert metrics["rate_text"] == {
+        "response": "0.0%",
+        "invite": "0.0%",
+        "offer": "0.0%",
+        "rejected": "0.0%",
+        "ignore": "0.0%",
+    }
+

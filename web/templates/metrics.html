@@ -5,97 +5,11 @@
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <meta name="color-scheme" content="light dark">
         <title>Воронка поиска работы</title>
-        <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
-        <link rel="stylesheet" href="/static/styles.css">
-        <style>
-            /* Сетка метрик */
-            .metrics-grid {
-                display: grid;
-                grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-                gap: 16px;
-                margin-bottom: 24px;
-            }
-            .metric-card {
-                background: var(--surface); border-radius: 12px; padding: 20px;
-                box-shadow: var(--shadow-card); border-left: 4px solid var(--color-base);
-                transition: transform .15s, box-shadow .15s;
-            }
-            .metric-card:hover { transform: translateY(-2px); box-shadow: 0 4px 16px rgba(0, 0, 0, .1); }
-            .metric-card .label { font-size: .8rem; text-transform: uppercase; color: var(--muted); font-weight: 600; margin-bottom: 8px; }
-            .metric-card .value { font-size: 2rem; font-weight: 700; color: var(--text); }
-            .metric-card .sub { font-size: .85rem; color: var(--muted-strong); margin-top: 4px; }
-
-            /* Главный блок */
-            .main-panel {
-                background: var(--surface); border-radius: 12px; padding: 32px;
-                box-shadow: var(--shadow-card); display: grid;
-                grid-template-columns: 1fr 1fr; gap: 48px; align-items: stretch;
-            }
-
-            .chart-section { display: flex; flex-direction: column; }
-            .chart-section h2 {
-                font-size: 1.1rem; margin-bottom: 24px; font-weight: 600;
-                color: var(--text); border-bottom: 1px solid var(--border); padding-bottom: 12px;
-            }
-
-            /* Левая колонка: Пайчарт */
-            .pie-wrapper {
-                display: flex; flex-direction: column; align-items: center;
-                justify-content: center; gap: 32px; flex: 1;
-            }
-
-            .pie-chart {
-                width: 280px;
-                height: 280px;
-                border-radius: 50%;
-                background: var(--surface-2);
-            }
-
-            /* Легенда */
-            .pie-legend {
-                display: flex; flex-wrap: wrap; gap: 16px 24px;
-                justify-content: center; width: 100%;
-            }
-            .legend-item {
-                display: flex; align-items: center; gap: 10px;
-                font-size: 0.9rem; color: var(--muted-strong);
-            }
-            .legend-color { width: 14px; height: 14px; border-radius: 4px; }
-            .legend-item strong { color: var(--text); }
-
-            /* Правая колонка */
-            .right-column { display: flex; flex-direction: column; justify-content: space-between; gap: 32px; }
-            .stack-group { display: flex; flex-direction: column; gap: 12px; }
-            .stack-bar {
-                display: flex; height: 48px; border-radius: 8px;
-                overflow: hidden; box-shadow: inset 0 1px 3px rgba(0,0,0,0.1);
-            }
-            .stack-segment {
-                height: 100%; display: flex; align-items: center; justify-content: center;
-                color: white; font-size: 0.85rem; font-weight: 600;
-                transition: width 1s ease-out; overflow: hidden; white-space: nowrap;
-            }
-            .stack-segment span { padding: 0 8px; }
-
-            .empty-note {
-                grid-column: 1 / -1;
-                padding: 32px;
-                text-align: center;
-                color: var(--muted-strong);
-            }
-
-            /* Адаптивность */
-            @media (max-width: 992px) {
-                .main-panel { grid-template-columns: 1fr; gap: 40px; }
-            }
-            @media (max-width: 768px) {
-                .metrics-grid { grid-template-columns: repeat(2, 1fr); }
-                .main-panel { padding: 20px; }
-                .pie-chart { width: 220px; height: 220px; }
-                .pie-legend { flex-direction: column; align-items: flex-start; gap: 12px; }
-            }
-        </style>
+        <link rel="icon" href="{{ asset_url('favicon.svg') }}" type="image/svg+xml">
+        <link rel="stylesheet" href="{{ asset_url('base.css') }}">
+        <link rel="stylesheet" href="{{ asset_url('metrics.css') }}">
     </head>
+
     <body>
         <div class="container">
             <!-- Шапка -->
@@ -103,10 +17,10 @@
                 <div>
                     <h1>📊 Воронка поиска работы</h1>
                     <div class="meta">{{ metrics.updated_text }}</div>
-                    <div class="meta">Период воронки считается по дате первой обработки вакансии в приложением.</div>
+                    <div class="meta">Период воронки считается по дате первой обработки вакансии в приложении</div>
                 </div>
-                <div style="display: flex; gap: 12px; align-items: center;">
-                    <a href="/" class="theme-toggle" style="text-decoration: none;" title="На главную" aria-label="На главную">
+                <div class="header-actions">
+                    <a href="/" class="theme-toggle theme-toggle--link" title="На главную" aria-label="На главную">
                         🏠
                     </a>
                     <button class="theme-toggle" id="themeToggle" type="button">🌙</button>
@@ -115,11 +29,39 @@
 
             {% if metrics.period %}
             <div class="filters">
+                {% if metrics.profiles and metrics.profiles.options %}
+                <div class="profile-filter" id="profileFilter">
+                    <span class="filter-label" id="profileFilterLabel">Резюме:</span>
+                    <div class="profile-dropdown">
+                        <button class="profile-toggle" id="profileToggle" type="button"
+                                aria-haspopup="true" aria-expanded="false"
+                                aria-labelledby="profileFilterLabel"><span
+                                class="profile-toggle-text">{{ metrics.profiles.value_text }}</span><span
+                                class="profile-caret" aria-hidden="true"></span></button>
+                        <div class="profile-menu" id="profileMenu" hidden>
+                            <button class="profile-option{% if metrics.profiles.all_active %} checked{% endif %}"
+                                    type="button" data-profile-all="true"
+                                    aria-checked="{{ 'true' if metrics.profiles.all_active else 'false' }}"
+                                    role="menuitemcheckbox"><span class="profile-check"
+                                    aria-hidden="true">✓</span><span
+                                    class="profile-option-label">Все</span></button>
+                            {% for option in metrics.profiles.options %}
+                            <button class="profile-option{% if option.active %} checked{% endif %}"
+                                    type="button" data-profile="{{ option.key }}"
+                                    aria-checked="{{ 'true' if option.active else 'false' }}"
+                                    role="menuitemcheckbox"><span class="profile-check"
+                                    aria-hidden="true">✓</span><span
+                                    class="profile-option-label">{{ option.label }}</span></button>
+                            {% endfor %}
+                        </div>
+                    </div>
+                </div>
+                {% endif %}
                 <label>Период:</label>
                 <div class="filter-group">
                     {% for option in metrics.period.options %}
                     <a class="filter-btn{% if option.active %} active{% endif %}"
-                       href="/metrics?period={{ option.key }}"
+                       href="/metrics?period={{ option.key }}{{ metrics.profiles.query }}"
                        {% if option.active %}aria-current="true"{% endif %}>{{ option.label }}</a>
                     {% endfor %}
                 </div>
@@ -141,24 +83,24 @@
 
             <!-- Ключевые метрики -->
             <div class="metrics-grid">
-                <div class="metric-card" style="border-left-color: var(--color-sent);">
+                <div class="metric-card card-response">
                     <div class="label">Конверсия в отклик</div>
-                    <div class="value" style="color: var(--color-sent);">{{ metrics.rate_text.response }}</div>
+                    <div class="value">{{ metrics.rate_text.response }}</div>
                     <div class="sub">{{ metrics.responses }} {{ metrics.words.responses }} из {{ metrics.total }} {{ metrics.words.vacancies_genitive }}</div>
                 </div>
-                <div class="metric-card" style="border-left-color: var(--color-offer);">
+                <div class="metric-card card-offer">
                     <div class="label">Конверсия в оффер</div>
-                    <div class="value" style="color: var(--color-offer);">{{ metrics.rate_text.offer }}</div>
+                    <div class="value">{{ metrics.rate_text.offer }}</div>
                     <div class="sub">{{ metrics.offers }} {{ metrics.words.offers }} из {{ metrics.responses }}</div>
                 </div>
-                <div class="metric-card" style="border-left-color: var(--color-rejected);">
+                <div class="metric-card card-rejected">
                     <div class="label">Доля отказов</div>
-                    <div class="value" style="color: var(--color-rejected);">{{ metrics.rate_text.rejected }}</div>
+                    <div class="value">{{ metrics.rate_text.rejected }}</div>
                     <div class="sub">{{ metrics.rejected }} {{ metrics.words.rejected }} из {{ metrics.responses }}</div>
                 </div>
-                <div class="metric-card" style="border-left-color: var(--muted);">
+                <div class="metric-card card-ignore">
                     <div class="label">Игнор (молчание)</div>
-                    <div class="value" style="color: var(--muted-strong);">{{ metrics.rate_text.ignore }}</div>
+                    <div class="value">{{ metrics.rate_text.ignore }}</div>
                     <div class="sub">{{ metrics.sent }} {{ metrics.words.sent }} без ответа</div>
                 </div>
             </div>
@@ -171,7 +113,8 @@
                     <h2>Воронка найма (от просмотра до оффера)</h2>
                     <div class="pie-wrapper">
 
-                        <div class="pie-chart" style="background: {{ metrics.pie_css }};"></div>
+                        <div class="pie-chart"
+                             style="background-image: {{ metrics.pie_css }};"></div>
 
                         <div class="pie-legend">
                             {% for item in metrics.pie_legend %}
@@ -198,7 +141,7 @@
                                 </div>
                                 {% endfor %}
                             </div>
-                            <div class="pie-legend" style="justify-content: flex-start;">
+                            <div class="pie-legend pie-legend--start">
                                 {% for item in metrics.distribution %}
                                 <div class="legend-item"><div class="legend-color" style="background: {{ item.color }};"></div>{{ item.label }} ({{ item.count }})</div>
                                 {% endfor %}
@@ -214,14 +157,14 @@
                             <div class="stack-bar">
                                 {% for item in metrics.fate if item.count %}
                                 <div class="stack-segment" style="width: {{ item.percent }}%; background: {{ item.color }};" title="{{ item.label }}: {{ item.count }}">
-                                    {% if item.percent >= 10 %}<span>{{ item.label }}: {{ item.percent_text }}</span>{% endif %}
+                                    {% if item.percent >= 10 %}<span>{{ item.percent_text }}</span>{% endif %}
                                 </div>
                                 {% endfor %}
                             </div>
                             {% else %}
                             <div class="empty-note">Отправленных откликов пока нет.</div>
                             {% endif %}
-                            <div class="pie-legend" style="justify-content: flex-start;">
+                            <div class="pie-legend pie-legend--start">
                                 {% for item in metrics.fate %}
                                 <div class="legend-item"><div class="legend-color" style="background: {{ item.color }};"></div>{{ item.label }} ({{ item.count }})</div>
                                 {% endfor %}
@@ -244,7 +187,7 @@
                             {% else %}
                             <div class="empty-note">В отчётах пока нет данных о канале.</div>
                             {% endif %}
-                            <div class="pie-legend" style="justify-content: flex-start;">
+                            <div class="pie-legend pie-legend--start">
                                 {% for item in metrics.channels %}
                                 <div class="legend-item"><div class="legend-color" style="background: {{ item.color }};"></div>{{ item.label }} ({{ item.count }})</div>
                                 {% endfor %}
@@ -257,6 +200,141 @@
             {% endif %}
         </div>
 
-        <script src="/static/script.js"></script>
+        <script>
+            /* Фильтр по резюме: выбор накапливается, пока меню открыто.
+               Список закрывается и применяется, когда мышь уходит из меню. */
+            (function () {
+                const filter = document.getElementById('profileFilter');
+                const toggle = document.getElementById('profileToggle');
+                const menu = document.getElementById('profileMenu');
+                if (!filter || !toggle || !menu) return;
+                const options = Array.from(menu.querySelectorAll('[data-profile]'));
+                const allOption = menu.querySelector('[data-profile-all]');
+                const toggleText = toggle.querySelector('.profile-toggle-text');
+                const period = new URLSearchParams(window.location.search).get('period');
+                let dirty = false;
+                let leaveTimer = null;
+
+                function selectedKeys() {
+                    return options
+                        .filter((option) => option.classList.contains('checked'))
+                        .map((option) => option.dataset.profile);
+                }
+
+                function optionLabel(option) {
+                    const label = option.querySelector('.profile-option-label');
+                    return label ? label.textContent.trim() : option.textContent.trim();
+                }
+
+                function updateToggleText(keys) {
+                    if (!toggleText) return;
+                    if (keys.length === options.length) {
+                        toggleText.textContent = 'Все';
+                    } else if (!keys.length) {
+                        toggleText.textContent = 'Ничего не выбрано';
+                    } else if (keys.length === 1) {
+                        const only = options.find((option) => option.dataset.profile === keys[0]);
+                        toggleText.textContent = only ? optionLabel(only) : 'Выбрано: 1';
+                    } else {
+                        toggleText.textContent = `Выбрано: ${keys.length}`;
+                    }
+                }
+
+                function markOption(option, checked) {
+                    option.classList.toggle('checked', checked);
+                    option.setAttribute('aria-checked', checked ? 'true' : 'false');
+                }
+
+                function remember() {
+                    const keys = selectedKeys();
+                    if (allOption) {
+                        const all = options.length > 0 && keys.length === options.length;
+                        allOption.classList.toggle('checked', all);
+                        allOption.setAttribute('aria-checked', all ? 'true' : 'false');
+                    }
+                    updateToggleText(keys);
+                    dirty = true;
+                }
+
+                function apply(keys) {
+                    const url = new URL(window.location.href);
+                    url.search = '';
+                    if (period) url.searchParams.set('period', period);
+                    if (!keys.length) {
+                        // Снятые галочки сохраняются пустым параметром.
+                        url.searchParams.append('profile', '');
+                    } else if (keys.length < options.length) {
+                        keys.forEach((key) => url.searchParams.append('profile', key));
+                    }
+                    window.location.href = url.toString();
+                }
+
+                function closeMenu() {
+                    menu.hidden = true;
+                    toggle.setAttribute('aria-expanded', 'false');
+                }
+
+                /* Переход выполняется один раз — при закрытии меню: так можно отметить
+                   несколько резюме подряд без повторного открытия. */
+                function commitAndClose() {
+                    if (leaveTimer) {
+                        clearTimeout(leaveTimer);
+                        leaveTimer = null;
+                    }
+                    if (menu.hidden) return;
+                    closeMenu();
+                    if (!dirty) return;
+                    dirty = false;
+                    apply(selectedKeys());
+                }
+
+                toggle.addEventListener('click', () => {
+                    if (menu.hidden) {
+                        menu.hidden = false;
+                        toggle.setAttribute('aria-expanded', 'true');
+                    } else {
+                        commitAndClose();
+                    }
+                });
+
+                /* Между кнопкой и меню есть зазор: закрываем с задержкой и проверяем,
+                   не вернулась ли мышь. */
+                filter.addEventListener('mouseleave', () => {
+                    if (menu.hidden) return;
+                    if (leaveTimer) clearTimeout(leaveTimer);
+                    leaveTimer = setTimeout(() => {
+                        leaveTimer = null;
+                        if (menu.hidden) return;
+                        if (menu.matches(':hover') || toggle.matches(':hover')) return;
+                        commitAndClose();
+                    }, 200);
+                });
+
+                document.addEventListener('click', (event) => {
+                    if (!filter.contains(event.target)) commitAndClose();
+                });
+
+                document.addEventListener('keydown', (event) => {
+                    if (event.key === 'Escape') commitAndClose();
+                });
+
+                if (allOption) {
+                    allOption.addEventListener('click', () => {
+                        const selectAll = selectedKeys().length !== options.length;
+                        options.forEach((option) => markOption(option, selectAll));
+                        remember();
+                    });
+                }
+
+                options.forEach((option) => {
+                    option.addEventListener('click', () => {
+                        markOption(option, !option.classList.contains('checked'));
+                        remember();
+                    });
+                });
+            })();
+        </script>
+
+        <script src="{{ asset_url('script.js') }}"></script>
     </body>
 </html>

@@ -9,6 +9,7 @@ import pytest
 
 import agent.hh_vacancy as hh_vacancy
 from agent.hh_vacancy import (
+    STATUS_REJECTED,
     STATUS_SENT,
     STATUS_UNKNOWN,
     _has_success,
@@ -17,6 +18,7 @@ from agent.hh_vacancy import (
     detect_page_blocker,
     respond,
 )
+from agent.models import REJECTED_REASON
 
 
 class FakeItem:
@@ -125,7 +127,10 @@ class FakePage:
 
 
 def test_other_resume_button_means_current_profile_is_not_answered() -> None:
-    """«Отклик отправлен» другим резюме не делает вакансию пройденной."""
+    """«Отклик отправлен» другим резюме не делает вакансию пройденной.
+
+    В файл дня такая вакансия идёт со статусом skipped и отдельной причиной.
+    """
     page = FakePage(
         texts={"Отклик отправлен": [FakeItem("Отклик отправлен")]},
         roles={"button": [FakeItem("Отклик другим резюме")]},
@@ -133,6 +138,14 @@ def test_other_resume_button_means_current_profile_is_not_answered() -> None:
 
     assert _has_success(page)  # type: ignore[arg-type]
     assert not _is_already_responded(page)  # type: ignore[arg-type]
+    assert detect_page_blocker(page) == "other_resume"  # type: ignore[arg-type]
+
+
+def test_other_resume_button_skips_vacancy_without_success_text() -> None:
+    """Одна кнопка «Отклик другим резюме» — уже есть отклик другого резюме."""
+    page = FakePage(roles={"button": [FakeItem("Отклик другим резюме")]})
+
+    assert detect_page_blocker(page) == "other_resume"  # type: ignore[arg-type]
 
 
 def test_success_without_other_resume_button_is_answered() -> None:
@@ -152,8 +165,12 @@ def test_hidden_other_resume_button_is_ignored() -> None:
     assert _is_already_responded(page)  # type: ignore[arg-type]
 
 
-def test_rejected_by_other_resume_is_not_terminal() -> None:
-    """«Вам отказали» по другому резюме не закрывает вакансию для текущего."""
+def test_rejected_with_other_resume_button_is_not_terminal() -> None:
+    """«Вам отказали» + «Отклик другим резюме»: решает список резюме в форме.
+
+    Поэтому вакансию не пропускаем по состоянию страницы: сначала смотрим, есть
+    ли текущее резюме в списке.
+    """
     page = FakePage(
         texts={"Вам отказали": [FakeItem("Вам отказали")]},
         roles={"button": [FakeItem("Отклик другим резюме")]},
@@ -196,6 +213,42 @@ def test_respond_clicks_other_resume_button(monkeypatch: pytest.MonkeyPatch) -> 
     assert other.clicks == 1
     assert submit.clicks == 1
     assert result.status == STATUS_SENT
+
+
+def test_absent_resume_after_other_resume_means_rejection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Текущего резюме нет в списке формы — им уже откликались, статус rejected."""
+    page = FakePage()
+    modal = FakePage()
+    other = FakeItem("Отклик другим резюме")
+
+    def fake_find(scope: Any, selectors: Any, pattern: Any) -> Any:
+        del scope, selectors
+        if pattern is hh_vacancy.OTHER_RESUME_RE:
+            return other
+        return None
+
+    def fake_select(scope: Any, name: str) -> None:
+        del scope
+        raise hh_vacancy.ResumeNotFoundError(name)
+
+    monkeypatch.setattr(hh_vacancy, "detect_captcha", lambda page: False)
+    monkeypatch.setattr(hh_vacancy, "_find_action", fake_find)
+    monkeypatch.setattr(hh_vacancy, "_wait_for_response_ui", lambda page, waiter: "ready")
+    monkeypatch.setattr(hh_vacancy, "_response_scope", lambda page: modal)
+    monkeypatch.setattr(hh_vacancy, "detect_response_blocker", lambda scope: None)
+    monkeypatch.setattr(hh_vacancy, "select_resume", fake_select)
+    monkeypatch.setattr(hh_vacancy, "_dismiss", lambda page: None)
+    hh_vacancy.set_resume_name("Team Lead")
+    try:
+        result = respond(page, "Здравствуйте!")  # type: ignore[arg-type]
+    finally:
+        hh_vacancy.set_resume_name("")
+
+    assert other.clicks == 1
+    assert result.status == STATUS_REJECTED
+    assert result.reason == REJECTED_REASON
 
 
 def test_stale_success_does_not_confirm_our_response(

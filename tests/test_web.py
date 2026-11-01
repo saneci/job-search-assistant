@@ -102,6 +102,18 @@ def test_metrics_api(client: TestClient) -> None:
     assert metrics["rates"]["response"] == 75.0
 
 
+def test_record_date_uses_created_at_only() -> None:
+    """Период воронки считается по `created_at`: других источников даты нет."""
+    record = {
+        "created_at": "2026-10-24T10:00:00+03:00",
+        "updated_at": "2026-10-25T10:00:00+03:00",
+    }
+
+    assert web_main.record_date(record) == date(2026, 10, 24)
+    assert web_main.record_date({"updated_at": "2026-10-25T10:00:00+03:00"}) is None
+    assert web_main.record_date({}) is None
+
+
 @pytest.mark.parametrize(
     ("period", "expected"),
     [
@@ -146,7 +158,7 @@ def test_metrics_page_explains_period_basis(client: TestClient) -> None:
     response = client.get("/metrics")
 
     assert response.status_code == 200
-    assert "Период воронки считается по дате первой обработки вакансии в приложением." in response.text
+    assert "Период воронки считается по дате первой обработки вакансии в приложении" in response.text
 
 
 def test_metrics_api_filters_by_period(
@@ -247,6 +259,25 @@ def test_report_page_warns_about_terminal_status(client: TestClient) -> None:
     assert 'id="terminalDialog"' in response.text
     assert "необратимая операция" in response.text
     assert "TERMINAL_STATUSES" in response.text
+
+
+def test_report_filters_are_single_row_menus(client: TestClient) -> None:
+    """Фильтры отчёта — одна линия: сброс, дата, статус, источник, поиск, счётчик."""
+    response = client.get("/report")
+
+    assert response.status_code == 200
+    html = response.text
+    assert 'class="filters filters--inline"' in html
+    ids = ("filterReset", "dateToggle", "statusToggle", "channelToggle",
+           "searchInput", "countBadge")
+    positions = [html.index(f'id="{element_id}"') for element_id in ids]
+    assert positions == sorted(positions), "порядок элементов в линии фильтров изменился"
+    assert 'class="dropdown-menu"' in html
+    assert 'aria-haspopup="true"' in html
+    # Дата переехала из шапки в общую панель фильтров.
+    assert "header-filters" not in html
+    assert 'id="statusMenu"' in html and 'data-status="skipped"' in html
+    assert 'id="channelMenu"' in html and 'data-channel="habr"' in html
 
 
 def test_update_status_keeps_created_at(
@@ -450,8 +481,170 @@ def test_rejected_status_is_terminal(client: TestClient) -> None:
     assert "терминальный" in second.json()["detail"]
 
 
+def test_invite_status_can_be_set_from_sent(client: TestClient) -> None:
+    """Приглашение ставится из «Отправлено» и запоминает момент приглашения."""
+    response = client.post(
+        "/api/v1/update-status",
+        json={
+            "report_name": "2026-10-24.json",
+            "url": "https://hh.ru/vacancy/1",
+            "status": "invite",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["summary"]["invite"] == 1
+    row = web_main.find_vacancy("https://hh.ru/vacancy/1", None)
+    assert row is not None
+    assert row["status"] == "invite"
+    assert row["invited_at"]
+
+
+def test_invite_requires_sent_status(client: TestClient) -> None:
+    response = client.post(
+        "/api/v1/update-status",
+        json={
+            "report_name": "2026-10-24.json",
+            "url": "https://hh.ru/vacancy/4",
+            "status": "invite",
+        },
+    )
+
+    assert response.status_code == 409
+    assert "только после" in response.json()["detail"]
+
+
+def test_offer_can_be_set_after_invite(client: TestClient) -> None:
+    """Оффер ставится из «Приглашения»: переход invite → offer не терминальный."""
+    invite = client.post(
+        "/api/v1/update-status",
+        json={
+            "report_name": "2026-10-24.json",
+            "url": "https://hh.ru/vacancy/1",
+            "status": "invite",
+        },
+    )
+    offer = client.post(
+        "/api/v1/update-status",
+        json={
+            "report_name": "2026-10-24.json",
+            "url": "https://hh.ru/vacancy/1",
+            "status": "offer",
+        },
+    )
+
+    assert invite.status_code == 200
+    assert offer.status_code == 200
+    assert offer.json()["reason"] == "По отклику пришёл оффер"
+
+
+def test_report_page_shows_invite_status(client: TestClient) -> None:
+    response = client.get("/report")
+
+    assert response.status_code == 200
+    assert "invite: 'Приглашение'" in response.text
+    assert 'id="sumInvited"' in response.text
+
+
+def test_metrics_page_shows_only_percent_cards(client: TestClient) -> None:
+    """Вверху только проценты: абсолютного счётчика приглашений нет."""
+    response = client.get("/metrics")
+
+    assert response.status_code == 200
+    assert "Конверсия в отклик" in response.text
+    assert "Дошло до приглашения" not in response.text
+
+
+def test_metrics_legend_uses_numbers_for_empty_value(client: TestClient) -> None:
+    """Нулевой статус в легенде — число: на графике должен стоять ноль."""
+    response = client.get("/metrics")
+
+    assert response.status_code == 200
+    assert "Приглашения (0)" in response.text
+    assert "Приглашения (—)" not in response.text
+
+
+def test_metrics_fate_segments_show_only_percent(client: TestClient) -> None:
+    """Подписи сегментов «Судьбы откликов» — только проценты, без названий статусов."""
+    response = client.get("/metrics")
+
+    assert response.status_code == 200
+    assert "<span>33.3%</span>" in response.text
+    assert "<span>Без ответа:" not in response.text
+    assert "<span>Приглашения:" not in response.text
+    # Названия статусов остались в легенде под графиком.
+    assert "Без ответа (1)" in response.text
+
+
+def test_metrics_page_filters_by_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Фильтр по резюме оставляет только записи выбранного профиля."""
+    monkeypatch.setattr(web_main, "REPORTS_DIR", tmp_path)
+    java = vacancy("1", "sent")
+    java["profile"] = "Java Developer"
+    lead = vacancy("2", "rejected")
+    lead["profile"] = "Team Lead"
+    write_report(tmp_path, "2026-10-24.json", [java, lead])
+    client = TestClient(web_main.app)
+
+    response = client.get("/metrics", params={"profile": "java developer"})
+
+    assert response.status_code == 200
+    assert "1 отклик из 1 вакансии" in response.text
+    # Ссылки периода сохраняют выбранное резюме.
+    assert "period=month&amp;profile=java%20developer" in response.text
+    assert client.get(
+        "/api/v1/metrics", params={"profile": "java developer"}
+    ).json()["total"] == 1
+
+
+def test_metrics_profile_filter_labels_include_channel(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """В меню резюме видно источник, а записи без резюме выделены отдельным пунктом."""
+    monkeypatch.setattr(web_main, "REPORTS_DIR", tmp_path)
+    java = vacancy("1", "sent")
+    java["profile"] = "Java Developer"
+    java["channel"] = "hh"
+    habr = vacancy("2", "skipped")
+    habr["channel"] = "habr"
+    write_report(tmp_path, "2026-10-24.json", [java, habr])
+    client = TestClient(web_main.app)
+
+    page = client.get("/metrics")
+
+    assert page.status_code == 200
+    assert "hh.ru: Java Developer" in page.text
+    assert "Habr Career: без резюме" in page.text
+
+    # Пункт «Без резюме» фильтрует записи своего канала.
+    filtered = client.get("/api/v1/metrics", params={"profile": "без резюме: habr"})
+    assert filtered.json()["total"] == 1
+
+
+def test_metrics_page_keeps_cleared_profiles(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Пустой параметр — «ничего не выбрано»: галочки сняты, данные не режутся."""
+    monkeypatch.setattr(web_main, "REPORTS_DIR", tmp_path)
+    first = vacancy("1", "sent")
+    first["profile"] = "Java Developer"
+    second = vacancy("2", "skipped")
+    second["profile"] = "Team Lead"
+    write_report(tmp_path, "2026-10-24.json", [first, second])
+    client = TestClient(web_main.app)
+
+    response = client.get("/metrics", params={"profile": ""})
+
+    assert response.status_code == 200
+    assert "Ничего не выбрано" in response.text
+    assert "Все" in response.text
+    assert "2 вакансии" in response.text
+
+
 def test_static_theme_is_served(client: TestClient) -> None:
-    styles = client.get("/static/styles.css")
+    styles = client.get("/static/base.css")
     script = client.get("/static/script.js")
 
     assert styles.status_code == 200
@@ -460,17 +653,35 @@ def test_static_theme_is_served(client: TestClient) -> None:
     assert "THEME_KEY" in script.text
 
 
-def test_common_styles_live_in_one_file(client: TestClient) -> None:
-    """Палитра и общие блоки — в styles.css, без копий в шаблонах."""
-    styles = client.get("/static/styles.css").text
+def test_static_assets_are_cached_and_html_revalidated(client: TestClient) -> None:
+    """Статика с версией кэшируется навсегда, HTML перепроверяется, API — без кэша."""
+    page = client.get("/report")
+
+    assert page.status_code == 200
+    assert page.headers["cache-control"] == "no-cache"
+    assert "/static/base.css?v=" in page.text
+    assert "/static/report.css?v=" in page.text
+
+    asset = client.get("/static/base.css", params={"v": "1"})
+    assert asset.status_code == 200
+    assert asset.headers["cache-control"] == "public, max-age=31536000, immutable"
+
+    api = client.get("/api/v1/vacancies")
+    assert api.headers["cache-control"] == "no-store"
+
+
+def test_styles_are_split_into_modules(client: TestClient) -> None:
+    """Палитра и общие блоки — в base.css, у каждой страницы свой модуль стилей."""
+    base = client.get("/static/base.css").text
 
     for block in (":root", '[data-theme="dark"]', ".header", ".header--row",
                   ".filters", ".filter-btn", ".count-badge"):
-        assert block in styles
+        assert block in base
 
-    for page in ("/", "/metrics", "/report"):
+    for page, module in (("/", "index.css"), ("/metrics", "metrics.css"), ("/report", "report.css")):
         text = client.get(page).text
-        assert 'href="/static/styles.css"' in text
+        assert "/static/base.css?v=" in text
+        assert f"/static/{module}?v=" in text
         assert ":root" not in text
 
 
@@ -479,7 +690,7 @@ def test_favicon_is_linked_and_served(client: TestClient) -> None:
         response = client.get(page)
         assert response.status_code == 200
         assert 'rel="icon"' in response.text
-        assert 'href="/static/favicon.svg"' in response.text
+        assert 'href="/static/favicon.svg?v=' in response.text
 
     icon = client.get("/static/favicon.svg")
     assert icon.status_code == 200
@@ -505,3 +716,23 @@ def test_empty_reports_show_empty_state(
     assert response.status_code == 200
     assert "нет данных" in response.text
     assert client.get("/api/v1/metrics").json()["total"] == 0
+
+
+def test_status_select_colors_come_from_variables(client: TestClient) -> None:
+    """Цвета селектов статуса берутся из переменных темы, хардкодов в модуле нет."""
+    css = client.get("/static/report.css").text.replace("\r\n", "\n")
+
+    for status in ("sent", "skipped", "queued", "excluded", "error", "rejected", "offer"):
+        assert f".status-select.{status} {{\n    --select-tone: var(--color-{status});" in css
+    assert ".status-select.invite {\n    --select-tone: var(--color-invite-ink);" in css
+    assert "color-mix(in srgb, var(--select-tone, var(--color-base))" in css
+    for hardcoded in ("#e8f5e9", "#fff3e0", "#e3f2fd", "#f3e5f5", "#fce4ec", "#1e3a24"):
+        assert hardcoded not in css
+    assert '[data-theme="dark"] .status-select' not in css
+
+
+def test_table_cells_wrap_long_text(client: TestClient) -> None:
+    """Длинные причины и названия компаний переносятся внутри ячейки, а не наезжают на соседнюю."""
+    css = client.get("/static/report.css").text
+
+    assert "overflow-wrap: break-word" in css

@@ -7,19 +7,27 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from calendar import monthrange
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
+from urllib.parse import quote
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
-from .metrics import build_metrics, dedupe_vacancies, profile_key, profile_value
+from .metrics import (
+    CHANNEL_LABELS,
+    build_metrics,
+    dedupe_vacancies,
+    profile_key,
+    profile_value,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 REPORTS_DIR = PROJECT_ROOT / "data" / "report"
@@ -27,11 +35,25 @@ TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 # Статусы записи: те же, что в отчёте агента (agent/models.py STATUSES).
-STATUSES = ("sent", "skipped", "queued", "excluded", "error", "rejected", "offer")
+STATUSES = (
+    "sent",
+    "skipped",
+    "queued",
+    "excluded",
+    "error",
+    "invite",
+    "rejected",
+    "offer",
+)
+
+# Записи Habr и внешней формы идут без резюме: в фильтре это отдельный пункт
+# с названием канала.
+NO_PROFILE_LABEL = "без резюме"
 
 # Исход отклика человек ставит вручную: причина всегда одна и та же, попытки
 # отклика не пересчитываем (agent/models.py).
 STATUS_SENT = "sent"
+STATUS_INVITE = "invite"
 STATUS_REJECTED = "rejected"
 STATUS_OFFER = "offer"
 REJECTED_REASON = "По отклику пришёл отказ"
@@ -83,6 +105,26 @@ QUARTER_NAMES = ("I", "II", "III", "IV")
 app = FastAPI(title="Отчёты по вакансиям")
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+
+@app.middleware("http")
+async def cache_headers(request: Request, call_next):
+    """Заголовки кэширования по отраслевому правилу.
+
+    Статика подключается ссылками с версией (`asset_url`), поэтому её можно
+    кэшировать навсегда. HTML перепроверяется на каждом запросе: иначе браузер
+    покажет старую разметку после обновления приложения. Ответы API не
+    кэшируются совсем: данные меняются после каждой правки статуса.
+    """
+    response = await call_next(request)
+    path = request.url.path
+    if path.startswith("/static/"):
+        response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+    elif path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-store"
+    else:
+        response.headers["Cache-Control"] = "no-cache"
+    return response
 
 
 class StatusUpdate(BaseModel):
@@ -152,12 +194,49 @@ def write_report(path: Path, data: dict[str, Any]) -> None:
 
 
 def summarize(vacancies: list[dict[str, Any]]) -> dict[str, int]:
-    """Итоги по статусам — шапка отчёта."""
+    """Итоги по статусам — шапка отчёта.
+
+    Считаются текущие статусы: карточка «Приглашения» показывает, сколько
+    вакансий сейчас в этом статусе. «Сколько всего дошло до приглашения» —
+    это метрики, там факт берётся из `invited_at`.
+    """
     counts = {status: 0 for status in STATUSES}
     for vacancy in vacancies:
         status = str(vacancy.get("status", ""))
         counts[status] = counts.get(status, 0) + 1
     return counts
+
+
+# Версия файла статики: считается один раз и обновляется вместе с содержимым.
+_ASSET_VERSIONS: dict[str, tuple[int, int, str]] = {}
+
+
+def asset_version(name: str) -> str:
+    """Короткий отпечаток содержимого файла из `static`.
+
+    Файл читается только когда меняются его время правки или размер: иначе
+    версия берётся из памяти, чтобы не читать статику на каждый рендер.
+    """
+    path = STATIC_DIR / name
+    try:
+        info = path.stat()
+    except OSError:
+        return "0"
+    cached = _ASSET_VERSIONS.get(name)
+    if cached and cached[0] == info.st_mtime_ns and cached[1] == info.st_size:
+        return cached[2]
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()[:10]
+    _ASSET_VERSIONS[name] = (info.st_mtime_ns, info.st_size, digest)
+    return digest
+
+
+def asset_url(name: str) -> str:
+    """Ссылка на файл статики с версией: такой файл можно кэшировать навсегда."""
+    return f"/static/{name}?v={asset_version(name)}"
+
+
+# Шаблоны подключают стили и скрипты через версионированную ссылку.
+templates.env.globals["asset_url"] = asset_url
 
 
 def all_vacancies(paths: list[Path]) -> list[dict[str, Any]]:
@@ -210,18 +289,14 @@ def period_bounds(period: str, anchor: date) -> tuple[date, date]:
 def record_date(record: dict[str, Any]) -> date | None:
     """Дата создания записи для периода воронки.
 
-    Для старых отчётов, где `created_at` ещё нет, берётся `updated_at`:
-    другой даты в файле не сохранилось.
+    Источник один: `created_at`. Формат отчёта требует это поле, легаси-форматы
+    не поддерживаются: данные старых отчётов приведены к текущему виду.
     """
-    for field in ("created_at", "updated_at"):
-        value = str(record.get(field, "")).strip()
-        if not value:
-            continue
-        try:
-            return datetime.fromisoformat(value).date()
-        except ValueError:
-            continue
-    return None
+    value = str(record.get("created_at", "")).strip()
+    try:
+        return datetime.fromisoformat(value).date()
+    except ValueError:
+        return None
 
 
 def latest_record_date(records: list[dict[str, Any]]) -> date | None:
@@ -240,6 +315,90 @@ def filter_by_period(
         if value is not None and start <= value <= end:
             result.append(record)
     return result
+
+
+def selected_profiles(values: list[str] | None) -> set[str] | None:
+    """Ключи резюме из запроса; None — фильтр не включали.
+
+    Пустой список (страница получила `profile=`) — это «ничего не выбрано»:
+    пользователь снял все галочки, но фильтр ещё не задан.
+    """
+    if values is None:
+        return None
+    return {profile_value(value) for value in values if profile_value(value)}
+
+
+def channel_key(record: Mapping[str, Any]) -> str:
+    """Канал записи: неизвестное и пустое значение — `unknown`."""
+    value = str(record.get("channel", "") or "").strip().lower()
+    return value if value in CHANNEL_LABELS else "unknown"
+
+
+def profile_option_key(record: Mapping[str, Any]) -> str:
+    """Ключ пункта фильтра по резюме.
+
+    У записи с резюме ключ — нормализованное имя: формат ссылки не меняется.
+    Записи без резюме (Habr, сайт компании) группируются по каналу, поэтому
+    в их ключе есть канал: «без резюме: habr».
+    """
+    key = profile_key(record)
+    if key:
+        return key
+    return f"{NO_PROFILE_LABEL}: {channel_key(record)}"
+
+
+def profile_option_label(record: Mapping[str, Any]) -> str:
+    """Подпись пункта: канал и резюме, например «hh.ru: Java Developer»."""
+    channel = CHANNEL_LABELS[channel_key(record)]
+    name = str(record.get("profile", "") or "").strip()
+    return f"{channel}: {name or NO_PROFILE_LABEL}"
+
+
+def filter_by_profiles(
+    records: list[dict[str, Any]], profiles: set[str] | None
+) -> list[dict[str, Any]]:
+    """Оставляет записи выбранных резюме; без выбора фильтр не работает."""
+    if not profiles:
+        return records
+    return [
+        record
+        for record in records
+        # Ключ канала нужен для записей без резюме, старое имя — для ссылок,
+        # сохранённых до появления префиксов вида «hh.ru: Java Developer».
+        if profile_option_key(record) in profiles or profile_key(record) in profiles
+    ]
+
+
+def profile_filter(
+    records: list[dict[str, Any]], profiles: set[str] | None
+) -> dict[str, Any]:
+    """Состояние фильтра по резюме: подписи, галочки и хвост ссылок периода."""
+    names: dict[str, str] = {}
+    for record in records:
+        names.setdefault(profile_option_key(record), profile_option_label(record))
+    order = sorted(names, key=lambda key: names[key].lower())
+    options = [
+        {"key": key, "label": names[key], "active": profiles is None or key in profiles}
+        for key in order
+    ]
+    if profiles is None:
+        value_text = "Все"
+        query = ""
+    elif not profiles:
+        value_text = "Ничего не выбрано"
+        # Пустой параметр сохраняет снятые галочки при переключении периода.
+        query = "&profile="
+    else:
+        chosen = [key for key in order if key in profiles]
+        labels = [names[key] for key in chosen]
+        value_text = labels[0] if len(labels) == 1 else f"Выбрано: {len(labels)}"
+        query = "".join(f"&profile={quote(key)}" for key in chosen)
+    return {
+        "options": options,
+        "query": query,
+        "value_text": value_text,
+        "all_active": profiles is None,
+    }
 
 
 def period_label(period: str, start: date, end: date) -> str:
@@ -269,6 +428,7 @@ def current_metrics(
     paths: list[Path] | None = None,
     period: str | None = None,
     anchor: date | None = None,
+    profiles: list[str] | None = None,
 ) -> dict[str, Any]:
     """Метрики по выбранным файлам (по умолчанию — по всем отчётам).
 
@@ -276,9 +436,14 @@ def current_metrics(
     `created_at`: вакансия остаётся в когорте даты создания, даже если статус
     изменился позже. Точкой отсчёта служит последняя дата создания в данных,
     чтобы воронка не оказалась пустой из-за давно не обновлявшегося отчёта.
+
+    `profiles` — выбранные резюме: пусто и None значат «фильтр не задан», а
+    список ключей оставляет только записи этих резюме.
     """
     selected = report_files() if paths is None else paths
     items = dedupe_vacancies(all_vacancies(selected))
+    profile_scope = selected_profiles(profiles)
+    filters = profile_filter(items, profile_scope)
     period_info: dict[str, Any] | None = None
     if period is not None:
         if period not in PERIODS:
@@ -300,6 +465,7 @@ def current_metrics(
                 for key, label in PERIOD_LABELS.items()
             ],
         }
+    items = filter_by_profiles(items, profile_scope)
     updated_at = ""
     for path in selected:
         try:
@@ -314,6 +480,7 @@ def current_metrics(
     )
     if period_info is not None:
         result["period"] = period_info
+    result["profiles"] = filters
     return result
 
 
@@ -339,14 +506,18 @@ async def report(request: Request) -> HTMLResponse:
 
 @app.get("/metrics", response_class=HTMLResponse)
 @app.get("/metrics.html", response_class=HTMLResponse, include_in_schema=False)
-async def metrics(request: Request, period: str = DEFAULT_PERIOD) -> HTMLResponse:
+async def metrics(
+    request: Request,
+    period: str = DEFAULT_PERIOD,
+    profile: list[str] | None = Query(default=None),
+) -> HTMLResponse:
     """Воронка поиска работы: метрики по дневным отчётам за выбранный период."""
     if period not in PERIODS:
         raise HTTPException(status_code=422, detail=f"Неизвестный период: {period}")
     return templates.TemplateResponse(
         request=request,
         name="metrics.html",
-        context={"metrics": current_metrics(period=period)},
+        context={"metrics": current_metrics(period=period, profiles=profile)},
     )
 
 
@@ -385,7 +556,9 @@ async def list_vacancies(files: str = "") -> dict[str, Any]:
     по имени файла; для старых клиентов принимаем и дату без расширения.
     """
     selected = selected_reports(files)
-    vacancies = all_vacancies(selected)
+    # Та же дедупликация, что в метриках: повтор вакансии между файлами дня
+    # не должен дважды попадать в отчёт и в счётчик «Всего обработано».
+    vacancies = dedupe_vacancies(all_vacancies(selected))
     return {
         "summary": summarize(vacancies),
         "vacancies": vacancies,
@@ -400,11 +573,17 @@ async def get_report(report_name: str) -> dict[str, Any]:
 
 
 @app.get("/api/v1/metrics")
-async def get_metrics(files: str = "", period: str = "") -> dict[str, Any]:
+async def get_metrics(
+    files: str = "",
+    period: str = "",
+    profile: list[str] | None = Query(default=None),
+) -> dict[str, Any]:
     """Метрики по выбранным файлам дня; без периода — по всем отчётам."""
     if period and period not in PERIODS:
         raise HTTPException(status_code=422, detail=f"Неизвестный период: {period}")
-    return current_metrics(selected_reports(files), period=period or None)
+    return current_metrics(
+        selected_reports(files), period=period or None, profiles=profile
+    )
 
 
 @app.post("/api/v1/update-status")
@@ -414,7 +593,9 @@ async def update_status(update: StatusUpdate) -> dict[str, Any]:
     В отчётах одна запись на пару «URL и резюме»: вакансия с этим профилем
     удаляется из всех файлов, а обновлённая запись попадает в файл сегодняшней
     даты. `created_at` при этом не меняется, `updated_at` становится временем
-    правки. `rejected` и `offer` терминальны, `offer` ставится только из `sent`.
+    правки. `rejected` и `offer` терминальны: `invite` ставится только из `sent`,
+    `offer` — из `sent` или `invite`. Момент приглашения пишется в `invited_at`
+    и не сбрасывается при переходе в оффер или отказ.
     """
     if update.status not in STATUSES:
         raise HTTPException(status_code=422, detail=f"Неизвестный статус: {update.status}")
@@ -431,11 +612,19 @@ async def update_status(update: StatusUpdate) -> dict[str, Any]:
             status_code=409,
             detail=f"Статус «{label}» терминальный: изменить его нельзя",
         )
-    if update.status == STATUS_OFFER and current_status != STATUS_SENT:
+    if update.status == STATUS_INVITE and current_status != STATUS_SENT:
         raise HTTPException(
             status_code=409,
             detail=(
-                "Оффер можно поставить только после статуса «Отправлено» "
+                "Приглашение можно поставить только после статуса «Отправлено» "
+                f"(сейчас: {current_status or 'нет статуса'})"
+            ),
+        )
+    if update.status == STATUS_OFFER and current_status not in (STATUS_SENT, STATUS_INVITE):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Оффер можно поставить только после статуса «Отправлено» или «Приглашение» "
                 f"(сейчас: {current_status or 'нет статуса'})"
             ),
         )
@@ -452,6 +641,10 @@ async def update_status(update: StatusUpdate) -> dict[str, Any]:
         vacancy["profile"] = str(vacancy.get("profile") or "")
     vacancy["status"] = update.status
     vacancy["updated_at"] = changed_at
+    if update.status == STATUS_INVITE:
+        # Момент приглашения фиксируется один раз: по нему метрики считают
+        # «дошло до приглашения» и после перехода в оффер или отказ.
+        vacancy["invited_at"] = str(vacancy.get("invited_at") or changed_at)
     if update.status in TERMINAL_STATUSES:
         vacancy["reason"] = (
             REJECTED_REASON if update.status == STATUS_REJECTED else OFFER_REASON

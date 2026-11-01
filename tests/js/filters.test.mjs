@@ -6,7 +6,7 @@ const require = createRequire(import.meta.url);
 const f = require('../../web/static/filters.js');
 
 // Статусы отчёта: в браузере список приходит из STATUS_LABELS.
-const STATUSES = ['sent', 'skipped', 'queued', 'excluded', 'error', 'rejected', 'offer'];
+const STATUSES = ['sent', 'skipped', 'queued', 'excluded', 'error', 'invite', 'rejected', 'offer'];
 
 function vacancy(overrides = {}) {
     return {
@@ -227,5 +227,50 @@ test('регресс: даты сохраняются, но кнопку сбр�
     assert.deepEqual(restored.files, ['2026-10-27.json']);
     assert.equal(f.hasSelectedFilters(restored), false);
     assert.equal(f.hasSelectedFilters(restored, {includeFiles: true}), true);
+});
+
+/* «Выбрать всё» работает в обе стороны: снятая галочка означает «дат нет».
+   Пустой список файлов при этом означает «все даты», поэтому нужно отдельное
+   состояние datesNone. */
+test('normalizeFilters: снятые даты сохраняются флагом datesNone', () => {
+    const restored = f.normalizeFilters({datesNone: true}, STATUSES);
+
+    assert.equal(restored.datesNone, true);
+    assert.deepEqual(restored.files, []);
+});
+
+test('normalizeFilters: даты и флаг «дат нет» вместе не уживаются', () => {
+    const restored = f.normalizeFilters({datesNone: true, files: ['2026-10-27.json']}, STATUSES);
+
+    assert.equal(restored.datesNone, undefined);
+    assert.deepEqual(restored.files, ['2026-10-27.json']);
+});
+
+test('toSearchParams: снятые даты записываются как dates=none', () => {
+    const params = f.toSearchParams(filters({datesNone: true}));
+
+    assert.equal(params.get('dates'), 'none');
+    assert.equal(params.get('date'), null);
+});
+
+test('parseSearchParams: dates=none возвращает состояние без дат', () => {
+    const restored = f.parseSearchParams('?dates=none', STATUSES);
+
+    assert.notEqual(restored, null);
+    assert.equal(restored.datesNone, true);
+    assert.deepEqual(restored.files, []);
+});
+
+test('parseSearchParams: неизвестное значение dates игнорируется', () => {
+    const restored = f.parseSearchParams('?dates=all', STATUSES);
+
+    assert.notEqual(restored, null);
+    assert.equal(restored.datesNone, undefined);
+});
+
+test('полный круг: снятые даты сохраняются в адресе', () => {
+    const restored = f.parseSearchParams('?status=sent&dates=none', STATUSES);
+
+    assert.equal(f.toSearchParams(restored).toString(), 'status=sent&dates=none');
 });
 

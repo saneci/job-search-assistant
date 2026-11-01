@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from .hh_search import profile_key, vacancy_keys
-from .models import STATUSES
+from .models import INVITE_REASON, STATUSES, STATUS_INVITE, STATUS_SENT
 
 DATE_FORMAT = "%Y-%m-%d"
 
@@ -93,14 +93,6 @@ class ProcessedStore:
                 for key in keys:
                     self._seen.setdefault(key, day.strftime(DATE_FORMAT))
                     self._records[key] = (file, record)
-                # Старые вызовы без профиля ищут запись по ключам без резюме.
-                for key in vacancy_keys(
-                    str(record.get("title", "")),
-                    str(record.get("company", "")),
-                    str(record.get("url", "")),
-                    None,
-                ):
-                    self._records.setdefault(key, (file, record))
         return len(self._seen)
 
     def find(
@@ -131,6 +123,53 @@ class ProcessedStore:
         found.sort(key=_record_time, reverse=True)
         return found
 
+
+    def invite_other_resume(
+        self,
+        *,
+        url: str,
+        title: str,
+        company: str,
+        profile: str,
+    ) -> list[str]:
+        """Ставит `invite` записям той же вакансии, сделанным другими резюме.
+
+        Приглашение на собеседование приходит по отклику, поэтому меняются
+        только записи со статусом `sent` (переход `sent → invite`). Запись
+        текущего резюме не трогаем: её статус пишет вызывающий код.
+        Факт приглашения фиксируется в `invited_at` и не сбрасывается, когда
+        запись позже переходит в `offer` или `rejected`.
+        Возвращает названия резюме, которым проставлен статус `invite`.
+        """
+        del title, company  # вакансию опознаём по ссылке: она есть в записи
+        current = profile_key(profile)
+        updated: list[str] = []
+        seen: set[int] = set()
+        for _path, record in list(self._records.values()):
+            if id(record) in seen:
+                continue
+            seen.add(id(record))
+            if str(record.get("status", "")) != STATUS_SENT:
+                continue
+            if not _same_url(record, url):
+                continue
+            other = str(record.get("profile", ""))
+            if not other or profile_key(other) == current:
+                continue
+            # Дата приглашения ставится один раз: по ней считается «дошло до
+            # приглашения» даже после смены статуса.
+            if not str(record.get("invited_at", "")).strip():
+                record["invited_at"] = _now()
+            self._update(
+                record,
+                status=STATUS_INVITE,
+                reason=INVITE_REASON,
+                profile=other,
+                channel=str(record.get("channel", "")),
+                count_attempt=False,
+            )
+            updated.append(other)
+        return updated
 
     def record(
         self,
@@ -191,12 +230,14 @@ class ProcessedStore:
         reason: str,
         profile: str | None = None,
         channel: str = "",
+        count_attempt: bool = True,
     ) -> bool:
         """Обновляет запись о вакансии: повтор увеличивает счётчик попыток.
 
         По ключу `(url, profile)` должна остаться одна запись. Поэтому вакансия
         удаляется из всех дневных файлов, а обновлённая запись попадает в отчёт
-        сегодняшней даты.
+        сегодняшней даты. `count_attempt=False` — правка статуса без обработки
+        вакансии: счётчик попыток не растёт.
         """
         now = _now()
         if channel in ("habr", "external"):
@@ -209,7 +250,8 @@ class ProcessedStore:
             item.get("created_at") or item.get("updated_at") or now
         )
         item["status"] = status
-        item["attempts"] = int(item.get("attempts", 1)) + 1
+        if count_attempt:
+            item["attempts"] = int(item.get("attempts", 1)) + 1
         item["updated_at"] = now
         if channel:
             item["channel"] = channel
@@ -256,8 +298,6 @@ class ProcessedStore:
         for key in vacancy_keys(title, company, url, profile):
             self._seen.setdefault(key, day)
             self._records[key] = (self.path, item)
-        for key in vacancy_keys(title, company, url, None):
-            self._records[key] = (self.path, item)
 
 
 def _file_date(path: Path) -> date | None:
@@ -266,6 +306,11 @@ def _file_date(path: Path) -> date | None:
         return datetime.strptime(path.stem, DATE_FORMAT).date()
     except ValueError:
         return None
+
+
+def _same_url(row: dict[str, Any], url: str) -> bool:
+    """Запись относится к этой вакансии: ссылки совпадают."""
+    return bool(url) and str(row.get("url", "")) == url
 
 
 def _same_vacancy(row: dict[str, Any], item: dict[str, Any]) -> bool:
@@ -292,7 +337,7 @@ def _summary(items: list[dict[str, Any]]) -> dict[str, int]:
 
 
 def _normalize_times(item: dict[str, Any], now: str) -> dict[str, Any]:
-    """Дополняет старую запись датами, не меняя уже известные значения."""
+    """Дополняет запись датами, не меняя уже известные значения."""
     normalized = dict(item)
     created_at = str(
         normalized.get("created_at") or normalized.get("updated_at") or now
