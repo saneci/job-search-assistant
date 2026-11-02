@@ -8,7 +8,15 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from .hh_search import profile_key, vacancy_keys
-from .models import INVITE_REASON, STATUSES, STATUS_INVITE, STATUS_SENT
+from .models import (
+    ARCHIVE_REASON,
+    INVITE_REASON,
+    STATUSES,
+    STATUS_INVITE,
+    STATUS_OFFER,
+    STATUS_REJECTED,
+    STATUS_SENT,
+)
 
 DATE_FORMAT = "%Y-%m-%d"
 
@@ -109,6 +117,20 @@ class ProcessedStore:
                 return day
         return None
 
+    def find_record(
+        self,
+        title: str,
+        company: str,
+        url: str,
+        profile: str = "",
+    ) -> dict[str, Any] | None:
+        """Запись вакансии с этим резюме из отчётов, если она уже есть."""
+        for key in vacancy_keys(title, company, url, profile):
+            known = self._records.get(key)
+            if known is not None:
+                return known[1]
+        return None
+
     def pending(self, statuses: Sequence[str]) -> list[dict[str, Any]]:
         """Записи со статусами, которые нужно повторить (свежие сверху)."""
         wanted = set(statuses)
@@ -171,6 +193,38 @@ class ProcessedStore:
             updated.append(other)
         return updated
 
+    def mark_archived(
+        self,
+        *,
+        url: str,
+        title: str,
+        company: str,
+        profile: str = "",
+    ) -> bool:
+        """Помечает известную запись архивной, не меняя статус.
+
+        Экран «Вакансия в архиве» у уже обработанной вакансии не повод менять
+        статус: иначе разойдутся метрики и сводка. Причина становится
+        архивной: у записи с `archived: true` она одна и та же. Возвращает
+        False, если записи нет — тогда вызывающий код пишет вакансию как новую.
+        """
+        keys = vacancy_keys(title, company, url, profile)
+        known = next((self._records[key] for key in keys if key in self._records), None)
+        if known is None:
+            return False
+        item = known[1]
+        # Статус передаём текущим: _update перезапишет его тем же значением
+        # и перенесёт запись в отчёт сегодняшней даты.
+        return self._update(
+            item,
+            status=str(item.get("status", "")),
+            reason=ARCHIVE_REASON,
+            profile=str(item.get("profile", "")) or None,
+            channel=str(item.get("channel", "")),
+            count_attempt=False,
+            archived=True,
+        )
+
     def record(
         self,
         *,
@@ -181,6 +235,7 @@ class ProcessedStore:
         reason: str = "",
         profile: str | None = None,
         channel: str = "",
+        archived: bool = False,
     ) -> bool:
         """Записывает вакансию в отчёт дня; известную запись обновляет (повтор).
 
@@ -194,7 +249,12 @@ class ProcessedStore:
         known = next((self._records[key] for key in keys if key in self._records), None)
         if known is not None:
             return self._update(
-                known[1], status=status, reason=reason, profile=profile, channel=channel
+                known[1],
+                status=status,
+                reason=reason,
+                profile=profile,
+                channel=channel,
+                archived=archived,
             )
 
         now = _now()
@@ -214,6 +274,9 @@ class ProcessedStore:
             item["reason"] = reason
         if channel:
             item["channel"] = channel
+        if archived:
+            # Вакансия в архиве или доступ к ней закрыт: признак виден в UI.
+            item["archived"] = True
 
         items = _read(self.path)
         items.append(item)
@@ -231,6 +294,7 @@ class ProcessedStore:
         profile: str | None = None,
         channel: str = "",
         count_attempt: bool = True,
+        archived: bool = False,
     ) -> bool:
         """Обновляет запись о вакансии: повтор увеличивает счётчик попыток.
 
@@ -259,6 +323,12 @@ class ProcessedStore:
             item["reason"] = reason
         else:
             item.pop("reason", None)
+        if archived:
+            # Вакансия в архиве или доступ к ней закрыт: признак виден в UI.
+            item["archived"] = True
+        else:
+            # Вакансия снова в работе (например, повтор): архив снимается.
+            item.pop("archived", None)
 
         for file in self.directory.glob("*.json"):
             if file == self.path:
@@ -290,14 +360,88 @@ class ProcessedStore:
         Ключи с профилем — рабочая дедупликация: вакансия и резюме. Ключи без
         профиля остаются для обратной совместимости вызовов без `profile`.
         """
-        day = self.today.strftime(DATE_FORMAT)
+        self._remember_at(self.path, item)
+
+    def _remember_at(self, path: Path, item: dict[str, Any]) -> None:
+        """Индексирует запись и запоминает файл, в котором она лежит."""
+        day = _file_date(path)
+        day_text = day.strftime(DATE_FORMAT) if day else self.today.strftime(DATE_FORMAT)
         title = str(item.get("title", ""))
         company = str(item.get("company", ""))
         url = str(item.get("url", ""))
         profile = str(item.get("profile", ""))
         for key in vacancy_keys(title, company, url, profile):
-            self._seen.setdefault(key, day)
-            self._records[key] = (self.path, item)
+            self._seen.setdefault(key, day_text)
+            self._records[key] = (path, item)
+
+    def update_status(
+        self,
+        *,
+        url: str,
+        title: str,
+        company: str,
+        status: str,
+        reason: str,
+        profile: str = "",
+    ) -> bool:
+        """Меняет статус известной записи и переносит её в отчёт текущей даты.
+
+        Нужен для автоматической сверки со страницей откликов Habr. Запись
+        трогается только когда статус действительно меняется: повторный
+        «Отказ» или «Прочитано» не переписывает файл. `created_at` и
+        `attempts` сохраняются, `updated_at` становится временем сверки, при
+        `invite` заполняется `invited_at`. Терминальные `rejected` и `offer`
+        не переоткрываются, архив не меняется.
+        """
+        if status not in (STATUS_SENT, STATUS_INVITE, STATUS_REJECTED, STATUS_OFFER):
+            return False
+        keys = vacancy_keys(title, company, url, profile)
+        known = next((self._records[key] for key in keys if key in self._records), None)
+        if known is None:
+            return False
+        item = known[1]
+        current = str(item.get("status", ""))
+        if item.get("archived"):
+            return False
+        # Терминальные отказ и оффер не переоткрываем. Остальные статусы
+        # (sent, invite, skipped, queued, error, excluded) страница откликов
+        # может уточнить: она знает, что отклик действительно существует.
+        if current in (STATUS_REJECTED, STATUS_OFFER):
+            return False
+        if current == status:
+            return False
+        if current == STATUS_INVITE and status == STATUS_SENT:
+            return False
+        if status == STATUS_INVITE:
+            item["invited_at"] = str(item.get("invited_at") or _now())
+        return self._update(
+            item,
+            status=status,
+            reason=reason,
+            profile=profile or None,
+            channel=str(item.get("channel", "")),
+            count_attempt=False,
+        )
+
+    def update_status_in_place(
+        self,
+        *,
+        url: str,
+        title: str,
+        company: str,
+        status: str,
+        reason: str,
+        profile: str = "",
+    ) -> bool:
+        """Совместимое имя `update_status` для старого вызова сверки."""
+        return self.update_status(
+            url=url,
+            title=title,
+            company=company,
+            status=status,
+            reason=reason,
+            profile=profile,
+        )
 
 
 def _file_date(path: Path) -> date | None:

@@ -6,9 +6,11 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from playwright.sync_api import Error as PlaywrightError
 
-from agent.browser import BrowserSession
+from agent.browser import BrowserError, BrowserSession
 from agent.config import BrowserConfig
 from agent.logging_setup import RunLogger
 
@@ -185,6 +187,77 @@ def test_habr_login_reloads_once_without_captcha(tmp_path: Path) -> None:
 
     assert page.reloads == 1
     assert page.waits == 2
+
+
+class LoginPage:
+    """Страница входа: связка аккаунтов завершается после нажатия Enter."""
+
+    def __init__(self) -> None:
+        self.url = "https://account.habr.com/oauth/authorize/"
+        self.visited: list[str] = []
+        self.waits = 0
+
+    def goto(self, url: str, **kwargs: Any) -> None:
+        del kwargs
+        self.url = url
+        self.visited.append(url)
+
+    def wait_for_timeout(self, milliseconds: int) -> None:
+        del milliseconds
+        self.waits += 1
+        # Человек нажимает «Да», Habr возвращает его в Career.
+        self.url = "https://career.habr.com/"
+
+    def close(self) -> None:
+        return
+
+
+def test_login_waits_for_confirmation_without_reloading(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Вход подтвердился не сразу: проверка повторяется без повторного запуска."""
+    logger = RunLogger(tmp_path / "logs", run_id="login-wait")
+    session = BrowserSession(BrowserConfig(), tmp_path / "state.json", logger)
+    session._headless = False
+    page = LoginPage()
+    session.new_page = lambda: page  # type: ignore[assignment]
+    saved: list[bool] = []
+    session.save_state = lambda: saved.append(True)  # type: ignore[assignment]
+    monkeypatch.setattr("builtins.input", lambda prompt="": "")
+    calls: list[str] = []
+
+    def check(current: Any) -> bool:
+        calls.append(current.url)
+        return current.url.startswith("https://career.habr.com")
+
+    session.login_manually("https://account.habr.com/oauth/authorize/", check, "hh.ru")
+    logger.close()
+
+    assert len(calls) == 2
+    # Со страницы входа не уходим: иначе недоделанный вход сбрасывается.
+    assert page.visited == ["https://account.habr.com/oauth/authorize/"]
+    assert saved == [True]
+
+
+def test_login_fails_with_linking_hint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Если вход так и не подтвердился, ошибка подсказывает про связку аккаунтов."""
+    logger = RunLogger(tmp_path / "logs", run_id="login-timeout")
+    session = BrowserSession(BrowserConfig(), tmp_path / "state.json", logger)
+    session._headless = False
+    page = LoginPage()
+    page.wait_for_timeout = lambda milliseconds: None  # type: ignore[assignment]
+    session.new_page = lambda: page  # type: ignore[assignment]
+    session.save_state = lambda: None  # type: ignore[assignment]
+    monkeypatch.setattr("builtins.input", lambda prompt="": "")
+    monkeypatch.setattr("agent.browser.LOGIN_CONFIRM_WAIT_SECONDS", 0)
+
+    with pytest.raises(BrowserError, match="связать аккаунты"):
+        session.login_manually(
+            "https://account.habr.com/oauth/authorize/", lambda current: False, "hh.ru"
+        )
+    logger.close()
 
 
 def test_login_is_required_without_state_or_profile(tmp_path: Path) -> None:

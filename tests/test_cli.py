@@ -53,7 +53,7 @@ Examples:
 
 RETRY_HELP_TEXT = """Повторение обработки вакансий по списку прямых ссылок из отчётов, без поиска
 
-Опции (принимается одно значение):
+Аргументы (принимается одно значение):
   (без значения)  статусы из config.yaml: pipeline.retry.statuses (по умолчанию error)
   error           сбой обработки: страница не открылась, ошибка браузера или парсинга
   queued          требуется ручное действие пользователя: тест, анкета, внешняя форма, капча, пустое письмо
@@ -392,7 +392,7 @@ def test_help_uses_color_when_forced(monkeypatch, capsys) -> None:
 
     assert main(["--retry", "--help"]) == 0
     retry = capsys.readouterr().out
-    assert "\x1b[1;34mОпции (принимается одно значение):\x1b[0m" in retry
+    assert "\x1b[1;34mАргументы (принимается одно значение):\x1b[0m" in retry
 
     assert main(["--adsfa"]) == 2
     err = capsys.readouterr().err

@@ -425,6 +425,50 @@ def test_offer_status_can_be_set_manually(client: TestClient) -> None:
     assert result["reason"] == "По отклику пришёл оффер"
 
 
+def test_sent_status_sets_reason(client: TestClient, tmp_path: Path) -> None:
+    """Ручной перевод в «Отправлено» не оставляет причину прежнего статуса."""
+    path = tmp_path / "2026-10-24.json"
+    payload = web_main.read_report(path)
+    payload["vacancies"][3]["reason"] = "старая причина прежнего статуса"
+    web_main.write_report(path, payload)
+
+    response = client.post(
+        "/api/v1/update-status",
+        json={
+            "report_name": "2026-10-24.json",
+            "url": "https://hh.ru/vacancy/4",
+            "status": "sent",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["reason"] == "отклик уже отправлен"
+    row = web_main.find_vacancy("https://hh.ru/vacancy/4", None)
+    assert row is not None
+    assert row["status"] == "sent"
+    assert row["reason"] == "отклик уже отправлен"
+
+
+def test_sent_status_keeps_agent_reason(client: TestClient, tmp_path: Path) -> None:
+    """Повторное «Отправлено» не затирает причину, записанную агентом."""
+    path = tmp_path / "2026-10-24.json"
+    payload = web_main.read_report(path)
+    payload["vacancies"][0]["reason"] = "последнее предложение письма"
+    web_main.write_report(path, payload)
+
+    response = client.post(
+        "/api/v1/update-status",
+        json={
+            "report_name": "2026-10-24.json",
+            "url": "https://hh.ru/vacancy/1",
+            "status": "sent",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["reason"] == "последнее предложение письма"
+
+
 def test_offer_requires_sent_status(client: TestClient) -> None:
     response = client.post(
         "/api/v1/update-status",
@@ -736,3 +780,244 @@ def test_table_cells_wrap_long_text(client: TestClient) -> None:
     css = client.get("/static/report.css").text
 
     assert "overflow-wrap: break-word" in css
+
+
+def test_report_page_has_archived_filter_and_warning(client: TestClient) -> None:
+    """«В архиве» есть в фильтре статуса, а перевод в архив просит подтверждения."""
+    response = client.get("/report")
+
+    assert response.status_code == 200
+    html = response.text
+    assert 'data-status="archived"' in html
+    assert "В архиве" in html
+    # Архив терминальный: подтверждение то же, что у отказа и оффера.
+    assert "Зафиксировать архив?" in html
+    assert "терминальный" in html
+    assert "confirm: 'Зафиксировать архив'" in html
+
+
+def test_archived_vacancy_shows_archive_reason(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Причина архивной записи архивная, даже если в файле сохранилась старая."""
+    monkeypatch.setattr(web_main, "REPORTS_DIR", tmp_path)
+    item = vacancy("1", "error")
+    item["reason"] = "VacancyParseError: старая ошибка разбора"
+    item["archived"] = True
+    write_report(tmp_path, "2026-10-24.json", [item])
+    client = TestClient(web_main.app)
+
+    response = client.get("/api/v1/vacancies")
+
+    assert response.status_code == 200
+    row = response.json()["vacancies"][0]
+    assert row["reason"] == web_main.ARCHIVE_REASON
+    assert row["status"] == "error"
+    assert row["archived"] is True
+    # Файл отчёта не переписан: архивная причина подставляется при чтении.
+    stored = json.loads((tmp_path / "2026-10-24.json").read_text(encoding="utf-8"))
+    assert stored["vacancies"][0]["reason"] == "VacancyParseError: старая ошибка разбора"
+
+
+def test_archive_warning_explains_status_and_reason(client: TestClient) -> None:
+    """Подтверждение архива объясняет, что меняется, а что остаётся прежним."""
+    response = client.get("/report")
+
+    assert response.status_code == 200
+    html = response.text
+    assert "статус останется прежним, причина станет архивной" in html
+    assert "Обычный статус снимает признак архива" not in html
+
+
+def test_rejected_warning_explains_consequence(client: TestClient) -> None:
+    """Подтверждение отказа объясняет, что меняется, а что уже нельзя сделать."""
+    response = client.get("/report")
+
+    assert response.status_code == 200
+    html = response.text
+    assert "Вакансия получит статус «Отказ»" in html
+    assert "причина станет «По отклику пришёл отказ»" in html
+    assert "перевести вакансию в другой статус будет нельзя" in html
+
+
+def test_date_filter_uses_dropdown_option_style(client: TestClient) -> None:
+    """Меню «Дата» — те же пункты с галочкой, что у статуса и источника."""
+    response = client.get("/report")
+
+    assert response.status_code == 200
+    html = response.text
+    assert 'id="dateAll"' in html
+    assert 'class="dropdown-option" type="button" id="dateAll"' in html
+    assert 'class="dropdown-check"' not in html
+    assert 'type="checkbox"' not in html
+
+
+def test_status_cell_uses_rounded_dropdown_menu(client: TestClient) -> None:
+    """Статус в строке — своё меню со скруглением, а не нативный список."""
+    response = client.get("/report")
+
+    assert response.status_code == 200
+    html = response.text
+    # Нативный <select> браузер рисует прямыми углами, поэтому его нет.
+    assert "createElement('select')" not in html
+    assert "function createStatusCell" in html
+    assert "function openStatusMenu" in html
+    assert "className = 'dropdown-menu status-menu'" in html
+
+
+def test_archive_status_is_terminal_in_menu(client: TestClient) -> None:
+    """«В архиве» терминальный: пункт есть, но из архива выйти нельзя."""
+    response = client.get("/report")
+
+    assert response.status_code == 200
+    html = response.text
+    assert "new Set(['rejected', 'offer', 'archived'])" in html
+    # Архивная строка не открывает меню.
+    assert "TERMINAL_STATUSES.has(baseStatus) || Boolean(v.archived)" in html
+
+
+def test_date_menu_collects_several_dates(client: TestClient) -> None:
+    """Меню «Дата» выбирает несколько дат подряд и применяет выбор при закрытии."""
+    response = client.get("/report")
+
+    assert response.status_code == 200
+    html = response.text
+    assert "let dateDraft = null;" in html
+    assert "function startDateSelection" in html
+    assert "function commitDateSelection" in html
+    assert "sameDateSelection" in html
+    # Меню закрывается, когда мышь уходит из меню и кнопки.
+    assert "dateDropdown.root.addEventListener('mouseleave'" in html
+
+
+def test_filter_menus_close_when_mouse_leaves(client: TestClient) -> None:
+    """Меню статуса и источника закрываются, когда мышь ушла с меню и кнопки."""
+    response = client.get("/report")
+
+    assert response.status_code == 200
+    html = response.text
+    assert "DROPDOWNS.forEach(dropdown => {" in html
+    assert "if (dropdown === dateDropdown) return;" in html
+    assert "dropdown.root.addEventListener('mouseleave'" in html
+
+
+def test_status_menu_closes_when_mouse_leaves(client: TestClient) -> None:
+    """Меню статуса в строке закрывается при уходе мыши, если пункт не выбран."""
+    response = client.get("/report")
+
+    assert response.status_code == 200
+    html = response.text
+    assert "menu.addEventListener('mouseleave'" in html
+    assert "control.addEventListener('mouseleave'" in html
+    assert "if (!statusMenu || statusMenu.element !== menu) return;" in html
+    assert "if (menu.matches(':hover') || control.matches(':hover')) return;" in html
+
+
+def test_dropdown_menu_scrolls_inside_rounded_panel(client: TestClient) -> None:
+    """Прокрутка идёт во внутренней части меню: полоса не срезает скругление."""
+    response = client.get("/report")
+
+    assert response.status_code == 200
+    html = response.text
+    assert html.count('class="dropdown-scroll"') == 3
+    css = Path("web/static/report.css").read_text(encoding="utf-8")
+    assert ".dropdown-menu::-webkit-scrollbar" not in css
+    assert ".dropdown-scroll::-webkit-scrollbar-track" in css
+
+
+def test_dropdown_scrollbar_does_not_square_corners(client: TestClient) -> None:
+    """Классическая полоса с кнопками не возвращается: она закрывает скругления."""
+    css = client.get("/static/report.css").text
+
+    base_block = css.split(".dropdown-scroll {", 1)[1].split("}", 1)[0]
+    assert "scrollbar-width" not in base_block
+    assert "scrollbar-color" not in base_block
+    # Для Firefox тонкая полоса остаётся: своих псевдоэлементов прокрутки там нет.
+    assert "@supports not selector(::-webkit-scrollbar)" in css
+
+
+def test_status_menu_scroll_does_not_close_menu(client: TestClient) -> None:
+    """Меню статуса вмещает все пункты, а прокрутка внутри него его не закрывает."""
+    response = client.get("/report")
+
+    assert response.status_code == 200
+    html = response.text
+    assert "if (target instanceof Element && target.closest('.status-menu')) return;" in html
+    css = client.get("/static/report.css").text
+    # Высота меню: девять статусов помещаются без прокрутки, на низком экране остаётся прокрутка.
+    assert "max-height: min(380px, calc(100vh - 16px))" in css
+    assert "max-height: min(368px, calc(100vh - 28px))" in css
+
+
+def test_summary_cards_skip_archived_vacancies(client: TestClient) -> None:
+    """Карточки сводки не считают архивные записи: у них остался прежний статус."""
+    response = client.get("/report")
+
+    assert response.status_code == 200
+    html = response.text
+    assert "summaryCounts" in html
+    # Итоги карточек берутся из загруженных записей, а не из серверного summary.
+    assert "renderSummary(data.summary)" not in html
+
+
+def test_update_status_marks_vacancy_archived(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """«В архиве» — признак, а не статус: статус и счётчик попыток не меняются."""
+    monkeypatch.setattr(web_main, "REPORTS_DIR", tmp_path)
+    today = tmp_path / "today.json"
+    monkeypatch.setattr(web_main, "current_report_path", lambda: today)
+    write_report(tmp_path, "2026-10-24.json", [vacancy("1", "skipped")])
+    client = TestClient(web_main.app)
+
+    response = client.post(
+        "/api/v1/update-status",
+        json={
+            "report_name": "2026-10-24.json",
+            "url": "https://hh.ru/vacancy/1",
+            "status": "archived",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["archived"] is True
+
+    row = json.loads(today.read_text(encoding="utf-8"))["vacancies"][0]
+    assert row["status"] == "skipped"
+    assert row["archived"] is True
+    # У архивной записи всегда одна и та же причина.
+    assert row["reason"] == web_main.ARCHIVE_REASON
+    # Перевод в архив — не попытка отклика: счётчик не растёт.
+    assert row["attempts"] == 1
+
+
+def test_update_status_from_archive_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """«В архиве» терминальный: вернуть запись в другой статус нельзя."""
+    monkeypatch.setattr(web_main, "REPORTS_DIR", tmp_path)
+    today = tmp_path / "today.json"
+    monkeypatch.setattr(web_main, "current_report_path", lambda: today)
+    item = vacancy("1", "skipped")
+    item["archived"] = True
+    write_report(tmp_path, "2026-10-24.json", [item])
+    client = TestClient(web_main.app)
+
+    response = client.post(
+        "/api/v1/update-status",
+        json={
+            "report_name": "2026-10-24.json",
+            "url": "https://hh.ru/vacancy/1",
+            "status": "queued",
+        },
+    )
+
+    assert response.status_code == 409
+    assert "терминальный" in response.json()["detail"]
+    # Запись не тронута и не перенесена в отчёт сегодняшней даты.
+    assert not today.exists()
+    row = json.loads((tmp_path / "2026-10-24.json").read_text(encoding="utf-8"))[
+        "vacancies"
+    ][0]
+    assert row["status"] == "skipped"
+    assert row["archived"] is True

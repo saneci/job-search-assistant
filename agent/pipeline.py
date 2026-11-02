@@ -9,6 +9,7 @@ from pathlib import Path
 
 from playwright.sync_api import Error as PlaywrightError, Page
 
+from . import habr_search
 from .browser import (
     HH_HOME,
     BrowserError,
@@ -42,16 +43,21 @@ from .hh_vacancy import (
     response_state,
     set_resume_name,
 )
-from .llm import LLMClient, LLMError
+from .llm import LLMClient, LLMError, meets_threshold
 from .logging_setup import RunLogger, prune_logs
 from .models import (
     ALREADY_RESPONDED_REASON,
+    ARCHIVE_REASON,
+    INVITE_REASON,
     INVITED_OTHER_RESUME_REASON,
+    OFFER_REASON,
     OTHER_RESUME_REASON,
     REJECTED_REASON,
     UNAVAILABLE_REASON,
     STATUS_ERROR as OUTCOME_ERROR,
     STATUS_EXCLUDED as OUTCOME_EXCLUDED,
+    STATUS_INVITE,
+    STATUS_OFFER,
     STATUS_QUEUED as OUTCOME_QUEUED,
     STATUS_REJECTED as OUTCOME_REJECTED,
     STATUS_SENT as OUTCOME_SENT,
@@ -83,6 +89,8 @@ RETRY_ALL = "all"
 
 # Канал отчёта для вакансий, которые требуют отклика на сайте компании.
 EXTERNAL_CHANNEL = "external"
+# Такие отклики автоматически не отправляются: вакансия ждёт ручной обработки.
+EXTERNAL_REASON = "Отклик на сайте компании"
 
 # Вакансии, на которые нельзя откликнуться автоматически: что писать в отчёте за день.
 QUEUE_REASON_TEXTS: dict[str, str] = {
@@ -95,6 +103,7 @@ QUEUE_REASON_TEXTS: dict[str, str] = {
     "captcha": "hh.ru просит пройти капчу: откликнитесь вручную",
     "no_form": "hh.ru не показал форму отклика — проверьте вакансию вручную",
     "unknown": "hh.ru не подтвердил отправку отклика — проверьте вакансию вручную",
+    "other_resume": "Уже отправлен отклик по другому резюме",
 }
 
 # Вводная часть обоснования Generation: вердикт и общие слова о совпадении.
@@ -147,6 +156,35 @@ def _generation_reason_text(reason: str) -> str:
     return text[0].upper() + text[1:]
 
 
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?…])\s+")
+# Строки подписи, если модель добавила контакты сама и подпись не отделена.
+_SIGNATURE_LINE_RE = re.compile(
+    r"^(?:с уважением|телеграм|почта|e-?mail|email|тел\.?|phone)\b",
+    re.IGNORECASE,
+)
+
+
+def _last_letter_sentence(letter: str, signature: str = "") -> str:
+    """Последнее предложение письма LLM — причина статуса `sent`.
+
+    В отчёт идёт содержательная часть письма: подпись из
+    `llm.cover_letter.signature` дописывает код, её в причине быть не должно.
+    """
+    text = (letter or "").strip()
+    signature = (signature or "").strip()
+    if signature:
+        normalized = " ".join(text.split())
+        normalized_signature = " ".join(signature.split())
+        if normalized.endswith(normalized_signature):
+            text = normalized[: -len(normalized_signature)].strip()
+    text = " ".join(text.split())
+    if not text:
+        return ""
+    sentences = [part.strip() for part in _SENTENCE_SPLIT_RE.split(text) if part.strip()]
+    while len(sentences) > 1 and _SIGNATURE_LINE_RE.match(sentences[-1]):
+        sentences.pop()
+    return sentences[-1] if sentences else ""
+
 
 _PROJECT_URL_RE = re.compile(r"https?://[^\s<>()]+", re.IGNORECASE)
 
@@ -167,13 +205,15 @@ def _letter_has_project_link(letter: str, links: tuple[str, ...]) -> bool:
 
 
 # Состояния страницы вакансии, при которых отклик не нужен: код → (статус
-# записи, причина в отчёте за день). Приглашение, недоступная вакансия и отклик
-# другого резюме — `skipped`, отказ работодателя — отдельный статус `rejected`.
+# записи, причина в отчёте за день). Приглашение и недоступная вакансия —
+# `skipped`, отказ работодателя — отдельный статус `rejected`. Отклик другого
+# резюме сюда не входит: сначала проверяем, подходит ли вакансия, и только
+# подходящую откладываем в очередь.
 PAGE_STATUS_REASONS: dict[str, tuple[str, str]] = {
+    "archived": (OUTCOME_SKIPPED, ARCHIVE_REASON),
     "invited": (OUTCOME_SKIPPED, INVITED_OTHER_RESUME_REASON),
     "blocked": (OUTCOME_SKIPPED, "У вас нет доступа к этой вакансии"),
     "unavailable": (OUTCOME_SKIPPED, UNAVAILABLE_REASON),
-    "other_resume": (OUTCOME_SKIPPED, OTHER_RESUME_REASON),
     "rejected": (OUTCOME_REJECTED, REJECTED_REASON),
 }
 
@@ -244,6 +284,8 @@ def run(
                     _process_vacancies(
                         page, config, profile, llm, stats, logger, processed, channel
                     )
+            if channel.name == HABR:
+                _sync_habr_responses(page, processed, logger)
         except (ResumeNameError, ResumeNotFoundError):
             # Отклик без выбранного резюме невозможен: запуск завершается ошибкой.
             raise
@@ -576,52 +618,6 @@ def _process_vacancies(
                 seen.update(keys)
 
                 stats.reviewed += 1
-                if card.already_responded:
-                    # Отклик уже есть: карточку не открываем, но фиксируем в отчёте.
-                    logger.event(
-                        "skipped_already_responded",
-                        url=card.url,
-                        title=card.title,
-                        company=card.company,
-                    )
-                    stats.already_sent.append(
-                        SkippedVacancy(
-                            title=card.title,
-                            company=card.company,
-                            url=card.url,
-                            reason=ALREADY_RESPONDED_REASON,
-                        )
-                    )
-                    _VacancyLog(logger, card.title, card.company, card.url).info(
-                        "уже есть отклик, карточку не открываю"
-                    )
-                    _remember_processing(
-                        processed,
-                        logger,
-                        card,
-                        OUTCOME_SENT,
-                        ALREADY_RESPONDED_REASON,
-                        profile_name,
-                        channel=channel.name,
-                    )
-                    continue
-
-                if card.external_response:
-                    logger.event("skipped_external", url=card.url, title=card.title)
-                    _VacancyLog(logger, card.title, card.company, card.url).info(
-                        "отклик уходит на сайте компании, канал не поддерживается"
-                    )
-                    _remember_processing(
-                        processed,
-                        logger,
-                        card,
-                        OUTCOME_SKIPPED,
-                        "Отклик на сайте компании",
-                        profile_name,
-                        channel=EXTERNAL_CHANNEL,
-                    )
-                    continue
-
                 previous = processed.find(
                     card.title,
                     card.company,
@@ -637,6 +633,46 @@ def _process_vacancies(
                     )
                     _VacancyLog(logger, card.title, card.company, card.url).info(
                         f"уже обрабатывалась {previous}, пропускаю"
+                    )
+                    continue
+
+                if card.already_responded:
+                    # Отклик уже есть: карточку не открываем. Для новой
+                    # вакансии запись создаётся один раз.
+                    if _remember_card_already_responded(
+                        processed, logger, card, profile_name, channel
+                    ):
+                        stats.already_sent.append(
+                            SkippedVacancy(
+                                title=card.title,
+                                company=card.company,
+                                url=card.url,
+                                reason=ALREADY_RESPONDED_REASON,
+                            )
+                        )
+                    continue
+
+                if card.external_response:
+                    # Автоматической отправки нет: вакансия должна остаться
+                    # в очереди, иначе ручной отклик потеряется среди пропусков.
+                    logger.event("queued_external", url=card.url, title=card.title)
+                    _queue(
+                        stats,
+                        logger,
+                        card,
+                        "external_form",
+                        "отклик на сайте компании",
+                        reason=EXTERNAL_REASON,
+                        channel=channel,
+                    )
+                    _remember_processing(
+                        processed,
+                        logger,
+                        card,
+                        OUTCOME_QUEUED,
+                        EXTERNAL_REASON,
+                        profile_name,
+                        channel=EXTERNAL_CHANNEL,
                     )
                     continue
 
@@ -741,6 +777,7 @@ def _process_and_remember(
     skipped_before = len(stats.skipped)
     outcome_channel = _process_vacancy(page, config, profile, llm, stats, logger, card)
     _mark_invited_resume(processed, logger, config, channel, card, skipped_before, stats)
+    skipped = stats.skipped[skipped_before:]
     outcome = _outcome(counters, _counters(stats))
     if outcome:
         _remember_processing(
@@ -751,7 +788,157 @@ def _process_and_remember(
             _outcome_reason(stats, counters, outcome),
             _profile_name(config, channel),
             channel=outcome_channel or channel.name,
+            archived=_outcome_archived(skipped),
         )
+
+
+def _remember_card_already_responded(
+    processed: ProcessedStore,
+    logger: RunLogger,
+    card: VacancyCard,
+    profile_name: str,
+    channel: Channel,
+) -> bool:
+    """Фиксирует карточку «Вы откликнулись» только для новой вакансии.
+
+    Habr показывает такие карточки в ленте каждый запуск. Любую уже известную
+    запись пропускаем целиком: карточка говорит только о факте отклика и не
+    знает, чем он закончился, а статусы `rejected`, `offer`, `invite` и архив
+    нельзя откатывать в `sent`. Для новой вакансии запись создаётся один раз.
+    Возвращает True, если вакансию нужно учесть в счётчике «уже отправлено».
+    """
+    known = processed.find_record(card.title, card.company, card.url, profile_name)
+    if known is not None:
+        logger.event(
+            "skipped_already_responded_known",
+            url=card.url,
+            title=card.title,
+            company=card.company,
+            status=str(known.get("status", "")),
+        )
+        _VacancyLog(logger, card.title, card.company, card.url).info(
+            "уже есть отклик, вакансию пропускаю"
+        )
+        return False
+
+    logger.event(
+        "skipped_already_responded",
+        url=card.url,
+        title=card.title,
+        company=card.company,
+    )
+    _VacancyLog(logger, card.title, card.company, card.url).info(
+        "уже есть отклик, карточку не открываю"
+    )
+    _remember_processing(
+        processed,
+        logger,
+        card,
+        OUTCOME_SENT,
+        ALREADY_RESPONDED_REASON,
+        profile_name,
+        channel=channel.name,
+    )
+    return True
+
+
+def _sync_habr_responses(
+    page: Page,
+    processed: ProcessedStore,
+    logger: RunLogger,
+) -> None:
+    """Сверяет статусы уже отправленных откликов со страницей откликов Habr.
+
+    Habr показывает «Отказ», «Приглашение» и «Оффер» только на странице
+    `career.habr.com/responses`. Сверка не создаёт записи и не трогает
+    терминальные `rejected`, `offer` и архив. Остальные статусы страница
+    уточняет, потому что знает, что отклик действительно существует. Запись
+    переносится в сегодняшний отчёт только при реальной смене статуса:
+    повторный «Отказ» или «Прочитано» файл не переписывает.
+    """
+    seen: set[str] = set()
+    read = matched = updated = skipped = unknown = 0
+    try:
+        for page_index in range(habr_search.RESPONSES_MAX_PAGES):
+            responses = habr_search.open_responses_page(page, page_index)
+            fresh = [item for item in responses if item.url and item.url not in seen]
+            if not fresh:
+                break
+            for response in fresh:
+                seen.add(response.url)
+                read += 1
+                if not response.status:
+                    unknown += 1
+                    continue
+                record = processed.find_record(
+                    response.title,
+                    response.company,
+                    response.url,
+                    "",
+                )
+                if record is None:
+                    skipped += 1
+                    continue
+                current = str(record.get("status", ""))
+                if current in (OUTCOME_REJECTED, STATUS_OFFER) or record.get("archived"):
+                    skipped += 1
+                    continue
+                matched += 1
+                target = response.status
+                if target == current or (current == STATUS_INVITE and target == OUTCOME_SENT):
+                    continue
+                reason = _response_reason(target)
+                if target == OUTCOME_SENT and not reason:
+                    reason = ALREADY_RESPONDED_REASON
+                if not processed.update_status(
+                    url=response.url,
+                    title=response.title,
+                    company=response.company,
+                    status=target,
+                    reason=reason,
+                ):
+                    skipped += 1
+                    continue
+                updated += 1
+                logger.event(
+                    "habr_response_status",
+                    url=response.url,
+                    old=current,
+                    new=target,
+                )
+    except (CaptchaError, PageLoadError, PlaywrightError) as exc:
+        logger.event("habr_responses_error", error=str(exc))
+        logger.info(f"Не удалось сверить отклики Habr: {exc}")
+        return
+    except Exception as exc:  # noqa: BLE001 - сверка не должна ломать запуск
+        logger.event("habr_responses_error", error=f"{type(exc).__name__}: {exc}")
+        logger.info(f"Не удалось сверить отклики Habr: {type(exc).__name__}: {exc}")
+        return
+
+    logger.event(
+        "habr_responses_sync",
+        read=read,
+        matched=matched,
+        updated=updated,
+        skipped=skipped,
+        unknown=unknown,
+    )
+    if read:
+        logger.info(
+            f"Сверка откликов Habr: прочитано {read}, обновлено {updated}, "
+            f"пропущено {skipped}, неизвестных статусов {unknown}"
+        )
+
+
+def _response_reason(status: str) -> str:
+    """Причина для статуса, который пришёл со страницы откликов Habr."""
+    if status == OUTCOME_REJECTED:
+        return REJECTED_REASON
+    if status == STATUS_INVITE:
+        return INVITE_REASON
+    if status == STATUS_OFFER:
+        return OFFER_REASON
+    return ""
 
 
 def _mark_invited_resume(
@@ -787,6 +974,15 @@ def _mark_invited_resume(
     if updated:
         # Названия резюме — данные пользователя: в журнал пишем только количество.
         logger.event("invited_other_resume", url=card.url, resumes=len(updated))
+
+
+def _outcome_archived(skipped: list[SkippedVacancy]) -> bool:
+    """Вакансия в архиве или с закрытым доступом: нужен признак в отчёте.
+
+    `_process_vacancy` возвращает только канал отчёта, поэтому состояние
+    страницы узнаём по записи пропуска — как в `_mark_invited_resume`.
+    """
+    return any(item.archived for item in skipped)
 
 
 def _ensure_session_alive(page: Page) -> None:
@@ -914,6 +1110,7 @@ def _process_vacancy(
         return
 
     page_status = PAGE_STATUS_REASONS.get(details.blocker or "")
+    other_resume = details.blocker == "other_resume"
     if page_status is not None:
         outcome, reason = page_status
         logger.event(
@@ -931,6 +1128,7 @@ def _process_vacancy(
                 company=details.company,
                 url=details.url,
                 reason=reason,
+                archived=details.archived,
             )
         )
         if outcome == OUTCOME_REJECTED:
@@ -939,12 +1137,12 @@ def _process_vacancy(
             log.info(f"пропуск: {reason.lower()}")
         return
 
-    if details.blocker:
+    if details.blocker and not other_resume:
         queue(stats, logger, details, details.blocker, "признак на странице вакансии")
         # Отклик на сайте компании — отдельный канал отчёта, а не канал поиска.
         return EXTERNAL_CHANNEL if details.blocker == "external_form" else None
 
-    if stats.sent_count >= config.pipeline.limit_per_run:
+    if not other_resume and stats.sent_count >= config.pipeline.limit_per_run:
         stats.stop_reason = f"достигнут лимит откликов за запуск ({config.pipeline.limit_per_run})"
         log.info(f"лимит откликов достигнут ({stats.sent_count}), вакансия не обрабатывается")
         return
@@ -958,8 +1156,10 @@ def _process_vacancy(
     llm_reason = ""
     llm_reason_source = ""
     # Вердикт приложения: Decide API даёт вероятности, порог применяем мы.
-    verdict = FIT_LABEL if decision.fits else NOT_FIT_LABEL
-    if not decision.fits:
+    # Ровно порог — не «выше порога»: такая вакансия пропускается.
+    fits = meets_threshold(decision.probability, decision.threshold)
+    verdict = FIT_LABEL if fits else NOT_FIT_LABEL
+    if not fits:
         llm_reason = (
             f"вероятность {decision.probability:.2f} не выше порога {decision.threshold:.2f}"
         )
@@ -982,7 +1182,7 @@ def _process_vacancy(
         title=details.title,
         probability=decision.probability,
         threshold=decision.threshold,
-        fits=decision.fits,
+        fits=fits,
         llm_verdict=verdict,
         model_choice=decision.chosen,
         llm_reason=llm_reason,
@@ -998,7 +1198,7 @@ def _process_vacancy(
     if llm_reason and config.llm.decision.explain_rejections:
         log.info(f"LLM-вердикт: {llm_reason}")
 
-    if not decision.fits:
+    if not fits:
         stats.skipped.append(
             SkippedVacancy(
                 title=details.title,
@@ -1009,6 +1209,20 @@ def _process_vacancy(
             )
         )
         log.info(f"вакансия не подошла: {llm_reason}")
+        return
+
+    if other_resume:
+        # Вакансия подходит, но отклик по ней уже ушёл другим резюме. Не спамим
+        # работодателя: ждём ответа по другому резюме, поэтому статус queued.
+        queue(
+            stats,
+            logger,
+            details,
+            "other_resume",
+            "подходит, но отклик уже отправлен другим резюме",
+            reason=OTHER_RESUME_REASON,
+        )
+        log.info(f"подходит, но уже есть отклик другого резюме: {OTHER_RESUME_REASON}")
         return
 
     needs_project_links = requires_project_links(details)
@@ -1107,6 +1321,10 @@ def _process_vacancy(
                 company=details.company,
                 url=details.url,
                 probability=decision.probability,
+                reason=_last_letter_sentence(
+                    generation.cover_letter,
+                    config.llm.cover_letter.signature,
+                ),
             )
         )
         log.info(f"отклик отправлен (всего {stats.sent_count} из {config.pipeline.limit_per_run})")
@@ -1491,8 +1709,13 @@ def _outcome_reason(
     outcome: str,
 ) -> str:
     """Причина результата для файла дня: из последней записи по этому статусу."""
-    if outcome == OUTCOME_SENT and len(stats.already_sent) > before[6]:
-        return stats.already_sent[-1].reason
+    if outcome == OUTCOME_SENT:
+        # Сначала настоящий отклик: причина — последнее предложение письма.
+        # Затем уже отправленный ранее: причина остаётся «отклик уже отправлен».
+        if len(stats.sent) > before[0]:
+            return stats.sent[-1].reason
+        if len(stats.already_sent) > before[6]:
+            return stats.already_sent[-1].reason
     if outcome == OUTCOME_SKIPPED and len(stats.skipped) > before[1]:
         return stats.skipped[-1].reason
     if outcome == OUTCOME_QUEUED and len(stats.queued) > before[2]:
@@ -1514,6 +1737,7 @@ def _remember_processing(
     reason: str = "",
     profile: str | None = None,
     channel: str = "",
+    archived: bool = False,
 ) -> None:
     """Записывает вакансию в дневной отчёт, чтобы не проходить её снова.
 
@@ -1527,6 +1751,16 @@ def _remember_processing(
     ):
         logger.event("reason_missing", url=card.url, title=card.title, status=outcome)
     try:
+        if archived and processed.mark_archived(
+            url=card.url,
+            title=card.title,
+            company=card.company,
+            profile=profile or "",
+        ):
+            # Вакансия уже есть в отчётах: статус и причину не меняем,
+            # иначе разойдутся метрики и сводка. Новый только признак архива.
+            logger.event("archived_known_vacancy", url=card.url, status=outcome)
+            return
         processed.record(
             url=card.url,
             title=card.title,
@@ -1535,6 +1769,7 @@ def _remember_processing(
             reason=reason,
             profile=profile,
             channel=channel,
+            archived=archived,
         )
     except ProcessedError as exc:
         vid = vacancy_id(card.url)

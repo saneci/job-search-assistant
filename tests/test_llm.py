@@ -27,6 +27,7 @@ from agent.llm import (
     ensure_greeting,
     extract_json_object,
     extract_probabilities,
+    meets_threshold,
     normalize_verdict,
     parse_generation,
     probability_for,
@@ -128,6 +129,12 @@ def test_decide_is_strict_at_threshold() -> None:
         result = client.decide(PROFILE, VACANCY)
 
     assert result.fits is False
+
+
+def test_meets_threshold_is_strict() -> None:
+    """Ровно порог — не выше порога, поэтому вакансия пропускается."""
+    assert meets_threshold(0.8, 0.8) is False
+    assert meets_threshold(0.81, 0.8) is True
 
 
 def test_decide_accepts_noul_answer() -> None:

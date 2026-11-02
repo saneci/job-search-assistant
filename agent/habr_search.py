@@ -8,16 +8,24 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from urllib.parse import urljoin
 
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import Locator, Page, TimeoutError as PlaywrightTimeoutError
 
 from .browser import NAVIGATION_TIMEOUT_MS, CaptchaError, PageLoadError, detect_captcha
-from .models import VacancyCard
+from .models import (
+    STATUS_INVITE,
+    STATUS_OFFER,
+    STATUS_REJECTED,
+    STATUS_SENT,
+    VacancyCard,
+)
 
 HABR_BASE_URL = "https://career.habr.com"
 SUITABLE_URL = f"{HABR_BASE_URL}/vacancies?type=suitable"
+RESPONSES_URL = f"{HABR_BASE_URL}/responses"
 
 # Habr отдаёт ровно 25 карточек на страницу, размер страницы не настраивается.
 HABR_PER_PAGE = 25
@@ -36,11 +44,46 @@ NO_SALARY_MARKER = "vacancy-card__meta--noSalary"
 SUCCESS_CHIP_SELECTOR = ".success-chip"
 ALREADY_RESPONDED_TEXT = "Вы откликнулись"
 
+# Страница откликов: здесь Habr показывает, прочитан отклик, пришёл отказ
+# или приглашение. В карточке вакансии этого статуса нет.
+RESPONSES_ROW_SELECTOR = "table tr"
+RESPONSES_TITLE_SELECTOR = ".title a"
+RESPONSES_COMPANY_SELECTOR = ".comapny a"
+RESPONSES_STATUS_SELECTOR = ".status"
+# Предохранитель от бесконечной пагинации: даже по 25 откликов на страницу
+# двадцать страниц покрывают пятьсот откликов.
+RESPONSES_MAX_PAGES = 20
+
 # Сколько ждём отрисовку ленты после загрузки страницы.
 RENDER_WAIT_MS = 1500
 
 _VACANCY_ID_RE = re.compile(r"/vacancies/(\d+)")
 _TOTAL_RE = re.compile(r"Найдено\s+([\d\s\u00a0]+)\s+ваканс", re.IGNORECASE)
+
+
+@dataclass(frozen=True)
+class HabrResponse:
+    """Строка страницы откликов: вакансия, подпись статуса и наш статус."""
+
+    url: str
+    title: str
+    company: str
+    label: str
+    status: str
+
+
+def response_status(label: str) -> str:
+    """Переводит подпись Habr в статус отчёта; неизвестную подпись не меняем."""
+    text = " ".join((label or "").lower().replace("ё", "е").split())
+    if "отказ" in text:
+        return STATUS_REJECTED
+    if "приглаш" in text:
+        return STATUS_INVITE
+    if "оффер" in text or "предложен" in text:
+        return STATUS_OFFER
+    if "отправлен" in text or "прочитано" in text or "просмотр" in text:
+        return STATUS_SENT
+    return ""
 
 
 def build_search_url(page_index: int = 0) -> str:
@@ -71,6 +114,64 @@ def vacancy_id(url: str) -> str | None:
     """id вакансии из URL career.habr.com вида /vacancies/1000167337."""
     match = _VACANCY_ID_RE.search(url or "")
     return match.group(1) if match else None
+
+
+def open_responses_page(page: Page, page_index: int = 0) -> list[HabrResponse]:
+    """Открывает страницу откликов Habr и читает строки таблицы.
+
+    Страница одна на пользователя, но при большом числе откликов Habr
+    включает пагинацию. Номер страницы начинается с нуля.
+    """
+    url = RESPONSES_URL if page_index <= 0 else f"{RESPONSES_URL}?page={page_index + 1}"
+    try:
+        page.goto(url, wait_until="domcontentloaded", timeout=NAVIGATION_TIMEOUT_MS)
+    except PlaywrightTimeoutError as exc:
+        raise PageLoadError(f"Страница откликов не загрузилась: {url}") from exc
+    page.wait_for_timeout(RENDER_WAIT_MS)
+    if detect_captcha(page):
+        raise CaptchaError(f"career.habr.com показал капчу на странице откликов: {page.url}")
+    try:
+        page.wait_for_selector("table", timeout=5000)
+    except PlaywrightTimeoutError:
+        # Пустой список откликов — нормальный конец, а не ошибка загрузки.
+        pass
+    return collect_responses(page)
+
+
+def collect_responses(page: Page) -> list[HabrResponse]:
+    """Собирает отклики: ссылку, название, компанию и подпись статуса."""
+    try:
+        rows = page.locator(RESPONSES_ROW_SELECTOR)
+        total = rows.count()
+    except PlaywrightError as exc:
+        raise PageLoadError(f"Не удалось прочитать страницу откликов: {exc}") from exc
+
+    responses: list[HabrResponse] = []
+    for index in range(1, total):
+        row = rows.nth(index)
+        try:
+            cells = row.locator("td")
+            if cells.count() < 3:
+                continue
+            link = cells.nth(0).locator(RESPONSES_TITLE_SELECTOR).first
+            href = link.get_attribute("href") or ""
+            title = link.inner_text().strip()
+        except PlaywrightError:
+            continue
+        if not href:
+            continue
+        url = urljoin(HABR_BASE_URL, href.split("?")[0])
+        label = _card_text(cells.nth(2), RESPONSES_STATUS_SELECTOR)
+        responses.append(
+            HabrResponse(
+                url=url,
+                title=title,
+                company=_card_text(cells.nth(0), RESPONSES_COMPANY_SELECTOR),
+                label=label,
+                status=response_status(label),
+            )
+        )
+    return responses
 
 
 def open_search_page(

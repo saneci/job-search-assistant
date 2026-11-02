@@ -992,8 +992,17 @@ def _with_secrets(config: AppConfig) -> AppConfig:
     return config.model_copy(update={"llm": llm, "notifications": notifications})
 
 
-def load_config(config_path: Path | str | None = None) -> AppConfig:
-    """Читает config.yaml (+ config.local.yaml) и переменные окружения."""
+def load_config(
+    config_path: Path | str | None = None,
+    *,
+    channel: str | None = None,
+) -> AppConfig:
+    """Читает config.yaml (+ config.local.yaml) и переменные окружения.
+
+    `channel` — канал из командной строки (`--ch`). Он применяется до
+    проверки схемы, иначе входу в Habr через `--login --ch habr` мешали бы
+    обязательные для hh.ru `search.queries` и `search.area`.
+    """
     load_env()
 
     path = Path(config_path) if config_path is not None else DEFAULT_CONFIG_PATH
@@ -1005,7 +1014,10 @@ def load_config(config_path: Path | str | None = None) -> AppConfig:
     local_path = path.with_name(LOCAL_CONFIG_NAME)
     token = _SOURCES.set((path, local_path))
     try:
-        config = AppConfig()  # type: ignore[call-arg]
+        overrides: dict[str, Any] = {}
+        if channel:
+            overrides["search"] = {"channel": channel}
+        config = AppConfig(**overrides)  # type: ignore[call-arg]
     except ValidationError as exc:
         raise ConfigError(_format_errors(exc)) from None
     finally:

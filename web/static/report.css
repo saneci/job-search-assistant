@@ -288,10 +288,14 @@ tbody tr:hover {
 .status-select {
     padding: 6px 12px;
     border-radius: 20px;
+    font-family: inherit;
+    line-height: 1.2;
+    text-align: center;
     font-size: .78rem;
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: .3px;
+    white-space: nowrap;
     border: 1px solid transparent;
     cursor: pointer;
     outline: none;
@@ -346,6 +350,11 @@ tbody tr:hover {
 
 .status-select.invite {
     --select-tone: var(--color-invite-ink);
+}
+
+/* Архив — не статус, но в списке показывается отдельным пунктом. */
+.status-select.archived {
+    --select-tone: var(--color-archived);
 }
 
 @media (max-width: 768px) {
@@ -481,31 +490,44 @@ tbody tr:hover {
     min-width: 100%;
     width: max-content;
     max-width: min(420px, 90vw);
-    max-height: 320px;
-    overflow-y: auto;
+    max-height: min(380px, calc(100vh - 16px));
+    overflow: hidden;
     padding: 6px;
     border-radius: 10px;
     background: var(--surface);
     box-shadow: var(--shadow-card-hover);
 }
 
-.dropdown-check {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 8px 10px;
-    font-size: .85rem;
-    color: var(--text);
-    cursor: pointer;
-    white-space: nowrap;
+/* Прокручивается внутренняя часть меню: полоса прокрутки не заходит на
+   скругление панели, поэтому углы остаются круглыми при любой её ширине. */
+.dropdown-scroll {
+    max-height: min(368px, calc(100vh - 28px));
+    overflow-y: auto;
 }
 
-.dropdown-check input {
-    cursor: pointer;
+/* Chromium: тонкая полоса без кнопок. Стандартные `scrollbar-width` и
+   `scrollbar-color` отключают эти правила и рисуют полосу с кнопками,
+   которая закрывает правые скругления панели. */
+.dropdown-scroll::-webkit-scrollbar {
+    width: 8px;
 }
 
-.dropdown-check[hidden] {
-    display: none !important;
+.dropdown-scroll::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.dropdown-scroll::-webkit-scrollbar-thumb {
+    border-radius: 8px;
+    background: var(--muted-light);
+}
+
+/* Firefox: своих псевдоэлементов прокрутки там нет, поэтому тонкая полоса
+   задаётся стандартными свойствами. */
+@supports not selector(::-webkit-scrollbar) {
+    .dropdown-scroll {
+        scrollbar-width: thin;
+        scrollbar-color: var(--muted-light) transparent;
+    }
 }
 
 .dropdown-option {
@@ -526,6 +548,15 @@ tbody tr:hover {
 
 .dropdown-option:hover {
     background: var(--surface-2);
+}
+
+.dropdown-option:disabled {
+    opacity: .45;
+    cursor: not-allowed;
+}
+
+.dropdown-option:disabled:hover {
+    background: none;
 }
 
 .dropdown-option:focus-visible {

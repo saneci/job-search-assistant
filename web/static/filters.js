@@ -8,6 +8,10 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
     'use strict';
 
+    // Значение грани «Статус» для архивных вакансий: это не статус записи,
+    // а отдельный признак, поэтому у записи остаётся прежний status.
+    const ARCHIVED_STATUS = 'archived';
+
     // Каналы записи. `unknown` — записи старых отчётов без поля channel.
     const CHANNELS = new Set(['all', 'hh', 'habr', 'external', 'unknown']);
     const URL_KEYS = ['status', 'channel', 'q', 'date', 'dates'];
@@ -62,11 +66,78 @@
             .includes(text);
     }
 
+    /* Вакансия в архиве: статус у неё прежний, поэтому грань «Статус»
+       смотрит на отдельный признак `archived`. Архивная запись показывается
+       только в «В архиве»: иначе «Не подходит» смешивал бы живые пропуски
+       и закрытые вакансии. */
+    function isArchived(vacancy) {
+        return Boolean(vacancy && vacancy.archived === true);
+    }
+
+    function matchesStatus(vacancy, status) {
+        if (status === 'all') return true;
+        if (status === ARCHIVED_STATUS) return isArchived(vacancy);
+        return !isArchived(vacancy) && vacancy.status === status;
+    }
+
+    /* Итоги для карточек сводки считаются по загруженным вакансиям и без
+       архивных записей: иначе закрытая вакансия с прежним статусом error
+       раздувала бы карточку «Ошибки» при пустой таблице. */
+    function summaryCounts(vacancies) {
+        const counts = {};
+        for (const vacancy of vacancies || []) {
+            if (isArchived(vacancy)) continue;
+            const status = vacancy && vacancy.status;
+            if (!status) continue;
+            counts[status] = (counts[status] || 0) + 1;
+        }
+        return counts;
+    }
+
     /* Условия разных граней складываются по «И», поиск работает вместе с ними. */
     function matchesFilters(vacancy, filters) {
-        if (filters.status !== 'all' && vacancy.status !== filters.status) return false;
+        if (!matchesStatus(vacancy, filters.status)) return false;
         if (filters.channel !== 'all' && channelValue(vacancy) !== filters.channel) return false;
         return matchesQuery(vacancy, filters.query);
+    }
+
+    /* Дата отмечена, если выбраны все даты или эта дата есть в списке.
+       Состояние «даты сняты» гасит все отметки. */
+    function isDateChecked(filters, name) {
+        if (filters.datesNone) return false;
+        return filters.files.length === 0 || filters.files.includes(name);
+    }
+
+    /* Переключение одной даты. Пустой список файлов значит «все даты»,
+       поэтому сначала разворачиваем его в список всех известных файлов.
+       Снятие последней отмеченной даты даёт «даты не выбраны», а не «все
+       даты»: иначе остальные отметки проставлялись бы сами собой. */
+    function toggleDate(filters, name, all) {
+        const known = all || [];
+        const current = filters.datesNone
+            ? []
+            : (filters.files.length ? filters.files.slice() : known.slice());
+        const next = current.includes(name)
+            ? current.filter(item => item !== name)
+            : current.concat(name);
+        if (next.length === 0) return {files: [], datesNone: true};
+        if (known.length && next.length === known.length) return {files: [], datesNone: false};
+        return {files: next, datesNone: false};
+    }
+
+    /* «Выбрать всё» работает в обе стороны: отмечены все даты — снимаем
+       выделение, иначе отмечаем все. */
+    function toggleAllDates(filters) {
+        const everyDate = !filters.datesNone && filters.files.length === 0;
+        return {files: [], datesNone: everyDate};
+    }
+
+    /* Совпадает ли выбор дат: черновик меню сравнивается с применённым
+       состоянием, чтобы не перезагружать отчёт без изменений. */
+    function sameDateSelection(left, right) {
+        if (left.datesNone !== right.datesNone) return false;
+        if (left.files.length !== right.files.length) return false;
+        return left.files.every((name, index) => name === right.files[index]);
     }
 
     /* Состояние в адрес: пустые значения не пишем, чтобы ссылка оставалась короткой. */
@@ -99,13 +170,21 @@
     return {
         CHANNELS,
         URL_KEYS,
+        ARCHIVED_STATUS,
         defaultFilters,
         channelValue,
         normalizeFilters,
         hasSelectedFilters,
+        isArchived,
+        matchesStatus,
+        summaryCounts,
         matchesQuery,
         matchesFilters,
         toSearchParams,
-        parseSearchParams
+        parseSearchParams,
+        isDateChecked,
+        toggleDate,
+        toggleAllDates,
+        sameDateSelection
     };
 });

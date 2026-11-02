@@ -48,6 +48,11 @@ class DecisionResult:
     chosen: str
 
 
+def meets_threshold(probability: float, threshold: float) -> bool:
+    """Вероятность должна быть строго выше порога: ровно порог — пропуск."""
+    return probability > threshold
+
+
 @dataclass(frozen=True)
 class GenerationResult:
     """Результат Generation-вызова."""
@@ -108,7 +113,7 @@ class LLMClient:
         threshold = self.config.decision.threshold
         chosen = max(probabilities, key=lambda label: probabilities[label])
         return DecisionResult(
-            fits=probability > threshold,
+            fits=meets_threshold(probability, threshold),
             probability=probability,
             threshold=threshold,
             probabilities=probabilities,

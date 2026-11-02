@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from datetime import date, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -15,9 +16,11 @@ from agent.hh_vacancy import (
     STATUS_REJECTED,
     STATUS_SENT,
 )
+from agent.habr_search import HabrResponse
 from agent.llm import DecisionResult, GenerationResult
 from agent.logging_setup import RunLogger
 from agent.models import (
+    ARCHIVE_REASON,
     REJECTED_REASON,
     SentVacancy,
     SkippedVacancy,
@@ -28,6 +31,7 @@ from agent.pipeline import (
     OUTCOME_ERROR,
     OUTCOME_EXCLUDED,
     OUTCOME_QUEUED,
+    OUTCOME_REJECTED,
     OUTCOME_SENT,
     OUTCOME_SKIPPED,
     PAGE_STATUS_REASONS,
@@ -38,6 +42,7 @@ from agent.pipeline import (
     _counters,
     _final_message,
     _generation_reason_text,
+    _last_letter_sentence,
     _letter_has_project_link,
     _notify_captcha,
     _notify_captcha_stop,
@@ -49,12 +54,14 @@ from agent.pipeline import (
     _process_vacancy,
     _profile_name,
     _queue,
+    _remember_card_already_responded,
     _remember_processing,
     _require_resume_name,
     _retry_statuses,
     _retry_vacancies,
     _save_problem_screenshot,
     _send_report_email,
+    _sync_habr_responses,
     _VacancyLog,
     channel_for,
     with_resume,
@@ -290,16 +297,110 @@ def test_invited_vacancy_is_skipped_without_queue(tmp_path: Path, monkeypatch) -
     logger.close()
 
     assert set(PAGE_STATUS_REASONS) == {
+        "archived",
         "blocked",
         "unavailable",
         "invited",
         "rejected",
-        "other_resume",
     }
     assert [item.reason for item in stats.skipped] == [
         "Уже получено приглашение на интервью по другому резюме"
     ]
     assert stats.queued == []
+
+
+def test_other_resume_fit_is_queued(tmp_path: Path, monkeypatch) -> None:
+    """Подходящая вакансия с откликом другого резюме идёт в очередь, а не в пропуск."""
+    config = make_config(tmp_path)
+    card = VacancyCard(title="Java", company="Ozon", url="https://hh.ru/vacancy/139016311")
+    details = VacancyDetails(
+        url=card.url,
+        title=card.title,
+        company=card.company,
+        salary="",
+        description="Java, Spring, PostgreSQL.",
+        blocker="other_resume",
+    )
+    monkeypatch.setattr("agent.pipeline.open_vacancy", lambda page, vacancy: details)
+
+    class FakeLLM:
+        def decide(self, profile, vacancy):
+            return DecisionResult(
+                fits=True,
+                probability=0.99,
+                threshold=0.8,
+                probabilities={"подходит": 0.99, "не подходит": 0.01},
+                chosen="подходит",
+            )
+
+        def generate(self, profile, vacancy, max_length=1500, signature=""):
+            raise AssertionError("письмо не нужно: отклик уже отправлен другим резюме")
+
+    stats = make_stats()
+    logger = RunLogger(tmp_path / "logs", run_id="other-resume-fit")
+    _process_vacancy(
+        None,  # type: ignore[arg-type]
+        config,
+        Profile(text="Java", examples="", style_rules=""),
+        FakeLLM(),
+        stats,
+        logger,
+        card,
+    )
+    logger.close()
+
+    assert stats.sent == []
+    assert stats.skipped == []
+    assert [item["reason"] for item in stats.queued] == [
+        "Уже отправлен отклик по другому резюме"
+    ]
+
+
+def test_other_resume_not_fit_is_skipped(tmp_path: Path, monkeypatch) -> None:
+    """Если вакансия не подходит, отклик другого резюме не повод её откладывать."""
+    config = make_config(tmp_path)
+    card = VacancyCard(title="Java", company="Ozon", url="https://hh.ru/vacancy/139016311")
+    details = VacancyDetails(
+        url=card.url,
+        title=card.title,
+        company=card.company,
+        salary="",
+        description="Java, Spring, PostgreSQL.",
+        blocker="other_resume",
+    )
+    monkeypatch.setattr("agent.pipeline.open_vacancy", lambda page, vacancy: details)
+
+    class FakeLLM:
+        def decide(self, profile, vacancy):
+            return DecisionResult(
+                fits=False,
+                probability=0.4,
+                threshold=0.8,
+                probabilities={"подходит": 0.4, "не подходит": 0.6},
+                chosen="не подходит",
+            )
+
+        def explain_rejection(self, profile, vacancy, probability, threshold):
+            del profile, vacancy, probability, threshold
+            return ""
+
+    stats = make_stats()
+    logger = RunLogger(tmp_path / "logs", run_id="other-resume-not-fit")
+    _process_vacancy(
+        None,  # type: ignore[arg-type]
+        config,
+        Profile(text="Java", examples="", style_rules=""),
+        FakeLLM(),
+        stats,
+        logger,
+        card,
+    )
+    logger.close()
+
+    assert stats.queued == []
+    assert [item.reason for item in stats.skipped] == [
+        "вероятность 0.40 не выше порога 0.80"
+    ]
 
 
 def test_invited_vacancy_marks_other_resume_invite(tmp_path: Path, monkeypatch) -> None:
@@ -417,6 +518,141 @@ def test_unavailable_vacancy_is_skipped_with_reason(tmp_path: Path, monkeypatch)
     assert row["updated_at"] != "2026-10-21T09:00:00+03:00"
     assert row["attempts"] == 2
     assert [item.reason for item in stats.skipped] == ["Вакансия недоступна или заблокирована"]
+
+
+def test_archived_vacancy_is_recorded_as_archived(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """«Вакансия в архиве»: новая запись идёт в skipped с полем archived."""
+    config = with_resume(make_config(tmp_path), "Team Lead")
+    card = VacancyCard(
+        title="Team lead data platform",
+        company="Ozon",
+        url="https://hh.ru/vacancy/137925661",
+    )
+    details = VacancyDetails(
+        url=card.url,
+        title=card.title,
+        company=card.company,
+        salary="",
+        description="",
+        blocker="archived",
+        archived=True,
+    )
+    monkeypatch.setattr("agent.pipeline.open_vacancy", lambda page, vacancy: details)
+    store = ProcessedStore(tmp_path / "report", today=date(2026, 10, 21))
+    stats = make_stats()
+    logger = RunLogger(tmp_path / "logs", run_id="archived-new")
+
+    _process_and_remember(
+        page=None,  # type: ignore[arg-type]
+        config=config,
+        profile=None,  # type: ignore[arg-type]
+        llm=None,  # type: ignore[arg-type]
+        stats=stats,
+        logger=logger,
+        processed=store,
+        card=card,
+        channel=channel_for(config),
+    )
+    logger.close()
+
+    row = json.loads(store.path.read_text(encoding="utf-8"))["vacancies"][0]
+    assert row["status"] == "skipped"
+    assert row["archived"] is True
+    assert row["reason"] == ARCHIVE_REASON
+    assert row["attempts"] == 1
+
+
+def test_unavailable_vacancy_is_archived_in_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Закрытый доступ к вакансии — тоже архив: в отчёте появляется archived."""
+    config = with_resume(make_config(tmp_path), "Team Lead")
+    card = VacancyCard(title="Java", company="Ozon", url="https://hh.ru/vacancy/15")
+    details = VacancyDetails(
+        url=card.url,
+        title=card.title,
+        company=card.company,
+        salary="",
+        description="",
+        blocker="unavailable",
+        archived=True,
+    )
+    monkeypatch.setattr("agent.pipeline.open_vacancy", lambda page, vacancy: details)
+    store = ProcessedStore(tmp_path / "report", today=date(2026, 10, 21))
+    stats = make_stats()
+    logger = RunLogger(tmp_path / "logs", run_id="archived-unavailable")
+
+    _process_and_remember(
+        page=None,  # type: ignore[arg-type]
+        config=config,
+        profile=None,  # type: ignore[arg-type]
+        llm=None,  # type: ignore[arg-type]
+        stats=stats,
+        logger=logger,
+        processed=store,
+        card=card,
+        channel=channel_for(config),
+    )
+    logger.close()
+
+    row = json.loads(store.path.read_text(encoding="utf-8"))["vacancies"][0]
+    assert row["status"] == "skipped"
+    assert row["archived"] is True
+    assert row["reason"] == "Вакансия недоступна или заблокирована"
+
+
+def test_archived_known_vacancy_keeps_status(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Архивная вакансия, которая уже в отчёте: статус и причина не меняются."""
+    config = with_resume(make_config(tmp_path), "Team Lead")
+    card = VacancyCard(title="Java", company="Ozon", url="https://hh.ru/vacancy/16")
+    details = VacancyDetails(
+        url=card.url,
+        title=card.title,
+        company=card.company,
+        salary="",
+        description="",
+        blocker="archived",
+        archived=True,
+    )
+    store = ProcessedStore(tmp_path / "report", today=date(2026, 10, 21))
+    store.record(
+        url=card.url,
+        title=card.title,
+        company=card.company,
+        status="sent",
+        reason="отклик уже отправлен",
+        profile="Team Lead",
+        channel="hh",
+    )
+    monkeypatch.setattr("agent.pipeline.open_vacancy", lambda page, vacancy: details)
+    stats = make_stats()
+    logger = RunLogger(tmp_path / "logs", run_id="archived-known")
+
+    _process_and_remember(
+        page=None,  # type: ignore[arg-type]
+        config=config,
+        profile=None,  # type: ignore[arg-type]
+        llm=None,  # type: ignore[arg-type]
+        stats=stats,
+        logger=logger,
+        processed=store,
+        card=card,
+        channel=channel_for(config),
+    )
+    logger.close()
+
+    row = json.loads(store.path.read_text(encoding="utf-8"))["vacancies"][0]
+    # Статус прежний: метрики по уже обработанной вакансии не едут.
+    assert row["status"] == "sent"
+    # Причина становится архивной: она одна у всех записей с `archived: true`.
+    assert row["reason"] == ARCHIVE_REASON
+    assert row["archived"] is True
+    assert row["archived"] is True
+    assert row["attempts"] == 1
 
 
 def test_skipped_page_state_does_not_wait_pause(tmp_path: Path, monkeypatch) -> None:
@@ -903,6 +1139,400 @@ def test_outcome_reason_takes_already_responded_reason() -> None:
     )
 
 
+def test_outcome_reason_takes_sent_letter_reason() -> None:
+    """У настоящего отклика причина — последнее предложение письма LLM."""
+    stats = RunStats(started_at=datetime(2026, 10, 21, 9, 0))
+    sentence = (
+        "Практического опыта с gRPC, GraphQL и Redis в профиле нет, "
+        "но это не перекрывает основной релевантный опыт."
+    )
+    stats.sent.append(
+        SentVacancy(
+            title="Java-разработчик",
+            company="Ozon",
+            url="https://hh.ru/vacancy/1",
+            probability=0.9,
+            reason=sentence,
+        )
+    )
+
+    assert _outcome_reason(stats, (0, 0, 0, 0, 0, 0, 0), OUTCOME_SENT) == sentence
+
+
+def test_last_letter_sentence_skips_signature() -> None:
+    """В причину sent идёт последнее предложение письма, а не подпись."""
+    sentence = (
+        "Практического опыта с gRPC, GraphQL и Redis в профиле нет, "
+        "но это не перекрывает основной релевантный опыт."
+    )
+    signature = "С уважением,\nАлександр Гладской\nТелеграм: @saneci\nПочта: a@b.ru"
+    letter = f"Здравствуйте! Готов обсудить вакансию. {sentence}\n\n{signature}"
+
+    assert _last_letter_sentence(letter, signature) == sentence
+
+
+def test_last_letter_sentence_drops_signature_added_by_model() -> None:
+    """Если модель добавила подпись сама, строки контактов в причину не попадают."""
+    sentence = "Готов обсудить задачи и сроки на созвоне."
+    letter = (
+        f"Здравствуйте! {sentence}\n\nС уважением,\nАлександр\n"
+        "Телеграм: @saneci\nПочта: a@b.ru"
+    )
+
+    assert _last_letter_sentence(letter) == sentence
+
+
+def test_remember_card_already_responded_keeps_sent_record(tmp_path: Path) -> None:
+    """Повторная карточка «Вы откликнулись» не переносит запись в сегодняшний файл."""
+    store = ProcessedStore(tmp_path / "report", today=date(2026, 11, 2))
+    url = "https://career.habr.com/vacancies/1000150058"
+    store.record(
+        url=url,
+        title="Java-разработчик",
+        company="Компания",
+        status=OUTCOME_SENT,
+        reason="отклик уже отправлен",
+        channel="habr",
+    )
+    before = store.find_record("Java-разработчик", "Компания", url, "")
+    assert before is not None
+    updated_at = before["updated_at"]
+    attempts = before["attempts"]
+    logger = RunLogger(tmp_path / "logs", run_id="habr-already-responded")
+    card = VacancyCard(title="Java-разработчик", company="Компания", url=url)
+
+    recorded = _remember_card_already_responded(
+        store,
+        logger,
+        card,
+        "",
+        SimpleNamespace(name="habr"),
+    )
+    logger.close()
+
+    after = store.find_record("Java-разработчик", "Компания", url, "")
+    assert recorded is False
+    assert after is not None
+    assert after["updated_at"] == updated_at
+    assert after["attempts"] == attempts
+
+
+def test_remember_card_already_responded_keeps_rejected(tmp_path: Path) -> None:
+    """Терминальный отказ карточка Habr не откатывает в sent."""
+    store = ProcessedStore(tmp_path / "report", today=date(2026, 11, 2))
+    url = "https://career.habr.com/vacancies/1000164183"
+    store.record(
+        url=url,
+        title="Java-разработчик",
+        company="Компания",
+        status=OUTCOME_REJECTED,
+        reason=REJECTED_REASON,
+        channel="habr",
+    )
+    before = store.find_record("Java-разработчик", "Компания", url, "")
+    assert before is not None
+    updated_at = before["updated_at"]
+    logger = RunLogger(tmp_path / "logs", run_id="habr-rejected")
+    card = VacancyCard(title="Java-разработчик", company="Компания", url=url)
+
+    recorded = _remember_card_already_responded(
+        store,
+        logger,
+        card,
+        "",
+        SimpleNamespace(name="habr"),
+    )
+    logger.close()
+
+    after = store.find_record("Java-разработчик", "Компания", url, "")
+    assert recorded is False
+    assert after is not None
+    assert after["status"] == OUTCOME_REJECTED
+    assert after["reason"] == REJECTED_REASON
+    assert after["updated_at"] == updated_at
+
+
+def test_remember_card_already_responded_keeps_invite(tmp_path: Path) -> None:
+    """Приглашение карточка Habr не понижает до sent."""
+    store = ProcessedStore(tmp_path / "report", today=date(2026, 11, 2))
+    url = "https://career.habr.com/vacancies/1000164183"
+    store.record(
+        url=url,
+        title="Java-разработчик",
+        company="Компания",
+        status="invite",
+        reason="По отклику пришло приглашение на интервью",
+        channel="habr",
+    )
+    logger = RunLogger(tmp_path / "logs", run_id="habr-invite")
+    card = VacancyCard(title="Java-разработчик", company="Компания", url=url)
+
+    recorded = _remember_card_already_responded(
+        store,
+        logger,
+        card,
+        "",
+        SimpleNamespace(name="habr"),
+    )
+    logger.close()
+
+    after = store.find_record("Java-разработчик", "Компания", url, "")
+    assert recorded is False
+    assert after is not None
+    assert after["status"] == "invite"
+
+
+def test_remember_card_already_responded_keeps_archived(tmp_path: Path) -> None:
+    """Архивная запись терминальна: карточка Habr её не возвращает в sent."""
+    store = ProcessedStore(tmp_path / "report", today=date(2026, 11, 2))
+    url = "https://career.habr.com/vacancies/1000164183"
+    store.record(
+        url=url,
+        title="Java-разработчик",
+        company="Компания",
+        status=OUTCOME_SKIPPED,
+        reason=ARCHIVE_REASON,
+        channel="habr",
+        archived=True,
+    )
+    logger = RunLogger(tmp_path / "logs", run_id="habr-archived")
+    card = VacancyCard(title="Java-разработчик", company="Компания", url=url)
+
+    recorded = _remember_card_already_responded(
+        store,
+        logger,
+        card,
+        "",
+        SimpleNamespace(name="habr"),
+    )
+    logger.close()
+
+    after = store.find_record("Java-разработчик", "Компания", url, "")
+    assert recorded is False
+    assert after is not None
+    assert after["status"] == OUTCOME_SKIPPED
+    assert after["archived"] is True
+
+
+def test_remember_card_already_responded_skips_known_status(tmp_path: Path) -> None:
+    """Любая известная запись пропускается: карточка не меняет её статус."""
+    store = ProcessedStore(tmp_path / "report", today=date(2026, 11, 2))
+    url = "https://career.habr.com/vacancies/1000150058"
+    store.record(
+        url=url,
+        title="Java-разработчик",
+        company="Компания",
+        status=OUTCOME_QUEUED,
+        reason="Нужен ручной отклик",
+        channel="habr",
+    )
+    before = store.find_record("Java-разработчик", "Компания", url, "")
+    assert before is not None
+    updated_at = before["updated_at"]
+    attempts = before["attempts"]
+    logger = RunLogger(tmp_path / "logs", run_id="habr-known-status")
+    card = VacancyCard(title="Java-разработчик", company="Компания", url=url)
+
+    recorded = _remember_card_already_responded(
+        store,
+        logger,
+        card,
+        "",
+        SimpleNamespace(name="habr"),
+    )
+    logger.close()
+
+    after = store.find_record("Java-разработчик", "Компания", url, "")
+    assert recorded is False
+    assert after is not None
+    assert after["status"] == OUTCOME_QUEUED
+    assert after["reason"] == "Нужен ручной отклик"
+    assert after["updated_at"] == updated_at
+    assert after["attempts"] == attempts
+
+
+def test_sync_habr_responses_updates_known_and_keeps_terminal(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Сверка Habr уточняет неархивные записи, но не переоткрывает отказ."""
+    report_dir = tmp_path / "report"
+    old = ProcessedStore(report_dir, today=date(2026, 10, 28))
+    urls = {
+        "rejected": "https://career.habr.com/vacancies/1000164183",
+        "invite": "https://career.habr.com/vacancies/1000164184",
+        "queued": "https://career.habr.com/vacancies/1000164185",
+        "terminal": "https://career.habr.com/vacancies/1000164186",
+    }
+    old.record(
+        url=urls["rejected"],
+        title="Java 1",
+        company="ЛАНИТ",
+        status=OUTCOME_SENT,
+        channel="habr",
+    )
+    old.record(
+        url=urls["invite"],
+        title="Java 2",
+        company="ЛАНИТ",
+        status=OUTCOME_SENT,
+        channel="habr",
+    )
+    old.record(
+        url=urls["queued"],
+        title="Java 3",
+        company="ЛАНИТ",
+        status=OUTCOME_QUEUED,
+        reason="Нужен ручной отклик",
+        channel="habr",
+    )
+    old.record(
+        url=urls["terminal"],
+        title="Java 4",
+        company="ЛАНИТ",
+        status=OUTCOME_REJECTED,
+        reason=REJECTED_REASON,
+        channel="habr",
+    )
+
+    store = ProcessedStore(report_dir, today=date(2026, 11, 2))
+    store.load()
+    responses = [
+        HabrResponse(
+            url=urls["rejected"],
+            title="Java 1",
+            company="ЛАНИТ",
+            label="Отказ",
+            status=OUTCOME_REJECTED,
+        ),
+        HabrResponse(
+            url=urls["invite"],
+            title="Java 2",
+            company="ЛАНИТ",
+            label="Приглашение",
+            status="invite",
+        ),
+        HabrResponse(
+            url=urls["queued"],
+            title="Java 3",
+            company="ЛАНИТ",
+            label="Отказ",
+            status=OUTCOME_REJECTED,
+        ),
+        HabrResponse(
+            url=urls["terminal"],
+            title="Java 4",
+            company="ЛАНИТ",
+            label="Отказ",
+            status=OUTCOME_REJECTED,
+        ),
+        HabrResponse(
+            url="https://career.habr.com/vacancies/1000164187",
+            title="Java 5",
+            company="ЛАНИТ",
+            label="Отказ",
+            status=OUTCOME_REJECTED,
+        ),
+    ]
+    monkeypatch.setattr(
+        "agent.pipeline.habr_search.open_responses_page",
+        lambda page, page_index: responses if page_index == 0 else [],
+    )
+    logger = RunLogger(tmp_path / "logs", run_id="habr-sync")
+
+    _sync_habr_responses(None, store, logger)  # type: ignore[arg-type]
+    logger.close()
+
+    rejected = store.find_record("Java 1", "ЛАНИТ", urls["rejected"], "")
+    invite = store.find_record("Java 2", "ЛАНИТ", urls["invite"], "")
+    queued = store.find_record("Java 3", "ЛАНИТ", urls["queued"], "")
+    terminal = store.find_record("Java 4", "ЛАНИТ", urls["terminal"], "")
+    assert rejected is not None and rejected["status"] == OUTCOME_REJECTED
+    assert invite is not None and invite["status"] == "invite"
+    assert invite["invited_at"]
+    assert queued is not None and queued["status"] == OUTCOME_REJECTED
+    assert terminal is not None and terminal["status"] == OUTCOME_REJECTED
+    today = json.loads((report_dir / "2026-11-02.json").read_text(encoding="utf-8"))
+    assert {
+        row["url"]: row["status"] for row in today["vacancies"]
+    } == {
+        urls["rejected"]: OUTCOME_REJECTED,
+        urls["invite"]: "invite",
+        urls["queued"]: OUTCOME_REJECTED,
+    }
+    old_rows = json.loads((report_dir / "2026-10-28.json").read_text(encoding="utf-8"))
+    assert [row["url"] for row in old_rows["vacancies"]] == [urls["terminal"]]
+    events = [
+        json.loads(line) for line in logger.events_path.read_text(encoding="utf-8").splitlines()
+    ]
+    sync = [item for item in events if item["event"] == "habr_responses_sync"][0]
+    assert sync["read"] == 5
+    assert sync["updated"] == 3
+
+
+def test_sync_habr_responses_does_not_move_unchanged_status(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Повторный статус с той же страницы не переписывает отчёт."""
+    report_dir = tmp_path / "report"
+    old = ProcessedStore(report_dir, today=date(2026, 10, 28))
+    url = "https://career.habr.com/vacancies/1000164183"
+    old.record(
+        url=url,
+        title="Java разработчик",
+        company="ЛАНИТ",
+        status=OUTCOME_SENT,
+        reason="отклик уже отправлен",
+        channel="habr",
+    )
+
+    store = ProcessedStore(report_dir, today=date(2026, 11, 2))
+    store.load()
+    response = HabrResponse(
+        url=url,
+        title="Java разработчик",
+        company="ЛАНИТ",
+        label="Прочитано",
+        status=OUTCOME_SENT,
+    )
+    monkeypatch.setattr(
+        "agent.pipeline.habr_search.open_responses_page",
+        lambda page, page_index: [response] if page_index == 0 else [],
+    )
+    logger = RunLogger(tmp_path / "logs", run_id="habr-sync-same")
+
+    _sync_habr_responses(None, store, logger)  # type: ignore[arg-type]
+    logger.close()
+
+    assert not (report_dir / "2026-11-02.json").exists()
+    rows = json.loads((report_dir / "2026-10-28.json").read_text(encoding="utf-8"))
+    assert rows["vacancies"][0]["status"] == OUTCOME_SENT
+    events = [
+        json.loads(line) for line in logger.events_path.read_text(encoding="utf-8").splitlines()
+    ]
+    sync = [item for item in events if item["event"] == "habr_responses_sync"][0]
+    assert sync["updated"] == 0
+
+
+def test_sync_habr_responses_does_not_fail_run_on_page_error(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Сбой страницы откликов пишется в лог и не ломает запуск."""
+    store = ProcessedStore(tmp_path / "report", today=date(2026, 11, 2))
+    logger = RunLogger(tmp_path / "logs", run_id="habr-sync-error")
+
+    def fail(page, page_index):
+        raise RuntimeError("нет доступа")
+
+    monkeypatch.setattr("agent.pipeline.habr_search.open_responses_page", fail)
+    _sync_habr_responses(None, store, logger)  # type: ignore[arg-type]
+    logger.close()
+
+    events = [
+        json.loads(line) for line in logger.events_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert any(item["event"] == "habr_responses_error" for item in events)
+
+
 def test_outcome_reason_empty_for_other_outcomes() -> None:
     stats = RunStats(started_at=datetime(2026, 10, 21, 9, 0))
 
@@ -1198,6 +1828,56 @@ def test_llm_skip_does_not_wait_pause(tmp_path: Path, monkeypatch) -> None:
     assert len(stats.skipped) == 1
 
 
+def test_probability_equal_threshold_is_skipped(tmp_path: Path, monkeypatch) -> None:
+    """Даже если клиент ошибочно поставил fits=True, ровно порог — пропуск."""
+    config = make_config(tmp_path)
+    details = VacancyDetails(
+        url="https://hh.ru/vacancy/137749988",
+        title="Java Developer",
+        company="Gudwin",
+        salary="",
+        description="Java, Spring, PostgreSQL.",
+    )
+    monkeypatch.setattr("agent.pipeline.open_vacancy", lambda page, vacancy: details)
+
+    class FakeLLM:
+        def decide(self, profile, vacancy):
+            return DecisionResult(
+                fits=True,
+                probability=0.8,
+                threshold=0.8,
+                probabilities={"подходит": 0.8, "не подходит": 0.2},
+                chosen="подходит",
+            )
+
+        def explain_rejection(self, profile, vacancy, probability, threshold):
+            del profile, vacancy, probability, threshold
+            return ""
+
+        def generate(self, profile, vacancy, max_length=1500, signature=""):
+            raise AssertionError("письмо для вакансии ровно на пороге не генерируется")
+
+    stats = make_stats()
+    logger = RunLogger(tmp_path / "logs", run_id="threshold-equal")
+    card = VacancyCard(title=details.title, company=details.company, url=details.url)
+
+    _process_vacancy(
+        _FakePage(details.url),
+        config,
+        Profile(text="Java", examples="", style_rules=""),
+        FakeLLM(),
+        stats,
+        logger,
+        card,
+    )
+    logger.close()
+
+    assert stats.sent == []
+    assert [item.reason for item in stats.skipped] == [
+        "вероятность 0.80 не выше порога 0.80"
+    ]
+
+
 def test_pause_happens_before_response(tmp_path: Path, monkeypatch) -> None:
     """Пауза выполняется перед отправкой отклика, а не перед оценкой LLM."""
     config = make_config(tmp_path)
@@ -1254,6 +1934,67 @@ def test_pause_happens_before_response(tmp_path: Path, monkeypatch) -> None:
     logger.close()
 
     assert order == ["перед отправкой отклика", "respond", "после отправки отклика"]
+
+
+def test_sent_vacancy_reason_is_last_letter_sentence(tmp_path: Path, monkeypatch) -> None:
+    """В причине sent — последнее предложение письма, а не общий вердикт."""
+    config = make_config(tmp_path)
+    details = VacancyDetails(
+        url="https://hh.ru/vacancy/138836233",
+        title="Java-разработчик",
+        company="ППК",
+        salary="",
+        description="Java, Spring, PostgreSQL.",
+    )
+    monkeypatch.setattr("agent.pipeline.open_vacancy", lambda page, vacancy: details)
+
+    class FakeLLM:
+        def decide(self, profile, vacancy):
+            return DecisionResult(
+                fits=True,
+                probability=0.95,
+                threshold=0.8,
+                probabilities={"подходит": 0.95, "не подходит": 0.05},
+                chosen="подходит",
+            )
+
+        def generate(self, profile, vacancy, max_length=1500, signature=""):
+            del profile, vacancy, max_length, signature
+            return GenerationResult(
+                verdict="подходит",
+                reason="ok",
+                cover_letter=(
+                    "Здравствуйте! Готов обсудить вакансию. "
+                    "Практического опыта с gRPC в профиле нет, "
+                    "но это не перекрывает основной релевантный опыт."
+                ),
+            )
+
+    def fake_respond(page, letter, captcha_waiter=None):
+        del page, letter, captcha_waiter
+        return ResponseResult(status=STATUS_SENT)
+
+    monkeypatch.setattr("agent.pipeline.respond", fake_respond)
+    monkeypatch.setattr("agent.pipeline._pause", lambda config, logger, reason: None)
+    stats = make_stats()
+    logger = RunLogger(tmp_path / "logs", run_id="sent-letter-reason")
+    card = VacancyCard(title=details.title, company=details.company, url=details.url)
+
+    _process_vacancy(
+        _FakePage(details.url),
+        config,
+        Profile(text="Java", examples="", style_rules=""),
+        FakeLLM(),
+        stats,
+        logger,
+        card,
+    )
+    logger.close()
+
+    assert stats.sent[0].reason == (
+        "Практического опыта с gRPC в профиле нет, "
+        "но это не перекрывает основной релевантный опыт."
+    )
 
 
 def test_respond_rejected_marks_vacancy_rejected(tmp_path: Path, monkeypatch) -> None:

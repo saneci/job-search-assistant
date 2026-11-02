@@ -38,6 +38,15 @@ def test_habr_channel_needs_no_queries_and_area(tmp_path: Path) -> None:
     assert config.search.area == ""
 
 
+def test_cli_channel_override_drops_queries_requirement(tmp_path: Path) -> None:
+    """`--ch habr` из командной строки снимает требование search.queries и area."""
+    config = load_config(write_config(tmp_path, {}), channel="habr")
+
+    assert config.search.channel == "habr"
+    assert config.search.queries == ()
+    assert config.search.area == ""
+
+
 def test_hh_channel_still_requires_area(tmp_path: Path) -> None:
     with pytest.raises(ConfigError, match="search.area"):
         load_config(write_config(tmp_path, {"channel": "hh", "queries": "Java"}))

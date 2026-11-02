@@ -92,6 +92,12 @@ CAUSE_TEXT_RE = re.compile(
     r"требует|необходим|должн|доступн|видимост|отклик",
     re.IGNORECASE,
 )
+# hh.ru держит в форме отклика предупреждение о видимости резюме даже тогда,
+# когда выбранное резюме открыто всем работодателям, а кнопка отправки активна.
+# Это подсказка интерфейса, а не причина неудачи: после клика по «Откликнуться»
+# её в отчёт не пишем. Когда кнопка заблокирована, предупреждение остаётся
+# настоящей причиной.
+HIDDEN_RESUME_WARNING_RE = re.compile(r"поменяйте видимость резюме", re.IGNORECASE)
 # Текст контейнера формы: если он попал целиком, это обёртка, а не причина.
 CONTAINER_TEXT_RE = re.compile(
     r"сопроводительное письмо|отклик на вакансию|сгенерировать",
@@ -118,16 +124,28 @@ STATUS_UNKNOWN = "unknown"
 # Состояния самой страницы вакансии. Это не «блокеры» теста/анкеты: такие
 # вакансии не откладываем, а помечаем пройденными (skipped или rejected).
 PAGE_BLOCKED = "blocked"
+# Экран «Вакансия в архиве»: работодатель закрыл вакансию, отклики не принимаются.
+PAGE_ARCHIVED = "archived"
 # Экран «Вам недоступна эта вакансия»: резюме заблокировано или доступ закрыт.
 PAGE_UNAVAILABLE = "unavailable"
 PAGE_INVITED = "invited"
 PAGE_REJECTED = "rejected"
 # Кнопка «Отклик другим резюме»: по вакансии уже есть отклик другого резюме.
 PAGE_OTHER_RESUME = "other_resume"
-# Состояния страницы, при которых вакансию пропускаем сразу после открытия.
-PAGE_STATES = (PAGE_BLOCKED, PAGE_UNAVAILABLE, PAGE_INVITED, PAGE_REJECTED, PAGE_OTHER_RESUME)
+# Состояния страницы, которые распознаём при открытии вакансии. Все, кроме
+# «Отклик другим резюме», пропускаются сразу: у other_resume сначала читаем
+# описание и оцениваем вакансию, чтобы подходящую поставить в очередь.
+PAGE_STATES = (
+    PAGE_BLOCKED,
+    PAGE_ARCHIVED,
+    PAGE_UNAVAILABLE,
+    PAGE_INVITED,
+    PAGE_REJECTED,
+    PAGE_OTHER_RESUME,
+)
 BLOCKED_TITLE = "У вас нет доступа к этой вакансии"
 UNAVAILABLE_TITLE = "Вам недоступна эта вакансия"
+ARCHIVED_TITLE = "Вакансия в архиве"
 INVITED_TITLE = "Вас пригласили"
 REJECTED_TITLE = "Вам отказали"
 
@@ -226,6 +244,8 @@ RESUME_OPTION_SELECTORS = (
 # Сколько ждём появления опций после открытия кастомного списка.
 RESUME_OPTIONS_WAIT_MS = 1000
 RESUME_OPTIONS_POLL_MS = 100
+# Сколько ждём закрытия кастомного списка после выбора резюме.
+RESUME_CLOSE_WAIT_MS = 200
 # Сколько элементов одного селектора просматриваем при поиске видимого.
 VISIBLE_SCAN_LIMIT = 20
 
@@ -418,7 +438,12 @@ def resume_options(scope: Locator | Page) -> list[str]:
 
 
 def select_resume(scope: Locator | Page, name: str) -> None:
-    """Выбирает резюме по названию; без совпадения — ResumeNotFoundError."""
+    """Выбирает резюме по названию; без совпадения — ResumeNotFoundError.
+
+    Кастомный список hh.ru остаётся открытым после клика по опции и перекрывает
+    кнопку отправки. Поэтому после выбора список закрывается, а если нужное
+    резюме уже выбрано, список не открывается вовсе.
+    """
     select, options = _native_resume_select(scope, name)
     if select is not None:
         matched = match_resume(options, name)
@@ -430,7 +455,12 @@ def select_resume(scope: Locator | Page, name: str) -> None:
             raise ResumeNotFoundError(name, options) from exc
         return
 
-    # Кастомный список: опции появляются только после клика по триггеру.
+    # Кастомный список: если нужное резюме уже выбрано, список не открываем.
+    selected = _first_text(scope, ("[data-qa='resume-title']",))
+    if selected and _resume_words(selected) == _resume_words(name):
+        _close_resume_dropdown(scope)
+        return
+
     native_options = options
     options = _visible_resume_options(scope)
     if not options:
@@ -453,6 +483,36 @@ def select_resume(scope: Locator | Page, name: str) -> None:
         option.click()
     except PlaywrightError as exc:
         raise ResumeNotFoundError(name, options or native_options) from exc
+    _close_resume_dropdown(scope)
+
+
+def _close_resume_dropdown(scope: Locator | Page) -> None:
+    """Закрывает кастомный список резюме после выбора.
+
+    hh.ru не закрывает список сам: он остаётся поверх формы и перекрывает
+    кнопку «Откликнуться». Escape закрывает только список, а не модалку.
+    """
+    if not _visible_resume_options(scope):
+        return
+    page = scope if isinstance(scope, Page) else getattr(scope, "page", None)
+    if page is not None:
+        try:
+            page.keyboard.press("Escape")
+        except (PlaywrightError, AttributeError):
+            pass
+        try:
+            page.wait_for_timeout(RESUME_CLOSE_WAIT_MS)
+        except (PlaywrightError, AttributeError):
+            pass
+    if not _visible_resume_options(scope):
+        return
+    # Escape не сработал: закрываем список повторным кликом по триггеру.
+    trigger = _first_visible(scope, RESUME_TRIGGER_SELECTORS)
+    if trigger is not None:
+        try:
+            trigger.click()
+        except (PlaywrightError, AttributeError):
+            pass
 
 
 class VacancyParseError(RuntimeError):
@@ -486,10 +546,16 @@ def open_vacancy(page: Page, card: VacancyCard) -> VacancyDetails:
 
     # Ждём готовность страницы: заголовок вакансии или экран-состояние (нет
     # доступа, приглашение, чужой отклик). Что появилось раньше, то и решает:
-    # пропуск не простаивает в таймауте.
+    # пропуск не простаивает в таймауте. «Отклик другим резюме» — исключение:
+    # вакансию нужно оценить, поэтому читаем её описание, а не пропускаем сразу.
     state = _wait_for_page_ready(page)
-    if state is not None:
+    if state is not None and state != PAGE_OTHER_RESUME:
         return _page_state_details(card, state)
+    if state == PAGE_OTHER_RESUME:
+        try:
+            page.wait_for_selector(DESCRIPTION_SELECTORS[0], timeout=5000)
+        except PlaywrightTimeoutError:
+            pass
 
     title = _first_text(page, TITLE_SELECTORS) or card.title
     company = _first_text(page, COMPANY_SELECTORS) or card.company
@@ -499,8 +565,8 @@ def open_vacancy(page: Page, card: VacancyCard) -> VacancyDetails:
 
     company_name = company.splitlines()[0].strip() if company else ""
     blocker = detect_page_blocker(page)
-    if blocker in PAGE_STATES:
-        # На такой странице нет ни описания, ни формы отклика: вакансию
+    if blocker in PAGE_STATES and blocker != PAGE_OTHER_RESUME:
+        # На таком экране нет ни описания, ни формы отклика: вакансию
         # пропускаем сразу, без разбора и без обращения к LLM.
         return _page_state_details(card, blocker)
 
@@ -532,6 +598,9 @@ def _page_state_details(card: VacancyCard, state: str) -> VacancyDetails:
         salary=card.salary,
         description="",
         blocker=state,
+        # Архив и закрытый доступ — вакансия не для отклика: в отчёте
+        # у такой записи появляется поле `archived`.
+        archived=state in (PAGE_ARCHIVED, PAGE_UNAVAILABLE),
     )
 
 
@@ -542,8 +611,8 @@ def detect_page_blocker(page: Page) -> str | None:
     вакансия больше недоступна («У вас нет доступа к этой вакансии»,
     «Вам недоступна эта вакансия»), работодатель уже пригласил откликнуться
     («Вас пригласили») и отклик по вакансии уже отправлен другим резюме
-    (кнопка «Отклик другим резюме»). Это не отложенные вакансии, а пройденные:
-    отклик там не нужен.
+    (кнопка «Отклик другим резюме»). Первые состояния — пройденные, а
+    other_resume оценивается отдельно: подходящую вакансию откладываем в очередь.
     """
     state = _detect_page_state(page)
     if state is not None:
@@ -581,6 +650,9 @@ def _detect_page_state(page: Page) -> str | None:
     """Состояние самой страницы, при котором отклик уже не нужен."""
     if _has_exact_text(page, BLOCKED_TITLE):
         return PAGE_BLOCKED
+    if _has_text(page, ARCHIVED_TITLE):
+        # Работодатель закрыл вакансию: отклики больше не принимаются.
+        return PAGE_ARCHIVED
     if _has_text(page, UNAVAILABLE_TITLE):
         # Резюме заблокировано или вакансия закрыта для просмотра.
         return PAGE_UNAVAILABLE
@@ -757,7 +829,11 @@ def respond(
             else:
                 result = _wait_for_response_result(page, captcha_waiter)
 
-    reason = response_notice(page) if result != STATUS_SENT else ""
+    reason = (
+        response_notice(page, include_hidden_warning=False)
+        if result != STATUS_SENT
+        else ""
+    )
     if result in ("test", "questionnaire", "external_form"):
         _dismiss(page)
     return _result(result, reason=reason)
@@ -770,12 +846,16 @@ def _result(status: str, page: Page | None = None, *, reason: str = "") -> Respo
     return ResponseResult(status=status, reason=reason)
 
 
-def response_notice(page: Page) -> str:
+def response_notice(page: Page, *, include_hidden_warning: bool = True) -> str:
     """Возвращает информационное сообщение формы отклика — реальную причину.
 
     Сначала смотрим явные подсказки/уведомления, затем абзацы внутри модалки.
     Текст описания вакансии и подписи интерфейса не попадают: нужен только
     текст, которым hh.ru объясняет, почему отклик недоступен или не ушёл.
+
+    `include_hidden_warning=False` — форма готова и кнопка отправки была
+    активна. Предупреждение «поменяйте видимость резюме» hh.ru показывает и
+    при открытом резюме, поэтому причиной неудачи оно не считается.
     """
     scope = _response_scope(page)
     if _modal_hidden(page):
@@ -784,10 +864,14 @@ def response_notice(page: Page) -> str:
     raw = _first_text(scope, NOTICE_SELECTORS)
     if raw and len(raw) <= NOTICE_MAX_LENGTH and _looks_like_notice(_clean_notice(raw)):
         return _clean_notice(raw)
-    return _notice_from_text_blocks(scope)
+    return _notice_from_text_blocks(scope, include_hidden_warning=include_hidden_warning)
 
 
-def _notice_from_text_blocks(scope: Locator | Page) -> str:
+def _notice_from_text_blocks(
+    scope: Locator | Page,
+    *,
+    include_hidden_warning: bool = True,
+) -> str:
     """Ищет абзац-объяснение в модалке, пропуская кнопки, подписи и заголовки."""
     for selector in ("p", "div", "span"):
         try:
@@ -808,6 +892,8 @@ def _notice_from_text_blocks(scope: Locator | Page) -> str:
             if len(raw) > NOTICE_MAX_LENGTH:
                 continue
             text = _clean_notice(raw)
+            if not include_hidden_warning and HIDDEN_RESUME_WARNING_RE.search(text):
+                continue
             if not _looks_like_notice(text):
                 continue
             if selector != "p" and not CAUSE_TEXT_RE.search(text):

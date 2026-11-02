@@ -7,12 +7,15 @@ from typing import Any
 from agent.habr_search import (
     CARD_SELECTOR,
     HABR_MAX_PAGES,
+    RESPONSES_ROW_SELECTOR,
     TOTAL_SELECTOR,
     build_search_url,
     collect_cards,
+    collect_responses,
     pages_plan,
     parse_total,
     read_total,
+    response_status,
     vacancy_id,
 )
 
@@ -178,3 +181,53 @@ def test_collect_cards_marks_already_responded() -> None:
 
     assert cards[0].already_responded is True
     assert cards[1].already_responded is False
+
+
+def response_row(title: str, company: str, href: str, status: str) -> FakeElement:
+    """Строка таблицы откликов: три ячейки, как на career.habr.com."""
+    return FakeElement(
+        mapping={
+            "td": [
+                FakeElement(
+                    mapping={
+                        ".title a": [FakeElement(title, href=href)],
+                        ".comapny a": [FakeElement(company)],
+                    }
+                ),
+                FakeElement(),
+                FakeElement(mapping={".status": [FakeElement(status)]}),
+            ]
+        }
+    )
+
+
+def test_response_status_maps_habr_labels() -> None:
+    assert response_status("Отказ") == "rejected"
+    assert response_status("Приглашение") == "invite"
+    assert response_status("Приглашение на собеседование") == "invite"
+    assert response_status("Оффер") == "offer"
+    assert response_status("Прочитано") == "sent"
+    assert response_status("Не прочитано") == "sent"
+    assert response_status("Неизвестно") == ""
+
+
+def test_collect_responses_reads_rows() -> None:
+    page = FakeElement(
+        mapping={
+            RESPONSES_ROW_SELECTOR: [
+                FakeElement(),
+                response_row("Java", "Ozon", "/vacancies/1", "Отказ"),
+                response_row("QA", "VK", "/vacancies/2?from=list", "Не прочитано"),
+            ]
+        }
+    )
+
+    responses = collect_responses(page)  # type: ignore[arg-type]
+
+    assert [item.url for item in responses] == [
+        "https://career.habr.com/vacancies/1",
+        "https://career.habr.com/vacancies/2",
+    ]
+    assert [item.title for item in responses] == ["Java", "QA"]
+    assert [item.company for item in responses] == ["Ozon", "VK"]
+    assert [item.status for item in responses] == ["rejected", "sent"]

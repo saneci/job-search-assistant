@@ -6,7 +6,7 @@ const require = createRequire(import.meta.url);
 const f = require('../../web/static/filters.js');
 
 // Статусы отчёта: в браузере список приходит из STATUS_LABELS.
-const STATUSES = ['sent', 'skipped', 'queued', 'excluded', 'error', 'invite', 'rejected', 'offer'];
+const STATUSES = ['sent', 'skipped', 'queued', 'excluded', 'error', 'invite', 'rejected', 'offer', 'archived'];
 
 function vacancy(overrides = {}) {
     return {
@@ -274,3 +274,131 @@ test('полный круг: снятые даты сохраняются в а�
     assert.equal(f.toSearchParams(restored).toString(), 'status=sent&dates=none');
 });
 
+/* Архив — отдельная грань статуса: у записи остаётся прежний статус, а
+   «Не подходит» архивные вакансии не показывает. */
+test('matchesFilters: «Не подходит» не показывает архивные вакансии', () => {
+    const archived = vacancy({status: 'skipped', archived: true});
+
+    assert.equal(f.matchesFilters(archived, filters({status: 'skipped'})), false);
+    assert.equal(f.matchesFilters(vacancy({status: 'skipped'}), filters({status: 'skipped'})), true);
+});
+
+/* Архивная запись не ошибка разбора: в «Ошибках» её быть не должно. */
+test('matchesFilters: «Ошибки» не показывает архивные вакансии', () => {
+    const archived = vacancy({status: 'error', archived: true});
+
+    assert.equal(f.matchesFilters(archived, filters({status: 'error'})), false);
+    assert.equal(f.matchesFilters(vacancy({status: 'error'}), filters({status: 'error'})), true);
+});
+
+test('summaryCounts: карточки сводки не считают архивные записи', () => {
+    const counts = f.summaryCounts([
+        vacancy({status: 'error'}),
+        vacancy({status: 'error', archived: true}),
+        vacancy({status: 'sent'})
+    ]);
+
+    assert.deepEqual(counts, {error: 1, sent: 1});
+});
+
+test('matchesFilters: «В архиве» показывает только архивные записи', () => {
+    assert.equal(
+        f.matchesFilters(vacancy({status: 'skipped', archived: true}), filters({status: 'archived'})),
+        true
+    );
+    assert.equal(
+        f.matchesFilters(vacancy({status: 'sent', archived: true}), filters({status: 'archived'})),
+        true
+    );
+    assert.equal(f.matchesFilters(vacancy({status: 'skipped'}), filters({status: 'archived'})), false);
+});
+
+test('matchesFilters: архивная запись не попадает в свой статус', () => {
+    assert.equal(f.matchesFilters(vacancy({status: 'sent', archived: true}), filters({status: 'sent'})), false);
+});
+
+test('matchesFilters: «Все» показывает архивные записи', () => {
+    assert.equal(f.matchesFilters(vacancy({status: 'skipped', archived: true}), f.defaultFilters()), true);
+});
+
+test('normalizeFilters: статус «В архиве» проходит проверку', () => {
+    assert.equal(f.normalizeFilters({status: 'archived'}, STATUSES).status, 'archived');
+});
+
+/* Дефект: снятие единственной выбранной даты проставляло остальные заново. */
+const ALL_DATES = ['2026-10-27.json', '2026-10-26.json'];
+
+test('toggleDate: снятие единственной даты оставляет даты пустыми', () => {
+    const state = f.toggleDate(filters({files: ['2026-10-27.json']}), '2026-10-27.json', ALL_DATES);
+
+    assert.deepEqual(state.files, []);
+    assert.equal(state.datesNone, true);
+});
+
+test('toggleDate: снятие одной даты из нескольких оставляет остальные', () => {
+    const state = f.toggleDate(filters({files: ALL_DATES.slice()}), '2026-10-27.json', ALL_DATES);
+
+    assert.deepEqual(state.files, ['2026-10-26.json']);
+    assert.equal(state.datesNone, false);
+});
+
+test('toggleDate: «все даты» превращаются в список без снятой даты', () => {
+    const state = f.toggleDate(f.defaultFilters(), '2026-10-27.json', ALL_DATES);
+
+    assert.deepEqual(state.files, ['2026-10-26.json']);
+    assert.equal(state.datesNone, false);
+});
+
+test('toggleDate: отметка всех дат по одной сворачивается в «все даты»', () => {
+    const state = f.toggleDate(filters({files: ['2026-10-26.json']}), '2026-10-27.json', ALL_DATES);
+
+    assert.deepEqual(state.files, []);
+    assert.equal(state.datesNone, false);
+});
+
+test('toggleDate: из состояния «дат нет» отметка даты выбирает одну', () => {
+    const state = f.toggleDate(filters({datesNone: true}), '2026-10-27.json', ALL_DATES);
+
+    assert.deepEqual(state.files, ['2026-10-27.json']);
+    assert.equal(state.datesNone, false);
+});
+
+test('toggleAllDates: «Выбрать всё» работает в обе стороны', () => {
+    assert.deepEqual(
+        f.toggleAllDates(filters({files: ['2026-10-27.json']})),
+        {files: [], datesNone: false}
+    );
+    assert.deepEqual(f.toggleAllDates(f.defaultFilters()), {files: [], datesNone: true});
+});
+
+test('isDateChecked: отметки дат следуют состоянию', () => {
+    assert.equal(f.isDateChecked(f.defaultFilters(), '2026-10-27.json'), true);
+    assert.equal(f.isDateChecked(filters({files: ['2026-10-27.json']}), '2026-10-27.json'), true);
+    assert.equal(f.isDateChecked(filters({files: ['2026-10-26.json']}), '2026-10-27.json'), false);
+    assert.equal(f.isDateChecked(filters({datesNone: true}), '2026-10-27.json'), false);
+});
+
+test('sameDateSelection: одинаковый выбор дат не перезагружает отчёт', () => {
+    const left = {files: ['2026-10-27.json', '2026-10-26.json'], datesNone: false};
+    const right = {files: ['2026-10-27.json', '2026-10-26.json'], datesNone: false};
+
+    assert.equal(f.sameDateSelection(left, right), true);
+});
+
+test('sameDateSelection: другой набор дат — это изменение', () => {
+    const applied = {files: ['2026-10-27.json'], datesNone: false};
+
+    assert.equal(f.sameDateSelection({files: [], datesNone: false}, applied), false);
+    assert.equal(f.sameDateSelection({files: ['2026-10-26.json'], datesNone: false}, applied), false);
+    assert.equal(
+        f.sameDateSelection({files: ['2026-10-27.json'], datesNone: true}, applied),
+        false
+    );
+});
+
+test('sameDateSelection: «дат нет» и «все даты» различаются', () => {
+    assert.equal(
+        f.sameDateSelection({files: [], datesNone: true}, {files: [], datesNone: false}),
+        false
+    );
+});

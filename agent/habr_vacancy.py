@@ -17,6 +17,7 @@ from playwright.sync_api import Locator, Page, TimeoutError as PlaywrightTimeout
 
 from .browser import NAVIGATION_TIMEOUT_MS, CaptchaError, PageLoadError, detect_captcha
 from .hh_vacancy import (
+    PAGE_ARCHIVED,
     ResponseResult,
     STATUS_ALREADY_RESPONDED,
     STATUS_CAPTCHA,
@@ -46,6 +47,8 @@ SUBMIT_SELECTORS = ("button[type='submit']",)
 EXTERNAL_RESPONSE_SELECTOR = "a[href$='/external_response']"
 RESPONSE_SECTION_SELECTOR = ".vacancy-response-section"
 RESPONSE_MESSAGE_SELECTOR = ".vacancy-response__message"
+# Работодатель закрыл вакансию: страница помечена архивной.
+ARCHIVED_TITLE = "Вакансия в архиве"
 
 RESPOND_RE = re.compile(r"^\s*откликнуться\s*$", re.IGNORECASE)
 SUBMIT_RE = re.compile(r"дополнить\s+отклик", re.IGNORECASE)
@@ -75,6 +78,18 @@ def open_vacancy(page: Page, card: VacancyCard) -> VacancyDetails:
         pass
 
     title = _first_text(page, TITLE_SELECTORS) or card.title
+    if _has_text(page, ARCHIVED_TITLE):
+        # Архивный экран — не сбой разбора: описания у такой страницы нет.
+        # В отчёт вакансия идёт как пропуск с причиной про архив.
+        return VacancyDetails(
+            url=card.url,
+            title=title,
+            company=_first_text(page, COMPANY_SELECTORS) or card.company,
+            salary=_first_text(page, SALARY_SELECTORS) or card.salary,
+            description="",
+            blocker=PAGE_ARCHIVED,
+            archived=True,
+        )
     description = _first_text(page, DESCRIPTION_SELECTORS)
     if not description:
         raise VacancyParseError(f"не удалось прочитать описание вакансии: {card.url}")
@@ -168,11 +183,15 @@ def is_authenticated(page: Page) -> bool:
     признаком гостя.
     """
     try:
-        if "career.habr.com" not in page.url or "account.habr.com" in page.url.lower():
+        if "account.habr.com" in page.url.lower():
+            # Страница входа и связки аккаунтов: уходить с неё нельзя. Habr
+            # показывает запрос «связать аккаунт с профилем Career», и сессия
+            # появляется только после ответа «Да». Переход на главную сбрасывает
+            # незавершённый вход, и человек проходит его заново.
+            return False
+        if "career.habr.com" not in page.url:
             page.goto(HOME_URL, wait_until="domcontentloaded", timeout=NAVIGATION_TIMEOUT_MS)
             page.wait_for_timeout(1000)
-        if "account.habr.com" in page.url.lower():
-            return False
         for selector in (
             f"{USER_AUTH_MENU_SELECTOR} button",
             f"{USER_AUTH_MENU_SELECTOR} a",
@@ -256,6 +275,16 @@ def _first_text(scope: Locator | Page, selectors: Sequence[str]) -> str:
         return locator.inner_text().strip()
     except PlaywrightError:
         return ""
+
+
+def _has_text(scope: Locator | Page, text: str) -> bool:
+    """Есть ли видимый элемент, в тексте которого встречается эта фраза."""
+    try:
+        locator = scope.get_by_text(text)
+        count = min(locator.count(), 10)
+    except PlaywrightError:
+        return False
+    return any(_is_visible(locator.nth(index)) for index in range(count))
 
 
 def _has_selector(scope: Locator | Page, selector: str) -> bool:

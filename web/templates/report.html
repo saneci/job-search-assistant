@@ -42,10 +42,13 @@
                         <span class="dropdown-caret" aria-hidden="true"></span>
                     </button>
                     <div class="dropdown-menu" id="datePanel" hidden>
-                        <label class="dropdown-check">
-                            <input type="checkbox" id="dateAll" checked> Выбрать всё
-                        </label>
-                        <div id="dateList"></div>
+                        <div class="dropdown-scroll">
+                            <button class="dropdown-option" type="button" id="dateAll"
+                                    role="menuitemcheckbox" aria-checked="true"><span class="option-check"
+                                                                                   aria-hidden="true">✓</span><span
+                                class="option-label">Выбрать всё</span></button>
+                            <div id="dateList"></div>
+                        </div>
                     </div>
                 </div>
 
@@ -57,38 +60,44 @@
                         <span class="dropdown-caret" aria-hidden="true"></span>
                     </button>
                     <div class="dropdown-menu" id="statusMenu" role="menu" hidden>
-                        <button class="dropdown-option checked" type="button" data-status="all"
-                                role="menuitemradio" aria-checked="true"><span class="option-check"
-                                                                               aria-hidden="true">✓</span><span
-                            class="option-label">Все</span></button>
-                        <button class="dropdown-option" type="button" data-status="sent"
-                                role="menuitemradio" aria-checked="false"><span class="option-check"
-                                                                                aria-hidden="true">✓</span><span
-                            class="option-label">Отправлено</span></button>
-                        <button class="dropdown-option" type="button" data-status="queued"
-                                role="menuitemradio" aria-checked="false"><span class="option-check"
-                                                                                aria-hidden="true">✓</span><span
-                            class="option-label">В очереди</span></button>
-                        <button class="dropdown-option" type="button" data-status="excluded"
-                                role="menuitemradio" aria-checked="false"><span class="option-check"
-                                                                                aria-hidden="true">✓</span><span
-                            class="option-label">Исключено</span></button>
-                        <button class="dropdown-option" type="button" data-status="skipped"
-                                role="menuitemradio" aria-checked="false"><span class="option-check"
-                                                                                aria-hidden="true">✓</span><span
-                            class="option-label">Не подходит</span></button>
-                        <button class="dropdown-option" type="button" data-status="rejected"
-                                role="menuitemradio" aria-checked="false"><span class="option-check"
-                                                                                aria-hidden="true">✓</span><span
-                            class="option-label">Отказ</span></button>
-                        <button class="dropdown-option" type="button" data-status="offer"
-                                role="menuitemradio" aria-checked="false"><span class="option-check"
-                                                                                aria-hidden="true">✓</span><span
-                            class="option-label">Оффер</span></button>
-                        <button class="dropdown-option" type="button" data-status="error"
-                                role="menuitemradio" aria-checked="false"><span class="option-check"
-                                                                                aria-hidden="true">✓</span><span
-                            class="option-label">Ошибки</span></button>
+                        <div class="dropdown-scroll">
+                            <button class="dropdown-option checked" type="button" data-status="all"
+                                    role="menuitemradio" aria-checked="true"><span class="option-check"
+                                                                                   aria-hidden="true">✓</span><span
+                                class="option-label">Все</span></button>
+                            <button class="dropdown-option" type="button" data-status="sent"
+                                    role="menuitemradio" aria-checked="false"><span class="option-check"
+                                                                                    aria-hidden="true">✓</span><span
+                                class="option-label">Отправлено</span></button>
+                            <button class="dropdown-option" type="button" data-status="queued"
+                                    role="menuitemradio" aria-checked="false"><span class="option-check"
+                                                                                    aria-hidden="true">✓</span><span
+                                class="option-label">В очереди</span></button>
+                            <button class="dropdown-option" type="button" data-status="excluded"
+                                    role="menuitemradio" aria-checked="false"><span class="option-check"
+                                                                                    aria-hidden="true">✓</span><span
+                                class="option-label">Исключено</span></button>
+                            <button class="dropdown-option" type="button" data-status="skipped"
+                                    role="menuitemradio" aria-checked="false"><span class="option-check"
+                                                                                    aria-hidden="true">✓</span><span
+                                class="option-label">Не подходит</span></button>
+                            <button class="dropdown-option" type="button" data-status="rejected"
+                                    role="menuitemradio" aria-checked="false"><span class="option-check"
+                                                                                    aria-hidden="true">✓</span><span
+                                class="option-label">Отказ</span></button>
+                            <button class="dropdown-option" type="button" data-status="offer"
+                                    role="menuitemradio" aria-checked="false"><span class="option-check"
+                                                                                    aria-hidden="true">✓</span><span
+                                class="option-label">Оффер</span></button>
+                            <button class="dropdown-option" type="button" data-status="error"
+                                    role="menuitemradio" aria-checked="false"><span class="option-check"
+                                                                                    aria-hidden="true">✓</span><span
+                                class="option-label">Ошибки</span></button>
+                            <button class="dropdown-option" type="button" data-status="archived"
+                                    role="menuitemradio" aria-checked="false"><span class="option-check"
+                                                                                   aria-hidden="true">✓</span><span
+                                class="option-label">В архиве</span></button>
+                        </div>
                     </div>
                 </div>
                 <div class="dropdown" id="channelFilter">
@@ -99,26 +108,28 @@
                         <span class="dropdown-caret" aria-hidden="true"></span>
                     </button>
                     <div class="dropdown-menu" id="channelMenu" role="menu" hidden>
-                        <button class="dropdown-option checked" type="button" data-channel="all"
-                                role="menuitemradio" aria-checked="true"><span class="option-check"
-                                                                               aria-hidden="true">✓</span><span
-                            class="option-label">Все</span></button>
-                        <button class="dropdown-option" type="button" data-channel="hh"
-                                role="menuitemradio" aria-checked="false"><span class="option-check"
-                                                                                aria-hidden="true">✓</span><span
-                            class="option-label">hh.ru</span></button>
-                        <button class="dropdown-option" type="button" data-channel="habr"
-                                role="menuitemradio" aria-checked="false"><span class="option-check"
-                                                                                aria-hidden="true">✓</span><span
-                            class="option-label">Habr Career</span></button>
-                        <button class="dropdown-option" type="button" data-channel="external"
-                                role="menuitemradio" aria-checked="false"><span class="option-check"
-                                                                                aria-hidden="true">✓</span><span
-                            class="option-label">Сайт компании</span></button>
-                        <button class="dropdown-option" type="button" data-channel="unknown"
-                                role="menuitemradio" aria-checked="false"><span class="option-check"
-                                                                                aria-hidden="true">✓</span><span
-                            class="option-label">Без канала</span></button>
+                        <div class="dropdown-scroll">
+                            <button class="dropdown-option checked" type="button" data-channel="all"
+                                    role="menuitemradio" aria-checked="true"><span class="option-check"
+                                                                                   aria-hidden="true">✓</span><span
+                                class="option-label">Все</span></button>
+                            <button class="dropdown-option" type="button" data-channel="hh"
+                                    role="menuitemradio" aria-checked="false"><span class="option-check"
+                                                                                    aria-hidden="true">✓</span><span
+                                class="option-label">hh.ru</span></button>
+                            <button class="dropdown-option" type="button" data-channel="habr"
+                                    role="menuitemradio" aria-checked="false"><span class="option-check"
+                                                                                    aria-hidden="true">✓</span><span
+                                class="option-label">Habr Career</span></button>
+                            <button class="dropdown-option" type="button" data-channel="external"
+                                    role="menuitemradio" aria-checked="false"><span class="option-check"
+                                                                                    aria-hidden="true">✓</span><span
+                                class="option-label">Сайт компании</span></button>
+                            <button class="dropdown-option" type="button" data-channel="unknown"
+                                    role="menuitemradio" aria-checked="false"><span class="option-check"
+                                                                                    aria-hidden="true">✓</span><span
+                                class="option-label">Без канала</span></button>
+                        </div>
                     </div>
                 </div>
 
@@ -215,21 +226,29 @@
                 error: 'Ошибка',
                 invite: 'Приглашение',
                 rejected: 'Отказ',
-                offer: 'Оффер'
+                offer: 'Оффер',
+                // Архив — признак записи: статус у неё остаётся прежним.
+                archived: 'В архиве'
             };
 
             // Исход отклика фиксируется один раз: после rejected/offer статус не меняется.
-            const TERMINAL_STATUSES = new Set(['rejected', 'offer']);
+            // «В архиве» терминальный: запись закрыта, вернуть её в работу нельзя.
+            const TERMINAL_STATUSES = new Set(['rejected', 'offer', 'archived']);
             const TERMINAL_WARNINGS = {
                 rejected: {
                     title: 'Зафиксировать отказ?',
-                    text: 'Статус «Отказ» терминальный. После сохранения изменить его или вернуть вакансию в другой статус будет нельзя — это необратимая операция.',
+                    text: 'Вакансия получит статус «Отказ»: причина станет «По отклику пришёл отказ». Это терминальный статус: перевести вакансию в другой статус будет нельзя, это необратимая операция.',
                     confirm: 'Зафиксировать отказ'
                 },
                 offer: {
                     title: 'Зафиксировать оффер?',
-                    text: 'Статус «Оффер» терминальный. После сохранения изменить его или вернуть вакансию в другой статус будет нельзя — это необратимая операция.',
+                    text: 'Вакансия получит статус «Оффер»: причина станет «По отклику пришёл оффер». Это терминальный статус: перевести вакансию в другой статус будет нельзя, это необратимая операция.',
                     confirm: 'Зафиксировать оффер'
+                },
+                archived: {
+                    title: 'Зафиксировать архив?',
+                    text: 'Вакансия получит признак «В архиве»: статус останется прежним, причина станет архивной, поэтому метрики и сводка не изменятся. «В архиве» — терминальный статус: перевести вакансию в другой статус будет нельзя, это необратимая операция.',
+                    confirm: 'Зафиксировать архив'
                 }
             };
             // Статусы отчёта нужны чистой логике фильтров для проверки значений.
@@ -246,7 +265,12 @@
                 hasSelectedFilters,
                 matchesFilters,
                 toSearchParams,
-                parseSearchParams
+                parseSearchParams,
+                isDateChecked,
+                toggleDate,
+                toggleAllDates,
+                sameDateSelection,
+                summaryCounts
             } = ReportFilters;
 
             let allVacancies = [];
@@ -255,6 +279,7 @@
             let currentQuery = '';
             let selectedFiles = [];      // выбранные даты = файлы дня ([] — все файлы)
             let datesNone = false;       // даты сняты: пустой список files иначе значил бы «все»
+            let dateDraft = null;        // выбор в открытом меню дат: применяется при закрытии
             let reportsIndex = [];       // файлы дня: имя, дата, обновление, итоги
             let terminalResolve = null;  // ожидающий ответ модального окна
             let terminalFocus = null;    // куда вернуть фокус после закрытия
@@ -417,117 +442,8 @@
                     tdCompany.textContent = v.company || '—';
                     tr.appendChild(tdCompany);
 
-                    // Статус (ВЫПАДАЮЩИЙ СПИСОК)
-                    const tdStatus = document.createElement('td');
-                    const select = document.createElement('select');
-                    const currentStatus = v.status || 'skipped';
-                    const isTerminal = TERMINAL_STATUSES.has(currentStatus);
-                    select.className = 'status-select ' + currentStatus;
-                    select.dataset.url = v.url;
-                    select.dataset.profile = v.profile || '';
-                    select.dataset.report = v.report_name || '';
-                    if (isTerminal) {
-                        select.disabled = true;
-                        select.classList.add('is-terminal');
-                        select.title = `Статус «${STATUS_LABELS[currentStatus] || currentStatus}» терминальный: изменить нельзя`;
-                    }
-
-                    // Опции
-                    for (const [key, label] of Object.entries(STATUS_LABELS)) {
-                        const opt = document.createElement('option');
-                        opt.value = key;
-                        opt.textContent = label;
-                        if (v.status === key) opt.selected = true;
-                        // Оффер имеет смысл только после отправленного отклика.
-                        if (key === 'offer' && currentStatus !== 'sent') {
-                            opt.disabled = true;
-                            opt.title = 'Сначала переведите вакансию в статус «Отправлено»';
-                        }
-                        select.appendChild(opt);
-                    }
-
-                    // Обработчик смены статуса
-                    select.addEventListener('change', async (event) => {
-                        const target = event.currentTarget;
-                        const newStatus = target.value;
-                        const oldStatus = currentStatus;
-                        const oldClass = target.className;
-                        const url = target.dataset.url;
-                        const profile = target.dataset.profile || '';
-                        const reportName = target.dataset.report;
-
-                        // Терминальный статус фиксируется только после явного подтверждения.
-                        if (TERMINAL_STATUSES.has(newStatus)) {
-                            const confirmed = await askTerminalConfirmation(newStatus);
-                            if (!confirmed) {
-                                target.value = oldStatus;
-                                target.className = oldClass;
-                                return;
-                            }
-                        }
-
-                        // Блокируем на время запроса
-                        target.disabled = true;
-                        target.className = 'status-select ' + newStatus +
-                            (TERMINAL_STATUSES.has(newStatus) ? ' is-terminal' : '');
-
-                        try {
-                            const resp = await fetch('/api/v1/update-status', {
-                                method: 'POST',
-                                headers: {'Content-Type': 'application/json'},
-                                body: JSON.stringify({
-                                    report_name: reportName,
-                                    url: url,
-                                    profile: profile,
-                                    status: newStatus
-                                })
-                            });
-
-                            if (!resp.ok) {
-                                let detail = `Ошибка HTTP ${resp.status}`;
-                                try {
-                                    const payload = await resp.json();
-                                    if (typeof payload.detail === 'string') detail = payload.detail;
-                                } catch {
-                                    // Тело не JSON — оставляем код ответа.
-                                }
-                                throw new Error(detail);
-                            }
-                            const result = await resp.json();
-
-                            // Запись перенесена в отчёт текущей даты: обновляем строку и убираем копии.
-                            const vac = allVacancies.find(
-                                x => x.url === url
-                                    && (x.profile || '') === profile
-                                    && x.report_name === reportName
-                            ) || allVacancies.find(
-                                x => x.url === url && (x.profile || '') === profile
-                            );
-                            if (vac) {
-                                vac.status = newStatus;
-                                if (result.report_name) vac.report_name = result.report_name;
-                                if (result.attempts !== undefined) vac.attempts = result.attempts;
-                                if (result.reason !== undefined) vac.reason = result.reason;
-                                if (result.created_at) vac.created_at = result.created_at;
-                                if (result.updated_at) vac.updated_at = result.updated_at;
-                                allVacancies = allVacancies.filter(x => x.url !== url || x === vac);
-                            }
-
-                            // Обновляем сводку из ответа сервера
-                            if (result.summary) renderSummary(result.summary);
-
-                            // Перерисовываем таблицу с учётом фильтра по новому статусу.
-                            renderTable();
-
-                        } catch (err) {
-                            alert('Не удалось сохранить статус: ' + err.message);
-                            target.value = oldStatus; // Откатываем
-                            target.className = oldClass;
-                            target.disabled = TERMINAL_STATUSES.has(oldStatus);
-                        }
-                    });
-
-                    tdStatus.appendChild(select);
+                    // Статус: кнопка с меню, как у фильтров
+                    const tdStatus = createStatusCell(v);
 
                     // Причина идёт сразу после компании.
                     const tdReason = document.createElement('td');
@@ -549,6 +465,217 @@
                 els.tableBody.appendChild(frag);
             }
 
+            /* ---------- Статус в строке: меню вместо нативного списка ---------- */
+            /* Нативный список <select> браузер рисует со своими прямыми углами.
+               Поэтому у ячейки статуса тот же вид, что у фильтров: кнопка и меню
+               с галочкой у активного пункта. Меню висит на body: таблица
+               прокручивается по горизонтали и обрезала бы вложенный список. */
+            let statusMenu = null;
+
+            function closeStatusMenu() {
+                if (!statusMenu) return;
+                statusMenu.control.setAttribute('aria-expanded', 'false');
+                statusMenu.element.remove();
+                statusMenu = null;
+            }
+
+            function placeStatusMenu(menu, control) {
+                const rect = control.getBoundingClientRect();
+                // min-width из стилей фильтров считается от окна: для меню на body
+                // он растянул бы его на всю страницу, поэтому меряем без него.
+                menu.style.minWidth = '0px';
+                const menuRect = menu.getBoundingClientRect();
+                const width = Math.max(menuRect.width, rect.width);
+                const below = rect.bottom + 6;
+                const fitsBelow = below + menuRect.height <= window.innerHeight - 8;
+                const top = fitsBelow ? below : Math.max(8, rect.top - menuRect.height - 6);
+                const left = Math.max(8, Math.min(rect.left, window.innerWidth - width - 8));
+                menu.style.top = `${top}px`;
+                menu.style.left = `${left}px`;
+                menu.style.minWidth = `${rect.width}px`;
+            }
+
+            function openStatusMenu(control, vacancy) {
+                closeStatusMenu();
+                const baseStatus = vacancy.status || 'skipped';
+                const currentStatus = vacancy.archived ? 'archived' : baseStatus;
+                const menu = document.createElement('div');
+                menu.className = 'dropdown-menu status-menu';
+                menu.setAttribute('role', 'menu');
+                const scroller = document.createElement('div');
+                scroller.className = 'dropdown-scroll';
+                menu.appendChild(scroller);
+                for (const [key, label] of Object.entries(STATUS_LABELS)) {
+                    const option = document.createElement('button');
+                    option.type = 'button';
+                    option.className = 'dropdown-option';
+                    option.setAttribute('role', 'menuitemradio');
+                    const active = key === currentStatus;
+                    option.classList.toggle('checked', active);
+                    option.setAttribute('aria-checked', String(active));
+                    const mark = document.createElement('span');
+                    mark.className = 'option-check';
+                    mark.setAttribute('aria-hidden', 'true');
+                    mark.textContent = '✓';
+                    const text = document.createElement('span');
+                    text.className = 'option-label';
+                    text.textContent = label;
+                    option.appendChild(mark);
+                    option.appendChild(text);
+                    // Текущий статус и оффер без отклика выбрать нельзя.
+                    const offerBlocked = key === 'offer' && baseStatus !== 'sent';
+                    option.disabled = active || offerBlocked;
+                    if (offerBlocked) {
+                        option.title = 'Сначала переведите вакансию в статус «Отправлено»';
+                    }
+                    option.addEventListener('click', () => {
+                        closeStatusMenu();
+                        changeStatus(control, vacancy, key);
+                    });
+                    scroller.appendChild(option);
+                }
+                menu.style.position = 'fixed';
+                menu.style.top = '0';
+                menu.style.left = '0';
+                menu.style.visibility = 'hidden';
+                document.body.appendChild(menu);
+                placeStatusMenu(menu, control);
+                menu.style.visibility = '';
+                control.setAttribute('aria-expanded', 'true');
+                statusMenu = {element: menu, control};
+                /* Уход мыши с меню закрывает его, если пункт не выбран:
+                   иначе приходится кликать в свободное поле страницы. */
+                let leaveTimer = null;
+                menu.addEventListener('mouseleave', () => {
+                    if (leaveTimer) clearTimeout(leaveTimer);
+                    leaveTimer = setTimeout(() => {
+                        leaveTimer = null;
+                        if (!statusMenu || statusMenu.element !== menu) return;
+                        if (menu.matches(':hover') || control.matches(':hover')) return;
+                        closeStatusMenu();
+                    }, 200);
+                });
+            }
+
+
+            function createStatusCell(v) {
+                const cell = document.createElement('td');
+                const baseStatus = v.status || 'skipped';
+                // Архивный признак показывается отдельным пунктом списка,
+                // но поле status у записи остаётся прежним.
+                const currentStatus = v.archived ? 'archived' : baseStatus;
+                // «В архиве» терминальный: меню не открывается, статус не меняется.
+                const isTerminal = TERMINAL_STATUSES.has(baseStatus) || Boolean(v.archived);
+                const control = document.createElement('button');
+                control.type = 'button';
+                control.className = 'status-select ' + currentStatus;
+                control.dataset.url = v.url;
+                control.dataset.profile = v.profile || '';
+                control.dataset.report = v.report_name || '';
+                control.dataset.status = currentStatus;
+                control.textContent = STATUS_LABELS[currentStatus] || currentStatus;
+                control.setAttribute('aria-expanded', 'false');
+                if (isTerminal) {
+                    // Терминальная запись не открывает меню: подсказка вместо списка.
+                    control.disabled = true;
+                    control.classList.add('is-terminal');
+                    const label = STATUS_LABELS[currentStatus] || currentStatus;
+                    control.title = `Статус «${label}» терминальный: изменить нельзя`;
+                } else {
+                    control.setAttribute('aria-haspopup', 'menu');
+                    control.addEventListener('click', (event) => {
+                        event.stopPropagation();
+                        if (statusMenu && statusMenu.control === control) {
+                            closeStatusMenu();
+                            return;
+                        }
+                        openStatusMenu(control, v);
+                    });
+                    /* Если мышь ушла с кнопки и не попала в меню, меню закрывается.
+                       Пауза даёт перейти с кнопки на пункт списка. */
+                    control.addEventListener('mouseleave', () => {
+                        if (!statusMenu || statusMenu.control !== control) return;
+                        const menu = statusMenu.element;
+                        setTimeout(() => {
+                            if (!statusMenu || statusMenu.element !== menu) return;
+                            if (menu.matches(':hover') || control.matches(':hover')) return;
+                            closeStatusMenu();
+                        }, 200);
+                    });
+                }
+                cell.appendChild(control);
+                return cell;
+            }
+
+
+            async function changeStatus(control, vacancy, newStatus) {
+                const oldStatus = control.dataset.status;
+                const oldClass = control.className;
+                if (newStatus === oldStatus) return;
+                // Терминальные статусы и архив подтверждаются явно.
+                const confirmed = await askTerminalConfirmation(newStatus);
+                if (!confirmed) return;
+                const url = control.dataset.url;
+                const profile = control.dataset.profile || '';
+                const reportName = control.dataset.report;
+                // Блокируем на время запроса.
+                control.disabled = true;
+                control.className = 'status-select ' + newStatus
+                    + (TERMINAL_STATUSES.has(newStatus) ? ' is-terminal' : '');
+                try {
+                    const resp = await fetch('/api/v1/update-status', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({
+                            report_name: reportName,
+                            url: url,
+                            profile: profile,
+                            status: newStatus
+                        })
+                    });
+                    if (!resp.ok) {
+                        let detail = `Ошибка HTTP ${resp.status}`;
+                        try {
+                            const payload = await resp.json();
+                            if (typeof payload.detail === 'string') detail = payload.detail;
+                        } catch {
+                            // Тело не JSON — оставляем код ответа.
+                        }
+                        throw new Error(detail);
+                    }
+                    const result = await resp.json();
+                    // Запись перенесена в отчёт текущей даты: обновляем строку.
+                    const vac = allVacancies.find(
+                        x => x.url === url
+                            && (x.profile || '') === profile
+                            && x.report_name === reportName
+                    ) || allVacancies.find(
+                        x => x.url === url && (x.profile || '') === profile
+                    );
+                    if (vac) {
+                        if (result.archived) {
+                            // Архив — признак: статус записи не меняется.
+                            vac.archived = true;
+                        } else {
+                            vac.status = newStatus;
+                            delete vac.archived;
+                        }
+                        if (result.report_name) vac.report_name = result.report_name;
+                        if (result.attempts !== undefined) vac.attempts = result.attempts;
+                        if (result.reason !== undefined) vac.reason = result.reason;
+                        if (result.created_at) vac.created_at = result.created_at;
+                        if (result.updated_at) vac.updated_at = result.updated_at;
+                        allVacancies = allVacancies.filter(x => x.url !== url || x === vac);
+                    }
+                    renderSummary(summaryCounts(allVacancies));
+                    renderTable();
+                } catch (err) {
+                    alert('Не удалось сохранить статус: ' + err.message);
+                    control.className = oldClass;
+                    control.disabled = TERMINAL_STATUSES.has(oldStatus);
+                }
+            }
+
             /* ---------- Состояние фильтров: статус И канал, поиск, даты ---------- */
             /* Чистые функции фильтров живут в /static/filters.js, здесь только DOM. */
             function currentFilters() {
@@ -568,7 +695,6 @@
                 currentQuery = filters.query;
                 selectedFiles = filters.files.slice();
                 datesNone = filters.datesNone === true;
-                els.dateAll.checked = !datesNone && selectedFiles.length === 0;
             }
 
             function readFiltersFromUrl() {
@@ -675,15 +801,21 @@
 
             /* Дропдауны панели фильтров: дата, статус и источник. Открыт только один,
                клик вне панели и Escape закрывают меню. */
+            const dateDropdown = {root: els.dateFilter, toggle: els.dateToggle, menu: els.datePanel};
             const DROPDOWNS = [
-                {root: els.dateFilter, toggle: els.dateToggle, menu: els.datePanel},
+                dateDropdown,
                 {root: els.statusFilter, toggle: els.statusToggle, menu: els.statusMenu},
                 {root: els.channelFilter, toggle: els.channelToggle, menu: els.channelMenu}
             ];
 
             function setDropdown(dropdown, open) {
+                const wasOpen = !dropdown.menu.hidden;
                 dropdown.menu.hidden = !open;
                 dropdown.toggle.setAttribute('aria-expanded', String(open));
+                // Даты выбираются накопительно: черновик живёт, пока меню открыто.
+                if (dropdown !== dateDropdown) return;
+                if (open && !wasOpen) startDateSelection();
+                if (!open && wasOpen) commitDateSelection();
             }
 
             function closeDropdowns(except) {
@@ -700,6 +832,63 @@
                 });
             });
 
+            /* Даты выбираются накопительно: меню закрывается и применяет выбор,
+               когда мышь уходит из меню и кнопки, — как фильтр «Резюме» на метриках. */
+            let dateLeaveTimer = null;
+            dateDropdown.root.addEventListener('mouseleave', () => {
+                if (dateDropdown.menu.hidden) return;
+                if (dateLeaveTimer) clearTimeout(dateLeaveTimer);
+                dateLeaveTimer = setTimeout(() => {
+                    dateLeaveTimer = null;
+                    if (dateDropdown.menu.hidden) return;
+                    const overMenu = dateDropdown.menu.matches(':hover');
+                    if (overMenu || dateDropdown.toggle.matches(':hover')) return;
+                    setDropdown(dateDropdown, false);
+                }, 200);
+            });
+
+            /* Меню статуса и источника тоже закрываются, когда мышь ушла с меню
+               и кнопки: иначе после просмотра списка приходится кликать в
+               свободное поле. */
+            DROPDOWNS.forEach(dropdown => {
+                if (dropdown === dateDropdown) return;
+                let leaveTimer = null;
+                dropdown.root.addEventListener('mouseleave', () => {
+                    if (dropdown.menu.hidden) return;
+                    if (leaveTimer) clearTimeout(leaveTimer);
+                    leaveTimer = setTimeout(() => {
+                        leaveTimer = null;
+                        if (dropdown.menu.hidden) return;
+                        if (dropdown.menu.matches(':hover') || dropdown.toggle.matches(':hover')) {
+                            return;
+                        }
+                        setDropdown(dropdown, false);
+                    }, 200);
+                });
+            });
+
+            /* Меню статуса в таблице: закрывается кликом вне, Escape и прокруткой
+               страницы. Прокрутка внутри самого меню его не закрывает. */
+            document.addEventListener('click', (event) => {
+                if (!statusMenu) return;
+                const target = event.target instanceof Element ? event.target : null;
+                if (target && (target.closest('.status-menu') || target.closest('.status-select'))) {
+                    return;
+                }
+                closeStatusMenu();
+            });
+
+            document.addEventListener('keydown', (event) => {
+                if (event.key === 'Escape') closeStatusMenu();
+            });
+
+            window.addEventListener('scroll', (event) => {
+                const target = event.target;
+                if (target instanceof Element && target.closest('.status-menu')) return;
+                closeStatusMenu();
+            }, true);
+            window.addEventListener('resize', () => closeStatusMenu());
+
             document.addEventListener('click', (event) => {
                 const inside = event.target instanceof Element && event.target.closest('.dropdown');
                 if (!inside) closeDropdowns();
@@ -709,59 +898,109 @@
                 if (event.key === 'Escape') closeDropdowns();
             });
 
-            els.dateAll.addEventListener('change', async () => {
-                // «Выбрать всё» работает в обе стороны: снятая галочка означает
-                // «ни одна дата не выбрана», а не «все даты».
-                datesNone = !els.dateAll.checked;
-                selectedFiles = [];
+            els.dateAll.addEventListener('click', () => {
+                // «Выбрать всё» работает в обе стороны: повторный клик снимает
+                // все даты и показывает пустой отчёт.
+                if (!dateDraft) return;
+                dateDraft = toggleAllDates(dateDraft);
+                applyDateDraft();
+            });
+
+            els.dateList.addEventListener('click', (event) => {
+                const option = event.target.closest('[data-date]');
+                if (!option || !dateDraft) return;
+                const known = reportsIndex.map(report => report.name);
+                dateDraft = toggleDate(dateDraft, option.dataset.date, known);
+                applyDateDraft();
+            });
+
+            /* Открытие меню начинает черновик выбора, закрытие — применяет:
+               несколько дат отмечаются подряд, отчёт перезагружается один раз. */
+            function startDateSelection() {
+                dateDraft = {files: selectedFiles.slice(), datesNone};
+                renderDateOptions();
+            }
+
+            function commitDateSelection() {
+                if (!dateDraft) return;
+                const next = dateDraft;
+                dateDraft = null;
+                const changed = !sameDateSelection(next, {files: selectedFiles, datesNone});
+                if (!changed) {
+                    renderDateOptions();
+                    return;
+                }
+                selectedFiles = next.files;
+                datesNone = next.datesNone;
                 renderDateOptions();
                 renderFilterControls();
                 persistFilters();
-                await loadVacancies();
-            });
+                loadVacancies().catch((err) => {
+                    els.errorBox.hidden = false;
+                    els.errorBox.textContent = `Ошибка загрузки данных: ${err.message}`;
+                });
+            }
 
             /* ---------- Выбор даты: под капотом это файлы дня ---------- */
-            function dateLabelText() {
-                if (datesNone) return 'даты не выбраны';
-                if (selectedFiles.length === 0) return 'за всё время';
-                if (selectedFiles.length === 1) {
-                    const report = reportsIndex.find(item => item.name === selectedFiles[0]);
-                    return report ? report.date : selectedFiles[0];
+            function dateLabelText(state) {
+                if (state.datesNone) return 'даты не выбраны';
+                if (state.files.length === 0) return 'за всё время';
+                if (state.files.length === 1) {
+                    const report = reportsIndex.find(item => item.name === state.files[0]);
+                    return report ? report.date : state.files[0];
                 }
-                return `${selectedFiles.length} дат`;
+                return `${state.files.length} дат`;
             }
 
             function renderDateOptions() {
                 els.dateList.innerHTML = '';
+                // Пока меню открыто, показываем черновик выбора.
+                const state = !els.datePanel.hidden && dateDraft
+                    ? dateDraft
+                    : {files: selectedFiles, datesNone};
                 for (const report of reportsIndex) {
-                    const label = document.createElement('label');
-                    label.className = 'dropdown-check';
-                    const box = document.createElement('input');
-                    box.type = 'checkbox';
-                    // Дата и файл дня — одно и то же: значение чекбокса — имя файла.
-                    box.value = report.name;
-                    box.checked = !datesNone
-                        && (selectedFiles.length === 0 || selectedFiles.includes(report.name));
-                    box.addEventListener('change', onDateChange);
-                    label.appendChild(box);
-                    label.appendChild(document.createTextNode(` ${report.date} (${report.total})`));
-                    els.dateList.appendChild(label);
+                    // Дата и файл дня — одно и то же: значение пункта — имя файла.
+                    const option = document.createElement('button');
+                    option.type = 'button';
+                    option.className = 'dropdown-option';
+                    option.dataset.date = report.name;
+                    option.setAttribute('role', 'menuitemcheckbox');
+                    const checked = isDateChecked(state, report.name);
+                    option.classList.toggle('checked', checked);
+                    option.setAttribute('aria-checked', String(checked));
+                    const mark = document.createElement('span');
+                    mark.className = 'option-check';
+                    mark.setAttribute('aria-hidden', 'true');
+                    mark.textContent = '✓';
+                    const label = document.createElement('span');
+                    label.className = 'option-label';
+                    label.textContent = `${report.date} (${report.total})`;
+                    option.appendChild(mark);
+                    option.appendChild(label);
+                    els.dateList.appendChild(option);
                 }
-                els.dateAll.checked = !datesNone && selectedFiles.length === 0;
-                els.dateLabel.textContent = dateLabelText();
+                // «Выбрать всё» отмечено, только когда выбраны все даты.
+                const everyDate = !state.datesNone && state.files.length === 0;
+                els.dateAll.classList.toggle('checked', everyDate);
+                els.dateAll.setAttribute('aria-checked', String(everyDate));
+                els.dateLabel.textContent = dateLabelText(state);
+            }
+            /* Отметки после клика обновляются на месте: перерисовка списка
+               обнуляет наведение мыши, и меню закрывается раньше времени. */
+            function applyDateDraft() {
+                if (!dateDraft) return;
+                els.dateList.querySelectorAll('[data-date]').forEach((option) => {
+                    const checked = isDateChecked(dateDraft, option.dataset.date);
+                    option.classList.toggle('checked', checked);
+                    option.setAttribute('aria-checked', String(checked));
+                });
+                const everyDate = !dateDraft.datesNone && dateDraft.files.length === 0;
+                els.dateAll.classList.toggle('checked', everyDate);
+                els.dateAll.setAttribute('aria-checked', String(everyDate));
+                els.dateLabel.textContent = dateLabelText(dateDraft);
             }
 
-            async function onDateChange() {
-                const boxes = Array.from(els.dateList.querySelectorAll('input[type=checkbox]'));
-                selectedFiles = boxes.filter(box => box.checked).map(box => box.value);
-                datesNone = false;
-                // Отмечены все даты — это то же самое, что «все даты».
-                if (selectedFiles.length && selectedFiles.length === boxes.length) selectedFiles = [];
-                renderDateOptions();
-                renderFilterControls();
-                persistFilters();
-                await loadVacancies();
-            }
+
 
             /* ---------- Загрузка данных с сервера ---------- */
             async function loadReports() {
@@ -781,7 +1020,7 @@
                 if (datesNone) {
                     // Даты сняты: показывать нечего, поэтому сервер не спрашиваем.
                     allVacancies = [];
-                    renderSummary(null);
+                    renderSummary(summaryCounts(allVacancies));
                     renderHeader({updated_at: '', vacancies: []});
                     els.loader.hidden = true;
                     renderTable();
@@ -795,7 +1034,9 @@
                 const data = await resp.json();
 
                 allVacancies = Array.isArray(data.vacancies) ? data.vacancies : [];
-                renderSummary(data.summary);
+                // Карточки считаются по загруженным записям: серверные итоги
+                // включают архивные вакансии с их прежним статусом.
+                renderSummary(summaryCounts(allVacancies));
 
                 const dates = selectedFiles.length
                     ? reportsIndex.filter(report => selectedFiles.includes(report.name))

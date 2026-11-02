@@ -102,6 +102,32 @@ class FakeScope:
         return FakeList(self._mapping.get(selector, []))
 
 
+class FakeKeyboard:
+    """Клавиатура страницы: Escape закрывает кастомный список."""
+
+    def __init__(self, scope: "CustomListScope") -> None:
+        self._scope = scope
+        self.pressed: list[str] = []
+
+    def press(self, key: str) -> None:
+        self.pressed.append(key)
+        self._scope.opened = False
+
+
+class FakePage:
+    """Страница для закрытия списка: клавиатура и ожидание."""
+
+    def __init__(self, scope: "CustomListScope") -> None:
+        self._scope = scope
+        self.keyboard = FakeKeyboard(scope)
+
+    def locator(self, selector: str) -> FakeList:
+        return self._scope.locator(selector)
+
+    def wait_for_timeout(self, milliseconds: int) -> None:
+        return None
+
+
 class CustomListScope:
     """Кастомный список: опции видны только после клика по триггеру."""
 
@@ -121,6 +147,7 @@ class CustomListScope:
             for text in options
         ]
         self._trigger = FakeOption("Java Developer", on_click=self._open)
+        self.page = FakePage(self)
 
     def _open(self) -> None:
         self.opened = True
@@ -133,6 +160,19 @@ class CustomListScope:
         if selector == "select" and self._native_select is not None:
             return FakeList([self._native_select])
         return FakeList([])
+
+
+class SelectedResumeScope(CustomListScope):
+    """Кастомный список с уже выбранным резюме в заголовке формы."""
+
+    def __init__(self, options: list[str], *, trigger: str, selected: str) -> None:
+        super().__init__(options, trigger=trigger)
+        self._selected = FakeOption(selected)
+
+    def locator(self, selector: str) -> FakeList:
+        if selector == "[data-qa='resume-title']":
+            return FakeList([self._selected])
+        return super().locator(selector)
 
 
 def test_native_select_options_are_read_without_opening() -> None:
@@ -178,8 +218,37 @@ def test_custom_list_opens_trigger_before_reading_options() -> None:
 
     select_resume(scope, "Team Lead")  # type: ignore[arg-type]
 
-    assert scope.opened is True
     assert scope.clicked == ["Team Lead"]
+    # После выбора список закрывается: открытым он перекрывает кнопку отправки.
+    assert scope.page.keyboard.pressed == ["Escape"]
+
+
+def test_custom_list_closes_after_selection() -> None:
+    """После выбора резюме список закрывается и не перекрывает отправку."""
+    scope = CustomListScope(
+        ["Java Developer", "Team Lead"],
+        trigger="[data-qa*='select-resume']",
+    )
+
+    select_resume(scope, "Team Lead")  # type: ignore[arg-type]
+
+    assert scope.opened is False
+    assert scope.page.keyboard.pressed == ["Escape"]
+
+
+def test_custom_list_not_opened_when_target_already_selected() -> None:
+    """Если нужное резюме уже выбрано, список не открывается."""
+    scope = SelectedResumeScope(
+        ["Java Developer", "Team Lead"],
+        trigger="[data-qa*='select-resume']",
+        selected="Team Lead",
+    )
+
+    select_resume(scope, "Team Lead")  # type: ignore[arg-type]
+
+    assert scope.opened is False
+    assert scope.clicked == []
+    assert scope.page.keyboard.pressed == []
 
 
 def test_custom_list_is_used_when_other_select_has_no_target() -> None:
