@@ -154,11 +154,19 @@ class FakeTextList:
 
 
 class FakeTextPage:
-    """Страница-заглушка: поиск по тексту и пустые локаторы."""
+    """Страница-заглушка: поиск по тексту, ролям и локаторам."""
 
-    def __init__(self, mapping: dict[str, list[FakeElement]] | None = None) -> None:
+    def __init__(
+        self,
+        mapping: dict[str, list[FakeElement]] | None = None,
+        *,
+        roles: dict[str, list[FakeElement]] | None = None,
+        selectors: dict[str, list[FakeElement]] | None = None,
+    ) -> None:
         self.url = "https://hh.ru/vacancy/1"
         self._mapping = mapping or {}
+        self._roles = roles or {}
+        self._selectors = selectors or {}
         self.selector_waits = 0
 
     def goto(self, url: str, **kwargs: Any) -> None:
@@ -180,10 +188,10 @@ class FakeTextPage:
         return FakeTextList(found)
 
     def get_by_role(self, role: str, name: Any = None) -> FakeTextList:
-        return FakeTextList([])
+        return FakeTextList(self._roles.get(role, []))
 
     def locator(self, selector: str) -> FakeTextList:
-        return FakeTextList([])
+        return FakeTextList(self._selectors.get(selector, []))
 
 
 def test_detects_blocked_vacancy() -> None:
@@ -212,6 +220,42 @@ def test_detects_unavailable_vacancy_in_explanation_block() -> None:
     assert detect_page_blocker(page) == "unavailable"  # type: ignore[arg-type]
 
 
+def test_detects_archived_vacancy() -> None:
+    """«Вакансия в архиве» — работодатель закрыл вакансию, отклик невозможен."""
+    page = FakeTextPage({"Вакансия в архиве": [FakeElement("Вакансия в архиве")]})
+
+    assert detect_page_blocker(page) == "archived"  # type: ignore[arg-type]
+
+
+def test_archived_vacancy_is_marked_in_details(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Архивная вакансия попадает в отчёт с признаком archived."""
+    page = FakeTextPage({"Вакансия в архиве": [FakeElement("Вакансия в архиве")]})
+    card = VacancyCard(
+        title="Team lead data platform",
+        company="Ozon",
+        url="https://hh.ru/vacancy/137925661",
+    )
+    monkeypatch.setattr("agent.hh_vacancy.detect_captcha", lambda page: False)
+
+    details = open_vacancy(page, card)  # type: ignore[arg-type]
+
+    assert details.blocker == "archived"
+    assert details.archived is True
+
+
+def test_unavailable_vacancy_is_archived(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Закрытый доступ к вакансии — тоже архив: откликнуться нельзя."""
+    page = FakeTextPage(
+        {"Вам недоступна эта вакансия": [FakeElement("Вам недоступна эта вакансия")]}
+    )
+    card = VacancyCard(title="Java", company="Ozon", url="https://hh.ru/vacancy/1")
+    monkeypatch.setattr("agent.hh_vacancy.detect_captcha", lambda page: False)
+
+    details = open_vacancy(page, card)  # type: ignore[arg-type]
+
+    assert details.archived is True
+
+
 def test_open_vacancy_skips_state_before_waiting_title(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -230,6 +274,27 @@ def test_open_vacancy_skips_state_before_waiting_title(
     assert details.company == "Ozon"
     assert details.description == ""
     assert page.selector_waits == 0
+
+
+def test_open_vacancy_reads_description_for_other_resume(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Для «Отклик другим резюме» описание читается: вакансию нужно оценить."""
+    page = FakeTextPage(
+        mapping={"Отклик отправлен": [FakeElement("Отклик отправлен")]},
+        roles={"button": [FakeElement("Отклик другим резюме")]},
+        selectors={
+            "h1.page-title__title": [FakeElement("Java Developer")],
+            "[data-qa='vacancy-description']": [FakeElement("Java, Spring, PostgreSQL")],
+        },
+    )
+    card = VacancyCard(title="Java", company="Ozon", url="https://hh.ru/vacancy/139016311")
+    monkeypatch.setattr("agent.hh_vacancy.detect_captcha", lambda page: False)
+
+    details = open_vacancy(page, card)  # type: ignore[arg-type]
+
+    assert details.blocker == "other_resume"
+    assert details.description == "Java, Spring, PostgreSQL"
 
 
 def test_rejected_text_in_description_is_ignored() -> None:
@@ -363,6 +428,18 @@ def test_response_notice_reads_visibility_hint() -> None:
     )
     page = FakeNoticePage(FakeNoticeModal({"p": [FakeElement(notice)]}))
 
+    assert response_notice(page) == notice  # type: ignore[arg-type]
+
+
+def test_response_notice_skips_hidden_resume_warning_when_form_ready() -> None:
+    """При открытом резюме hh.ru показывает подсказку о видимости: это не причина."""
+    notice = (
+        "Чтобы откликнуться на эту вакансию, поменяйте видимость резюме на "
+        "«Видно всем работодателям, зарегистрированным на hh.ru»"
+    )
+    page = FakeNoticePage(FakeNoticeModal({"p": [FakeElement(notice)]}))
+
+    assert response_notice(page, include_hidden_warning=False) == ""  # type: ignore[arg-type]
     assert response_notice(page) == notice  # type: ignore[arg-type]
 
 

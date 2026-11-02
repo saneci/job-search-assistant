@@ -204,7 +204,7 @@ def general_help(color: bool | None = None) -> str:
     return (
         f"{_paint('Персональный ассистент для поиска работы, который отсеивает нерелевантное и оставляет только то, что стоит вашего внимания', _COLOR_HEADING, color)}\n"
         "\n"
-        f"{_paint('Опции:', _COLOR_HEADING, color)}\n"
+        f"{_paint('Options:', _COLOR_HEADING, color)}\n"
         f"{rows}\n"
         "\n"
         "Для получения справки по конкретной опции нужно после опции ввести "
@@ -233,7 +233,7 @@ def retry_help(color: bool | None = None) -> str:
     return (
         f"{_paint('Повторение обработки вакансий по списку прямых ссылок из отчётов, без поиска', _COLOR_HEADING, color)}\n"
         "\n"
-        f"{_paint('Опции (принимается одно значение):', _COLOR_HEADING, color)}\n"
+        f"{_paint('Аргументы (принимается одно значение):', _COLOR_HEADING, color)}\n"
         f"{retry_statuses_help(color)}\n"
         "\n"
         f"{_paint('Для терминальных статусов повтор не производится:', _COLOR_HEADING, color)}\n"
@@ -286,13 +286,13 @@ def login_help(color: bool | None = None) -> str:
     return (
         f"{_paint('Вход на сайт выбранного канала с сохранением сессии', _COLOR_HEADING, color)}\n"
         "\n"
-        "Открывается браузер: войдите в аккаунт вручную и закройте окно. "
-        "Сессия сохранится в файл выбранного канала из data.paths.\n"
+        "После того как откроется браузер войдите в аккаунт вручную и закройте окно\n"
+        "Сессия сохранится в файл выбранного канала из data.paths\n"
         "\n"
-        f"{_paint('Опции:', _COLOR_HEADING, color)}\n"
+        f"{_paint('Options:', _COLOR_HEADING, color)}\n"
         f"{rows}\n"
         "\n"
-        "Капча и другие проверки проходятся вручную: приложение их не обходит.\n"
+        "Капча и другие проверки проходятся вручную: приложение их не обходит\n"
         "\n"
         f"{_paint('Examples:', _COLOR_HEADING, color)}\n"
         "  ./run.sh --login\n"
@@ -316,7 +316,7 @@ def channel_help(color: bool | None = None) -> str:
     return (
         f"{_paint('Канал запуска: hh.ru или career.habr.com', _COLOR_HEADING, color)}\n"
         "\n"
-        f"{_paint('Опции:', _COLOR_HEADING, color)}\n"
+        f"{_paint('Options:', _COLOR_HEADING, color)}\n"
         "  --channel, --ch <CHANNEL>  канал запуска "
         "(по умолчанию: search.channel из config.yaml)\n"
         "\n"
@@ -545,7 +545,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     try:
-        config = load_config(args.config)
+        # Канал из `--ch` передаём в конфиг сразу: иначе у Habr потребуются
+        # запросы и регион, которые нужны только hh.ru.
+        config = load_config(args.config, channel=args.channel)
     except ConfigError as exc:
         print(f"Ошибка конфигурации: {exc}", file=sys.stderr)
         return 2

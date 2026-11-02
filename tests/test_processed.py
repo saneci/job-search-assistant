@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 import agent.processed as processed_module
+from agent.models import ARCHIVE_REASON
 from agent.processed import ProcessedStore
 
 
@@ -700,3 +701,189 @@ def test_profile_key_ignores_case_and_extra_spaces(tmp_path: Path) -> None:
     rows = read_day(tmp_path, "2026-10-21")["vacancies"]
     assert len(rows) == 1
     assert rows[0]["attempts"] == 2
+
+
+def test_status_change_clears_archived(tmp_path: Path) -> None:
+    """Повторная обработка снимает признак архива: вакансия снова в работе."""
+    store = ProcessedStore(tmp_path, today=date(2026, 10, 21))
+    store.record(
+        url="https://hh.ru/vacancy/1",
+        title="Java-разработчик",
+        company="Ozon",
+        status="skipped",
+        archived=True,
+    )
+
+    store.record(
+        url="https://hh.ru/vacancy/1",
+        title="Java-разработчик",
+        company="Ozon",
+        status="sent",
+    )
+
+    payload = json.loads((tmp_path / "2026-10-21.json").read_text(encoding="utf-8"))
+    row = payload["vacancies"][0]
+    assert row["status"] == "sent"
+    assert "archived" not in row
+
+
+def test_update_status_moves_changed_record_to_today(tmp_path: Path) -> None:
+    """Первая смена статуса сверки переносит запись в сегодняшний отчёт."""
+    url = "https://career.habr.com/vacancies/1000164183"
+    old = ProcessedStore(tmp_path, today=date(2026, 10, 28))
+    old.record(
+        url=url,
+        title="Java разработчик",
+        company="ЛАНИТ",
+        status="sent",
+        reason="отклик уже отправлен",
+        channel="habr",
+    )
+    before = json.loads((tmp_path / "2026-10-28.json").read_text(encoding="utf-8"))
+    created_at = before["vacancies"][0]["created_at"]
+    attempts = before["vacancies"][0]["attempts"]
+
+    store = ProcessedStore(tmp_path, today=date(2026, 11, 2))
+    store.load()
+
+    assert store.update_status(
+        url=url,
+        title="Java разработчик",
+        company="ЛАНИТ",
+        status="rejected",
+        reason="По отклику пришёл отказ",
+    )
+    assert json.loads((tmp_path / "2026-10-28.json").read_text(encoding="utf-8"))[
+        "vacancies"
+    ] == []
+    after = json.loads((tmp_path / "2026-11-02.json").read_text(encoding="utf-8"))
+    record = after["vacancies"][0]
+    assert record["status"] == "rejected"
+    assert record["reason"] == "По отклику пришёл отказ"
+    assert record["created_at"] == created_at
+    assert record["attempts"] == attempts
+    assert after["summary"]["rejected"] == 1
+
+
+def test_update_status_does_not_move_unchanged_record(tmp_path: Path) -> None:
+    """Повторный отказ уже в статусе rejected не переносит запись."""
+    url = "https://career.habr.com/vacancies/1000164183"
+    old = ProcessedStore(tmp_path, today=date(2026, 10, 28))
+    old.record(
+        url=url,
+        title="Java разработчик",
+        company="ЛАНИТ",
+        status="rejected",
+        reason="По отклику пришёл отказ",
+        channel="habr",
+    )
+
+    store = ProcessedStore(tmp_path, today=date(2026, 11, 2))
+    store.load()
+
+    assert not store.update_status(
+        url=url,
+        title="Java разработчик",
+        company="ЛАНИТ",
+        status="rejected",
+        reason="По отклику пришёл отказ",
+    )
+    assert not (tmp_path / "2026-11-02.json").exists()
+    rows = json.loads((tmp_path / "2026-10-28.json").read_text(encoding="utf-8"))
+    assert rows["vacancies"][0]["status"] == "rejected"
+
+
+def test_update_status_sets_invited_at(tmp_path: Path) -> None:
+    """Приглашение со страницы откликов фиксирует invited_at один раз."""
+    url = "https://career.habr.com/vacancies/1000164183"
+    store = ProcessedStore(tmp_path, today=date(2026, 10, 28))
+    store.record(
+        url=url,
+        title="Java разработчик",
+        company="ЛАНИТ",
+        status="sent",
+        channel="habr",
+    )
+
+    assert store.update_status(
+        url=url,
+        title="Java разработчик",
+        company="ЛАНИТ",
+        status="invite",
+        reason="По отклику пришло приглашение на интервью",
+    )
+    record = store.find_record("Java разработчик", "ЛАНИТ", url, "")
+    assert record is not None
+    assert record["status"] == "invite"
+    assert record["invited_at"]
+
+
+def test_update_status_keeps_terminal_and_updates_queued(tmp_path: Path) -> None:
+    """Терминальные записи сверка не трогает, а queued уточняет по странице."""
+    url = "https://career.habr.com/vacancies/1000164183"
+    store = ProcessedStore(tmp_path, today=date(2026, 10, 28))
+    store.record(
+        url=url,
+        title="Java разработчик",
+        company="ЛАНИТ",
+        status="rejected",
+        reason="По отклику пришёл отказ",
+        channel="habr",
+    )
+    assert not store.update_status(
+        url=url,
+        title="Java разработчик",
+        company="ЛАНИТ",
+        status="sent",
+        reason="",
+    )
+    assert not store.update_status(
+        url=url,
+        title="Java разработчик",
+        company="ЛАНИТ",
+        status="offer",
+        reason="По отклику пришёл оффер",
+    )
+
+    queued_url = "https://career.habr.com/vacancies/1000164184"
+    store.record(
+        url=queued_url,
+        title="Java разработчик 2",
+        company="ЛАНИТ",
+        status="queued",
+        reason="Нужен ручной отклик",
+        channel="habr",
+    )
+    assert store.update_status(
+        url=queued_url,
+        title="Java разработчик 2",
+        company="ЛАНИТ",
+        status="rejected",
+        reason="По отклику пришёл отказ",
+    )
+    queued = store.find_record("Java разработчик 2", "ЛАНИТ", queued_url, "")
+    assert queued is not None
+    assert queued["status"] == "rejected"
+
+
+def test_mark_archived_keeps_status(tmp_path: Path) -> None:
+    """Признак архива у известной записи не меняет статус и попытки."""
+    store = ProcessedStore(tmp_path, today=date(2026, 10, 21))
+    store.record(
+        url="https://hh.ru/vacancy/1",
+        title="Java-разработчик",
+        company="Ozon",
+        status="sent",
+        reason="отклик уже отправлен",
+    )
+
+    assert store.mark_archived(
+        url="https://hh.ru/vacancy/1", title="Java-разработчик", company="Ozon"
+    )
+
+    row = json.loads((tmp_path / "2026-10-21.json").read_text(encoding="utf-8"))["vacancies"][0]
+    assert row["status"] == "sent"
+    # Причина архивной записи всегда одна и та же.
+    assert row["reason"] == ARCHIVE_REASON
+    assert row["archived"] is True
+    assert row["attempts"] == 1

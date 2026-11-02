@@ -169,10 +169,73 @@ def test_feed_card_with_response_is_recorded_without_opening(
     assert "skipped_already_responded" in events
 
 
-def test_external_response_record_has_channel(
+def test_known_feed_card_with_response_is_skipped(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Пропуск из-за отклика на сайте компании тоже получает источник."""
+    """Известная вакансия Habr с карточкой «Вы откликнулись» не меняется."""
+    config = load_config(write_config(tmp_path))
+    url = "https://career.habr.com/vacancies/1000167337"
+    card = VacancyCard(
+        title="Java-разработчик",
+        company="Ozon",
+        url=url,
+        already_responded=True,
+    )
+
+    def fake_search(
+        page: Any, query: str, page_index: int
+    ) -> tuple[list[VacancyCard], int | None]:
+        del page, query, page_index
+        return [card], 1
+
+    opened: list[str] = []
+    monkeypatch.setattr("agent.habr_search.open_search_page", fake_search)
+    monkeypatch.setattr(
+        "agent.pipeline._process_and_remember",
+        lambda *args, **kwargs: opened.append("opened"),
+    )
+    monkeypatch.setattr("agent.pipeline._ensure_session_alive", lambda page: None)
+
+    store = ProcessedStore(tmp_path / "report", today=date.today())
+    store.record(
+        url=url,
+        title=card.title,
+        company=card.company,
+        status="rejected",
+        reason="По отклику пришёл отказ",
+        channel="habr",
+    )
+    before = json.loads(store.path.read_text(encoding="utf-8"))["vacancies"][0]
+    stats = make_stats()
+    logger = RunLogger(tmp_path / "logs", run_id="habr-known-responded")
+    _process_vacancies(
+        page=None,  # type: ignore[arg-type]
+        config=config,
+        profile=None,  # type: ignore[arg-type]
+        llm=None,  # type: ignore[arg-type]
+        stats=stats,
+        logger=logger,
+        processed=store,
+    )
+    logger.close()
+
+    after = json.loads(store.path.read_text(encoding="utf-8"))["vacancies"][0]
+    events = [
+        json.loads(line)["event"]
+        for line in logger.events_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert opened == []
+    assert stats.already_sent == []
+    assert after["status"] == "rejected"
+    assert after["reason"] == "По отклику пришёл отказ"
+    assert after["updated_at"] == before["updated_at"]
+    assert "skipped_processed" in events
+
+
+def test_external_response_record_is_queued(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Отклик на сайте компании ждёт ручной обработки, а не считается пропуском."""
     config = load_config(write_config(tmp_path))
     card = VacancyCard(
         title="Java-разработчик",
@@ -205,9 +268,11 @@ def test_external_response_record_has_channel(
     logger.close()
 
     rows = json.loads(store.path.read_text(encoding="utf-8"))["vacancies"]
-    assert rows[0]["status"] == "skipped"
+    assert rows[0]["status"] == "queued"
     assert rows[0]["reason"] == "Отклик на сайте компании"
     assert rows[0]["channel"] == "external"
+    assert stats.skipped == []
+    assert [item["reason"] for item in stats.queued] == ["Отклик на сайте компании"]
 
 
 def test_process_vacancy_returns_external_for_external_blocker(

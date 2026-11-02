@@ -1,6 +1,7 @@
 .idea
+.agents
 .tmp
-.plans
+.agents/plans
 data
 logs
 .venv

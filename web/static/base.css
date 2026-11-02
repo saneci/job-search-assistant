@@ -59,6 +59,8 @@
     --color-invite: #11f0ec;
     --color-invite-ink: #0b7a77;
     --color-error: #c62828;
+    /* Архив: нейтральный серый — вакансия больше не в работе. */
+    --color-archived: #455a64;
 }
 
 [data-theme="dark"] {
@@ -107,6 +109,7 @@
     --color-invite: #11f0ec;
     --color-invite-ink: #11f0ec;
     --color-error: #f08a8a;
+    --color-archived: #90a4ae;
 }
 
 * {

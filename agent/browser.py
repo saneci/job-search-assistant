@@ -34,6 +34,11 @@ NAVIGATION_TIMEOUT_MS = 45000
 # Скриншот не должен подвешивать запуск: hh.ru иногда не даёт стабильный кадр.
 SCREENSHOT_TIMEOUT_MS = 15000
 
+# Сколько ждём подтверждение входа после Enter. Habr показывает запрос на
+# связку аккаунтов, и сессия Career появляется только после ответа «Да».
+LOGIN_CONFIRM_WAIT_SECONDS = 30.0
+LOGIN_CONFIRM_POLL_MS = 1000
+
 _PROFILE_MARKERS = "[data-qa='mainmenu_applicantProfile'], [data-qa='mainmenu_avatar']"
 _LOGIN_MARKERS = "a[href*='account/login'], [data-qa='login']"
 
@@ -284,7 +289,7 @@ class BrowserSession:
                 ) from exc
 
             self.logger.info(f"Проверяю вход в {name}...")
-            authenticated = authenticate(page)
+            authenticated = self._wait_for_login(page, authenticate, name)
             if authenticated:
                 self.logger.info("Вход подтверждён.")
             else:
@@ -298,9 +303,39 @@ class BrowserSession:
         self.save_state()
         if not authenticated:
             raise BrowserError(
-                f"Вход в {name} не подтверждён. Войдите в аккаунт до нажатия Enter "
+                f"Вход в {name} не подтверждён. Завершите вход в окне браузера: "
+                "если сайт предлагает связать аккаунты, нажмите «Да» "
                 "и запустите приложение снова."
             )
+
+    def _wait_for_login(
+        self,
+        page: Page,
+        authenticate: Callable[[Page], bool],
+        name: str,
+    ) -> bool:
+        """Ждёт подтверждение входа, не уходя со страницы авторизации.
+
+        После Enter вход может быть ещё не завершён: Habr показывает запрос на
+        связку аккаунтов, и сессия Career появляется только после ответа «Да».
+        Поэтому проверку повторяем, пока человек не закончит вход. Страницу не
+        перезагружаем: незавершённый вход сбрасывается и человек проходит его заново.
+        """
+        deadline = time.monotonic() + LOGIN_CONFIRM_WAIT_SECONDS
+        hinted = False
+        while True:
+            if authenticate(page):
+                return True
+            if not hinted:
+                self.logger.info(
+                    "Вход ещё не подтверждён. Если сайт спрашивает о связке "
+                    f"аккаунтов, ответьте «Да» в окне браузера — жду "
+                    f"{int(LOGIN_CONFIRM_WAIT_SECONDS)} с."
+                )
+                hinted = True
+            if time.monotonic() >= deadline:
+                return False
+            page.wait_for_timeout(LOGIN_CONFIRM_POLL_MS)
 
     def _wait_for_login_captcha(self, page: Page, name: str) -> None:
         """Ждёт hCaptcha на странице входа Habr, чтобы её было видно человеку.

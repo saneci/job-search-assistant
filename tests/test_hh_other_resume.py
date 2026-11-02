@@ -21,6 +21,14 @@ from agent.hh_vacancy import (
 from agent.models import REJECTED_REASON
 
 
+@pytest.fixture(autouse=True)
+def reset_resume_name():
+    """Имя резюме — глобальное состояние модуля: не переносим его между тестами."""
+    hh_vacancy.set_resume_name("")
+    yield
+    hh_vacancy.set_resume_name("")
+
+
 class FakeItem:
     """Элемент страницы: текст, видимость и клик."""
 

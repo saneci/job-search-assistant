@@ -4,12 +4,17 @@ from __future__ import annotations
 
 from typing import Any
 
-from agent.habr_vacancy import detect_page_blocker, is_authenticated, respond
+import pytest
+
+from agent.habr_vacancy import detect_page_blocker, is_authenticated, open_vacancy, respond
 from agent.hh_vacancy import (
+    PAGE_ARCHIVED,
     STATUS_ALREADY_RESPONDED,
     STATUS_CAPTCHA,
     STATUS_NO_FORM,
+    VacancyParseError,
 )
+from agent.models import VacancyCard
 
 
 class FakeList:
@@ -64,14 +69,32 @@ class FakePage:
         self,
         url: str = "https://career.habr.com/vacancies/1",
         mapping: dict[str, list[FakeElement]] | None = None,
+        texts: dict[str, list[FakeElement]] | None = None,
     ) -> None:
         self.url = url
         self._mapping = mapping or {}
+        self._texts = texts or {}
+
+    def goto(self, url: str, **kwargs: Any) -> None:
+        del kwargs
+        self.url = url
+
+    def wait_for_selector(self, selector: str, timeout: int | None = None) -> None:
+        del selector, timeout
 
     def locator(self, selector: str) -> FakeList:
         return FakeList(self._mapping.get(selector, []))
 
+    def get_by_text(self, text: str, exact: bool = False) -> FakeList:
+        found: list[FakeElement] = []
+        for label, items in self._texts.items():
+            matches = label == text if exact else text in label
+            if matches:
+                found.extend(items)
+        return FakeList(found)
+
     def get_by_role(self, role: str, name: Any = None) -> FakeList:
+        del role, name
         return FakeList([])
 
     def wait_for_timeout(self, milliseconds: int) -> None:
@@ -146,6 +169,17 @@ def test_habr_session_check_navigates_to_home() -> None:
     assert page.goto_url == "https://career.habr.com/"
 
 
+def test_habr_account_page_is_not_left_before_linking() -> None:
+    """Страница связки аккаунтов: проверка не уводит с неё, иначе вход теряется."""
+    page: Any = AuthPage(
+        "https://career.habr.com/",
+        start_url="https://account.habr.com/oauth/authorize/",
+    )
+
+    assert is_authenticated(page) is False
+    assert page.goto_url == ""
+
+
 def test_external_response_is_a_blocker() -> None:
     page: Any = FakePage(
         mapping={"a[href$='/external_response']": [FakeElement()]}
@@ -188,3 +222,37 @@ def test_external_form_reason_in_no_form() -> None:
 
     assert result.status == STATUS_NO_FORM
     assert result.reason == "external_form"
+
+
+def test_archived_page_is_a_skip_not_an_error() -> None:
+    """Экран «Вакансия в архиве» — пропуск с признаком архива, а не ошибка."""
+    page: Any = FakePage(
+        mapping={"h1.page-title__title": [FakeElement("Java-разработчик")]},
+        texts={"Вакансия в архиве": [FakeElement("Вакансия в архиве")]},
+    )
+    card = VacancyCard(
+        title="Java-разработчик",
+        company="Ozon",
+        url="https://career.habr.com/vacancies/1",
+    )
+
+    details = open_vacancy(page, card)
+
+    assert details.blocker == PAGE_ARCHIVED
+    assert details.archived is True
+    # Описания у архивной страницы нет, и это не повод падать в ошибку.
+    assert details.description == ""
+    assert details.title == "Java-разработчик"
+
+
+def test_page_without_description_is_a_parse_error() -> None:
+    """Обычная страница без описания остаётся ошибкой разбора."""
+    page: Any = FakePage(mapping={"h1.page-title__title": [FakeElement("Java")]})
+    card = VacancyCard(
+        title="Java-разработчик",
+        company="Ozon",
+        url="https://career.habr.com/vacancies/1",
+    )
+
+    with pytest.raises(VacancyParseError):
+        open_vacancy(page, card)

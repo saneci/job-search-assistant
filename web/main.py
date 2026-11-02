@@ -54,10 +54,19 @@ NO_PROFILE_LABEL = "без резюме"
 # отклика не пересчитываем (agent/models.py).
 STATUS_SENT = "sent"
 STATUS_INVITE = "invite"
+# Архив — не статус записи, а признак: в отчёт он пишется полем `archived`.
+STATUS_ARCHIVED = "archived"
 STATUS_REJECTED = "rejected"
 STATUS_OFFER = "offer"
 REJECTED_REASON = "По отклику пришёл отказ"
 OFFER_REASON = "По отклику пришёл оффер"
+# Ручной перевод в «Отправлено»: письма LLM у веб-интерфейса нет, поэтому
+# причина та же, что у уже отправленного ранее отклика.
+SENT_REASON = "отклик уже отправлен"
+# Причина архивной записи: у всех записей с `archived: true` она одна.
+ARCHIVE_REASON = (
+    "Вакансия в архиве, работодатель, больше не принимает отклики на эту вакансию"
+)
 
 # Исход отклика — терминальная операция: после него статус не меняется.
 TERMINAL_STATUSES = (STATUS_REJECTED, STATUS_OFFER)
@@ -240,12 +249,20 @@ templates.env.globals["asset_url"] = asset_url
 
 
 def all_vacancies(paths: list[Path]) -> list[dict[str, Any]]:
-    """Вакансии из выбранных файлов: в записи видно, из какого она файла."""
+    """Вакансии из выбранных файлов: в записи видно, из какого она файла.
+
+    У архивной записи причина всегда архивная: старые отчёты могли сохранить
+    причину прежнего статуса, например ошибку разбора. Файл не переписываем,
+    архивную причину подставляем при чтении.
+    """
     items: list[dict[str, Any]] = []
     for path in paths:
         for vacancy in read_report(path)["vacancies"]:
             if isinstance(vacancy, dict):
-                items.append({**vacancy, "report_name": path.name})
+                item = {**vacancy, "report_name": path.name}
+                if vacancy.get("archived"):
+                    item["reason"] = ARCHIVE_REASON
+                items.append(item)
     items.sort(
         key=lambda item: str(item.get("updated_at") or item.get("created_at") or ""),
         reverse=True,
@@ -593,11 +610,12 @@ async def update_status(update: StatusUpdate) -> dict[str, Any]:
     В отчётах одна запись на пару «URL и резюме»: вакансия с этим профилем
     удаляется из всех файлов, а обновлённая запись попадает в файл сегодняшней
     даты. `created_at` при этом не меняется, `updated_at` становится временем
-    правки. `rejected` и `offer` терминальны: `invite` ставится только из `sent`,
+    правки. `rejected`, `offer` и `archived` терминальны: `invite` ставится
+    только из `sent`,
     `offer` — из `sent` или `invite`. Момент приглашения пишется в `invited_at`
     и не сбрасывается при переходе в оффер или отказ.
     """
-    if update.status not in STATUSES:
+    if update.status not in STATUSES and update.status != STATUS_ARCHIVED:
         raise HTTPException(status_code=422, detail=f"Неизвестный статус: {update.status}")
     report_path(update.report_name)
     vacancy = find_vacancy(update.url, update.profile)
@@ -606,7 +624,14 @@ async def update_status(update: StatusUpdate) -> dict[str, Any]:
     vacancy = dict(vacancy)
 
     current_status = str(vacancy.get("status", ""))
-    if current_status in TERMINAL_STATUSES:
+    # «В архиве» терминальный: запись закрыта, вернуть её в работу нельзя.
+    if vacancy.get("archived"):
+        raise HTTPException(
+            status_code=409,
+            detail="Статус «В архиве» терминальный: изменить его нельзя",
+        )
+    # Отказ и оффер терминальны: из них можно только пометить архив.
+    if current_status in TERMINAL_STATUSES and update.status != STATUS_ARCHIVED:
         label = "Отказ" if current_status == STATUS_REJECTED else "Оффер"
         raise HTTPException(
             status_code=409,
@@ -639,18 +664,32 @@ async def update_status(update: StatusUpdate) -> dict[str, Any]:
         vacancy.pop("profile", None)
     else:
         vacancy["profile"] = str(vacancy.get("profile") or "")
-    vacancy["status"] = update.status
     vacancy["updated_at"] = changed_at
-    if update.status == STATUS_INVITE:
-        # Момент приглашения фиксируется один раз: по нему метрики считают
-        # «дошло до приглашения» и после перехода в оффер или отказ.
-        vacancy["invited_at"] = str(vacancy.get("invited_at") or changed_at)
-    if update.status in TERMINAL_STATUSES:
-        vacancy["reason"] = (
-            REJECTED_REASON if update.status == STATUS_REJECTED else OFFER_REASON
-        )
+    if update.status == STATUS_ARCHIVED:
+        # Архив — признак, а не статус: прежний статус остаётся, поэтому метрики
+        # и сводка не меняются, а попытка не расходуется. Причина у архивной
+        # записи всегда одна и та же.
+        vacancy["archived"] = True
+        vacancy["reason"] = ARCHIVE_REASON
     else:
-        vacancy["attempts"] = int(vacancy.get("attempts", 0)) + 1
+        # Обычный статус снимает архив: запись возвращается в работу.
+        vacancy.pop("archived", None)
+        vacancy["status"] = update.status
+        if update.status == STATUS_INVITE:
+            # Момент приглашения фиксируется один раз: по нему метрики считают
+            # «дошло до приглашения» и после перехода в оффер или отказ.
+            vacancy["invited_at"] = str(vacancy.get("invited_at") or changed_at)
+        if update.status in TERMINAL_STATUSES:
+            vacancy["reason"] = (
+                REJECTED_REASON if update.status == STATUS_REJECTED else OFFER_REASON
+            )
+        else:
+            if update.status == STATUS_SENT and current_status != STATUS_SENT:
+                # Ручной перевод в «Отправлено»: письма LLM нет, поэтому
+                # причина не остаётся от прежнего статуса. Уже отправленный
+                # отклик сохраняет причину, записанную агентом.
+                vacancy["reason"] = SENT_REASON
+            vacancy["attempts"] = int(vacancy.get("attempts", 0)) + 1
 
     for path in report_files():
         data = read_report(path)
@@ -680,6 +719,8 @@ async def update_status(update: StatusUpdate) -> dict[str, Any]:
         "report_name": today.name,
         "summary": summary,
         "attempts": vacancy.get("attempts", 0),
+        "status": str(vacancy.get("status", "")),
+        "archived": bool(vacancy.get("archived")),
         "reason": str(vacancy.get("reason", "")),
         "profile": str(vacancy.get("profile", "")),
         "created_at": vacancy["created_at"],

@@ -1,0 +1,22 @@
+# Зависимости
+.venv/
+__pycache__/
+**/node_modules/
+
+# Артефакты сборки
+dist/
+build/
+target/
+out/
+
+# IDE, тесты и кэш
+.idea/
+.pytest_cache/
+.mypy_cache/
+coverage/
+
+# Данные и секреты
+data/
+logs/
+.env
+config.local.yaml
