@@ -57,7 +57,7 @@ DEFAULT_HABR_STATE_PATH = PROJECT_ROOT / "data" / "habr-state.json"
 # Постоянный профиль Chrome для habr: без него hCaptcha не отрисовывается.
 DEFAULT_HABR_PROFILE_PATH = PROJECT_ROOT / "data" / "habr-profile"
 DEFAULT_CACHE_PATH = PROJECT_ROOT / "data" / "cache.json"
-DEFAULT_LOGS_DIR = PROJECT_ROOT / "logs"
+DEFAULT_LOGS_DIR = PROJECT_ROOT / "data" / "logs"
 DEFAULT_REPORT_DIR = PROJECT_ROOT / "data" / "report"
 
 DEFAULT_API_KEY_ENV = "AITUNNEL_API_KEY"

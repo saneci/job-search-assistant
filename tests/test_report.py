@@ -56,7 +56,7 @@ def test_build_report(tmp_path: Path) -> None:
     assert lines[1] == "Отчёт за 2026-10-21 09:44"
     assert lines[2] == "=" * 33
     assert "- Обработано вакансий: 12" in lines
-    assert "- Отправлено откликов: 2" in lines
+    assert "- Отправлено откликов за запуск: 2" in lines
     assert "- Пропущено (не подошло): 1" in lines
     assert "- Отложено (тесты/анкеты): 1" in lines
     assert "- Ошибок при обработке: 1" in lines
@@ -231,3 +231,26 @@ def test_send_email_uses_kind_recipient(monkeypatch) -> None:
     assert delivered == ["captcha@example.com"]
     # Адрес — контакт, в логи и сообщения он не попадает.
     assert "captcha@example.com" not in message
+
+
+def test_report_shows_run_id_and_sent_for_day() -> None:
+    """Отчёт CLI печатает идентификатор запуска и отклики в файле за день."""
+    stats = make_stats()
+    stats.run_id = "20261021094456"
+    stats.report_sent = 6
+
+    lines = build_report(stats).splitlines()
+
+    assert "- Идентификатор запуска: 20261021094456" in lines
+    assert "- Отправлено откликов за запуск: 2" in lines
+    assert "- Отправлено откликов за день: 6" in lines
+
+
+def test_report_shows_day_sent_even_when_equal() -> None:
+    """Строка «за день» печатается всегда: по ней итог сходится с веб-отчётом."""
+    stats = make_stats()
+    stats.report_sent = 2
+
+    lines = build_report(stats).splitlines()
+
+    assert "- Отправлено откликов за день: 2" in lines

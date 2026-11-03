@@ -26,6 +26,7 @@ from .hh_search import (
     is_excluded,
     open_search_page,
     pages_plan,
+    profile_key,
     vacancy_id,
     vacancy_keys,
 )
@@ -104,6 +105,7 @@ QUEUE_REASON_TEXTS: dict[str, str] = {
     "no_form": "hh.ru не показал форму отклика — проверьте вакансию вручную",
     "unknown": "hh.ru не подтвердил отправку отклика — проверьте вакансию вручную",
     "other_resume": "Уже отправлен отклик по другому резюме",
+    "interrupted": "Запуск прерван во время обработки вакансии, проверьте вакансию вручную",
 }
 
 # Вводная часть обоснования Generation: вердикт и общие слова о совпадении.
@@ -154,36 +156,6 @@ def _generation_reason_text(reason: str) -> str:
     if len(text) < MIN_MEANINGFUL_REASON:
         return ""
     return text[0].upper() + text[1:]
-
-
-_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?…])\s+")
-# Строки подписи, если модель добавила контакты сама и подпись не отделена.
-_SIGNATURE_LINE_RE = re.compile(
-    r"^(?:с уважением|телеграм|почта|e-?mail|email|тел\.?|phone)\b",
-    re.IGNORECASE,
-)
-
-
-def _last_letter_sentence(letter: str, signature: str = "") -> str:
-    """Последнее предложение письма LLM — причина статуса `sent`.
-
-    В отчёт идёт содержательная часть письма: подпись из
-    `llm.cover_letter.signature` дописывает код, её в причине быть не должно.
-    """
-    text = (letter or "").strip()
-    signature = (signature or "").strip()
-    if signature:
-        normalized = " ".join(text.split())
-        normalized_signature = " ".join(signature.split())
-        if normalized.endswith(normalized_signature):
-            text = normalized[: -len(normalized_signature)].strip()
-    text = " ".join(text.split())
-    if not text:
-        return ""
-    sentences = [part.strip() for part in _SENTENCE_SPLIT_RE.split(text) if part.strip()]
-    while len(sentences) > 1 and _SIGNATURE_LINE_RE.match(sentences[-1]):
-        sentences.pop()
-    return sentences[-1] if sentences else ""
 
 
 _PROJECT_URL_RE = re.compile(r"https?://[^\s<>()]+", re.IGNORECASE)
@@ -257,7 +229,7 @@ def run(
     channel_name: str | None = None,
 ) -> tuple[RunStats, Path]:
     """Выполняет полный цикл: поиск (или повтор по отчётам), оценка, отклики и отчёт."""
-    stats = RunStats(started_at=datetime.now())
+    stats = RunStats(started_at=datetime.now(), run_id=logger.run_id)
     statuses = _retry_statuses(config, retry) if retry else ()
     processed = _open_report(config, logger)
 
@@ -268,6 +240,7 @@ def run(
     log_channel_choice(logger, channel, channel_name)
     _require_resume_name(config, logger, channel)
     state_path, profile_dir = session_settings(config, channel)
+
     with BrowserSession(config.browser, state_path, logger, profile_dir) as session:
         session.ensure_logged_in(channel.auth_check, channel.login_url, channel.site_label)
         page = session.new_page()
@@ -315,6 +288,7 @@ def run(
 
     stats.finished_at = datetime.now()
     report_path = processed.path if processed.path.exists() else None
+    stats.report_sent = processed.today_summary().get(OUTCOME_SENT, 0)
 
     report = build_report(stats, report_path)
     logger.info("")
@@ -364,7 +338,7 @@ def _open_report(config: AppConfig, logger: RunLogger) -> ProcessedStore:
             f"{_plural(len(removed), 'файл', 'файла', 'файлов')} "
             f"старше {config.data.logs_retention_days} дней."
         )
-    processed = ProcessedStore(config.data.paths.report_dir)
+    processed = ProcessedStore(config.data.paths.report_dir, run_id=logger.run_id)
     known = processed.load()
     logger.event("processed_loaded", count=known, path=str(processed.directory))
     return processed
@@ -704,27 +678,46 @@ def _retry_vacancies(
     statuses: tuple[str, ...],
     channel: Channel | None = None,
 ) -> None:
-    """Повторяет вакансии из дневных отчётов по прямой ссылке, без поиска.
-
-    Выдача hh.ru каждый раз одна и та же, поэтому идти по ней ради пары
-    вакансий дорого: берём ссылки из отчётов и открываем их сразу.
-    Если запись относится к другому каналу, она пропускается: чужая сессия
-    и чужие селекторы приведут к ложной ошибке.
-    """
+    """Повтор без обхода выдачи: вакансии открываются по ссылкам из отчётов канала запуска."""
     channel = channel or _channel_for(config)
+    profile_name = _profile_name(config, channel)
     records = processed.pending(statuses)
-    logger.event("retry_selected", statuses=list(statuses), count=len(records))
-    if not records:
+    records_of_channel = [
+        record
+        for record in records
+        if channel_name_for_url(str(record.get("url", ""))) == channel.name
+    ]
+    other_channels = len(records) - len(records_of_channel)
+    logger.event(
+        "retry_selected",
+        statuses=list(statuses),
+        channel=channel.name,
+        count=len(records_of_channel),
+    )
+    if other_channels:
+        logger.event(
+            "retry_channel_mismatch",
+            message=(
+                "Записи другого канала не повторяются: пропущено "
+                f"{other_channels} {_plural(other_channels, 'вакансия', 'вакансии', 'вакансий')}"
+            ),
+            channel=channel.name,
+            count=other_channels,
+        )
+    if not records_of_channel:
         logger.info(
-            "Повторов нет: в отчётах нет вакансий со статусами " + ", ".join(statuses) + "."
+            "Повторов нет: в отчётах нет вакансий со статусами "
+            + ", ".join(statuses)
+            + " для выбранного канала."
         )
         return
 
     logger.info(
-        f"Повторная обработка по отчётам: {len(records)} вакансий "
+        f"Повторная обработка по отчётам: {len(records_of_channel)} "
+        f"{_plural(len(records_of_channel), 'вакансия', 'вакансии', 'вакансий')} "
         f"({', '.join(statuses)}), поиск не используется."
     )
-    for record in records:
+    for record in records_of_channel:
         if _should_stop(config.pipeline.limit_per_run, stats, logger):
             break
         _check_new_day(logger, processed)
@@ -742,13 +735,27 @@ def _retry_vacancies(
         if not card.url:
             continue
         stats.reviewed += 1
-        record_channel = channel_name_for_url(card.url)
-        if record_channel != channel.name:
-            logger.event("retry_channel_mismatch", url=card.url, channel=record_channel)
+        record_profile = str(record.get("profile") or "")
+        if (
+            channel.name == HH
+            and record_profile
+            and profile_key(record_profile) != profile_key(profile_name)
+            and processed.find_record(
+                card.title, card.company, card.url, profile_name
+            )
+        ):
+            logger.event(
+                "retry_profile_mismatch",
+                message=(
+                    "Запись вакансии сделана другим резюме и по текущему резюме запись уже есть: "
+                    "повтор пропущен, чтобы не отправить отклик второй раз"
+                ),
+                url=card.url,
+            )
             continue
         _process_and_remember(
             page,
-            with_resume(config, str(record.get("profile") or "")),
+            config,
             profile,
             llm,
             stats,
@@ -775,7 +782,13 @@ def _process_and_remember(
     channel = channel or _channel_for(config)
     counters = _counters(stats)
     skipped_before = len(stats.skipped)
-    outcome_channel = _process_vacancy(page, config, profile, llm, stats, logger, card)
+    try:
+        outcome_channel = _process_vacancy(
+            page, config, profile, llm, stats, logger, card
+        )
+    except (KeyboardInterrupt, SessionLostError):
+        _remember_interrupted(processed, logger, stats, card, config, channel)
+        raise
     _mark_invited_resume(processed, logger, config, channel, card, skipped_before, stats)
     skipped = stats.skipped[skipped_before:]
     outcome = _outcome(counters, _counters(stats))
@@ -790,6 +803,32 @@ def _process_and_remember(
             channel=outcome_channel or channel.name,
             archived=_outcome_archived(skipped),
         )
+
+
+def _remember_interrupted(
+    processed: ProcessedStore,
+    logger: RunLogger,
+    stats: RunStats,
+    card: VacancyCard,
+    config: AppConfig,
+    channel: Channel,
+) -> None:
+    """Страховка от потери вакансии при остановке запуска.
+
+    Отклик мог уйти или не уйти, поэтому без записи в отчёт вакансия осталась бы
+    без ручной проверки на сайте.
+    """
+    reason = QUEUE_REASON_TEXTS["interrupted"]
+    _queue(stats, logger, card, "interrupted", reason=reason, channel=channel)
+    _remember_processing(
+        processed,
+        logger,
+        card,
+        OUTCOME_QUEUED,
+        reason,
+        _profile_name(config, channel),
+        channel=channel.name,
+    )
 
 
 def _remember_card_already_responded(
@@ -1321,10 +1360,7 @@ def _process_vacancy(
                 company=details.company,
                 url=details.url,
                 probability=decision.probability,
-                reason=_last_letter_sentence(
-                    generation.cover_letter,
-                    config.llm.cover_letter.signature,
-                ),
+                reason=generation.reason,
             )
         )
         log.info(f"отклик отправлен (всего {stats.sent_count} из {config.pipeline.limit_per_run})")
@@ -1643,7 +1679,7 @@ def _send_report_email(config: AppConfig, report: str, stats: RunStats) -> tuple
         return False, "письма с отчётом отключены (notifications.report.enabled: false)"
     return send_email(
         config.notifications.email,
-        f"Отчёт за {stats.started_at:%Y-%m-%d %H:%M}",
+        f"Отчёт за {stats.started_at:%Y-%m-%d %H:%M} по запросу {config.pipeline.resume.name}",
         report,
         recipient=settings.target(config.notifications.email),
     )

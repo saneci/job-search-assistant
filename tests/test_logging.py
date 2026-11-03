@@ -8,7 +8,7 @@ import re
 from datetime import date, datetime
 from pathlib import Path
 
-from agent.logging_setup import RunLogger, prune_logs
+from agent.logging_setup import RunLogger, new_run_id, prune_logs
 
 
 def read_events(path: Path) -> list[dict]:
@@ -141,3 +141,9 @@ def test_prune_logs_uses_mtime_without_date_in_name(tmp_path: Path) -> None:
 
 def test_prune_logs_without_directory_is_noop(tmp_path: Path) -> None:
     assert prune_logs(tmp_path / "missing", days=7, today=date(2026, 10, 21)) == []
+
+
+def test_run_id_has_single_format() -> None:
+    """Идентификатор запуска — дата и время без разделителей, один формат."""
+    assert re.fullmatch(r"\d{14}", new_run_id(datetime(2026, 11, 3, 9, 21, 14)))
+    assert new_run_id(datetime(2026, 11, 3, 9, 21, 14)) == "20261103092114"

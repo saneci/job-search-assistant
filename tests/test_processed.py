@@ -404,6 +404,23 @@ def test_pending_selects_statuses_for_retry(tmp_path: Path) -> None:
     assert store.pending(["queued"]) == []
 
 
+def test_pending_skips_archived_records(tmp_path: Path) -> None:
+    """Архивная вакансия не повторяется: архив терминальный, в счётчик не входит."""
+    store = ProcessedStore(tmp_path, today=date(2026, 10, 21))
+    store.record(url="https://hh.ru/vacancy/1", title="Java", company="Ozon", status="queued")
+    store.record(
+        url="https://hh.ru/vacancy/2",
+        title="Go",
+        company="VK",
+        status="queued",
+        archived=True,
+    )
+
+    urls = {item["url"] for item in store.pending(["queued"])}
+
+    assert urls == {"https://hh.ru/vacancy/1"}
+
+
 def test_retry_moves_record_to_today_report(tmp_path: Path) -> None:
     """Повтор в другой день обновляет статус и переносит запись в файл сегодня."""
     ProcessedStore(tmp_path, today=date(2026, 10, 21)).record(
@@ -887,3 +904,67 @@ def test_mark_archived_keeps_status(tmp_path: Path) -> None:
     assert row["reason"] == ARCHIVE_REASON
     assert row["archived"] is True
     assert row["attempts"] == 1
+
+
+def test_record_writes_run_id(tmp_path: Path) -> None:
+    """Запись отчёта помнит запуск, который обработал вакансию."""
+    store = ProcessedStore(tmp_path, today=date(2026, 10, 21), run_id="2026-10-21-090000")
+    store.record(
+        url="https://hh.ru/vacancy/1",
+        title="Java-разработчик",
+        company="Ozon",
+        status="sent",
+        profile="Java Developer",
+    )
+
+    row = json.loads((tmp_path / "2026-10-21.json").read_text(encoding="utf-8"))["vacancies"][0]
+    assert row["run_id"] == "2026-10-21-090000"
+
+
+def test_manual_status_update_keeps_run_id(tmp_path: Path) -> None:
+    """Смена статуса не переписывает запуск: отклик отправил прежний прогон."""
+    store = ProcessedStore(tmp_path, today=date(2026, 10, 21), run_id="2026-10-21-090000")
+    store.record(
+        url="https://hh.ru/vacancy/1",
+        title="Java-разработчик",
+        company="Ozon",
+        status="sent",
+        profile="Java Developer",
+    )
+    later = ProcessedStore(tmp_path, today=date(2026, 10, 22), run_id="2026-10-22-100000")
+    later.load()
+
+    assert later.update_status(
+        url="https://hh.ru/vacancy/1",
+        title="Java-разработчик",
+        company="Ozon",
+        status="invite",
+        reason="По отклику пришло приглашение на интервью",
+        profile="Java Developer",
+    )
+
+    row = json.loads((tmp_path / "2026-10-22.json").read_text(encoding="utf-8"))["vacancies"][0]
+    assert row["run_id"] == "2026-10-21-090000"
+
+
+def test_today_summary_counts_only_today_file(tmp_path: Path) -> None:
+    """Итоги файла дня не смешиваются с откликами других файлов."""
+    yesterday = ProcessedStore(tmp_path, today=date(2026, 10, 20))
+    yesterday.record(
+        url="https://hh.ru/vacancy/1",
+        title="Java-разработчик",
+        company="Ozon",
+        status="sent",
+        profile="Java Developer",
+    )
+    today = ProcessedStore(tmp_path, today=date(2026, 10, 21))
+    today.load()
+    today.record(
+        url="https://hh.ru/vacancy/2",
+        title="Go-разработчик",
+        company="VK",
+        status="sent",
+        profile="Java Developer",
+    )
+
+    assert today.today_summary() == {"sent": 1}

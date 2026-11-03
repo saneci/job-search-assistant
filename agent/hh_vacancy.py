@@ -674,10 +674,18 @@ def _detect_page_state(page: Page) -> str | None:
 
 
 def detect_response_blocker(scope: Locator | Page) -> str | None:
-    """Ищет признаки теста/анкеты/внешней формы в форме отклика."""
+    """Ищет признаки теста/анкеты/внешней формы в форме отклика.
+
+    Кроме селекторов смотрим доступные имена кнопок и ссылок: hh.ru рисует
+    кнопки-ссылки Bloko как `<a>`, и текстовый сбор по `<button>` их пропускает.
+    """
     if _has_selector(scope, QUESTIONNAIRE_SELECTORS):
         return "questionnaire"
     if _has_selector(scope, TEST_SELECTORS):
+        return "test"
+    if _has_role_name(scope, QUESTIONNAIRE_ACTION_RE):
+        return "questionnaire"
+    if _has_role_name(scope, TEST_ACTION_RE):
         return "test"
 
     text = _response_text(scope)
@@ -820,6 +828,7 @@ def respond(
 
     if result == STATUS_UNKNOWN and not _modal_hidden(page):
         # Форма осталась открытой — клик не сработал, пробуем ещё раз.
+        _close_resume_dropdown(scope)
         retry = _find_action(scope, SUBMIT_SELECTORS, RESPOND_RE)
         if retry is not None and _is_enabled(retry):
             try:
@@ -862,8 +871,12 @@ def response_notice(page: Page, *, include_hidden_warning: bool = True) -> str:
         raw = _first_text(page, PAGE_NOTICE_SELECTORS)
         return _clean_notice(raw) if len(raw) <= NOTICE_MAX_LENGTH else ""
     raw = _first_text(scope, NOTICE_SELECTORS)
-    if raw and len(raw) <= NOTICE_MAX_LENGTH and _looks_like_notice(_clean_notice(raw)):
-        return _clean_notice(raw)
+    if raw and len(raw) <= NOTICE_MAX_LENGTH:
+        text = _clean_notice(raw)
+        if _looks_like_notice(text) and (
+            include_hidden_warning or not HIDDEN_RESUME_WARNING_RE.search(text)
+        ):
+            return text
     return _notice_from_text_blocks(scope, include_hidden_warning=include_hidden_warning)
 
 

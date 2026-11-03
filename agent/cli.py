@@ -557,7 +557,7 @@ def main(argv: list[str] | None = None) -> int:
             return _install_browser(config)
 
         if args.notify_test:
-            return _notify_test(config, logger)
+            return notify_test(config, logger)
 
         if args.login:
             channel = channel_for(config, args.channel)
@@ -606,7 +606,7 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def _notify_test(config: AppConfig, logger: RunLogger) -> int:
+def notify_test(config: AppConfig, logger: RunLogger) -> int:
     """Проверяет канал уведомлений: письмо на каждый включённый вид писем."""
     targets = notify_test_targets(
         config.notifications.email,

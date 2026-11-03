@@ -17,6 +17,7 @@ from .models import (
     STATUS_REJECTED,
     STATUS_SENT,
 )
+from .report_io import ReportLockError, report_lock, write_report_file
 
 DATE_FORMAT = "%Y-%m-%d"
 
@@ -48,9 +49,15 @@ class ProcessedStore:
     дата обработки, сохранённая в самой записи.
     """
 
-    def __init__(self, directory: Path, today: date | None = None) -> None:
+    def __init__(
+        self,
+        directory: Path,
+        today: date | None = None,
+        run_id: str = "",
+    ) -> None:
         self.directory = directory
         self.today = today or date.today()
+        self.run_id = (run_id or "").strip()
         self._seen: dict[str, str] = {}
         self._records: dict[str, tuple[Path, dict[str, Any]]] = {}
         # Сколько копий пропущено в памяти при загрузке истории (файлы не меняются).
@@ -131,6 +138,19 @@ class ProcessedStore:
                 return known[1]
         return None
 
+    def today_summary(self) -> dict[str, int]:
+        """Итоги файла дня по статусам: в нём лежат записи и прошлых запусков."""
+        counts: dict[str, int] = {}
+        seen: set[int] = set()
+        for path, record in self._records.values():
+            if path != self.path or id(record) in seen:
+                continue
+            seen.add(id(record))
+            status = str(record.get("status", ""))
+            if status:
+                counts[status] = counts.get(status, 0) + 1
+        return counts
+
     def pending(self, statuses: Sequence[str]) -> list[dict[str, Any]]:
         """Записи со статусами, которые нужно повторить (свежие сверху)."""
         wanted = set(statuses)
@@ -140,11 +160,12 @@ class ProcessedStore:
             if id(record) in seen:
                 continue
             seen.add(id(record))
+            if record.get("archived"):
+                continue
             if str(record.get("status", "")) in wanted:
                 found.append(record)
         found.sort(key=_record_time, reverse=True)
         return found
-
 
     def invite_other_resume(
         self,
@@ -213,8 +234,7 @@ class ProcessedStore:
         if known is None:
             return False
         item = known[1]
-        # Статус передаём текущим: _update перезапишет его тем же значением
-        # и перенесёт запись в отчёт сегодняшней даты.
+
         return self._update(
             item,
             status=str(item.get("status", "")),
@@ -270,6 +290,8 @@ class ProcessedStore:
         # У Habr и внешней формы нет резюме: поле в отчёт не пишем.
         if channel not in ("habr", "external"):
             item["profile"] = profile or ""
+        if self.run_id:
+            item["run_id"] = self.run_id
         if reason:
             item["reason"] = reason
         if channel:
@@ -278,9 +300,25 @@ class ProcessedStore:
             # Вакансия в архиве или доступ к ней закрыт: признак виден в UI.
             item["archived"] = True
 
-        items = _read(self.path)
-        items.append(item)
-        _write(self.path, items)
+        try:
+            with report_lock(self.directory):
+                items = _read(self.path)
+                existing = next(
+                    (row for row in items if _same_vacancy(row, item)), None
+                )
+                if existing is not None:
+                    return self._update_locked(
+                        existing,
+                        status=status,
+                        reason=reason,
+                        profile=profile,
+                        channel=channel,
+                        archived=archived,
+                    )
+                items.append(item)
+                _write(self.path, items)
+        except ReportLockError as exc:
+            raise ProcessedError(str(exc)) from exc
 
         self._remember(item)
         return True
@@ -296,12 +334,38 @@ class ProcessedStore:
         count_attempt: bool = True,
         archived: bool = False,
     ) -> bool:
+        """Обновляет запись, удерживая общую с веб-интерфейсом блокировку каталога."""
+        try:
+            with report_lock(self.directory):
+                return self._update_locked(
+                    item,
+                    status=status,
+                    reason=reason,
+                    profile=profile,
+                    channel=channel,
+                    count_attempt=count_attempt,
+                    archived=archived,
+                )
+        except ReportLockError as exc:
+            raise ProcessedError(str(exc)) from exc
+
+    def _update_locked(
+        self,
+        item: dict[str, Any],
+        *,
+        status: str,
+        reason: str,
+        profile: str | None = None,
+        channel: str = "",
+        count_attempt: bool = True,
+        archived: bool = False,
+    ) -> bool:
         """Обновляет запись о вакансии: повтор увеличивает счётчик попыток.
 
         По ключу `(url, profile)` должна остаться одна запись. Поэтому вакансия
         удаляется из всех дневных файлов, а обновлённая запись попадает в отчёт
         сегодняшней даты. `count_attempt=False` — правка статуса без обработки
-        вакансии: счётчик попыток не растёт.
+        вакансии: счётчик попыток не растёт. Вызывается только под блокировкой.
         """
         now = _now()
         if channel in ("habr", "external"):
@@ -316,6 +380,8 @@ class ProcessedStore:
         item["status"] = status
         if count_attempt:
             item["attempts"] = int(item.get("attempts", 1)) + 1
+            if self.run_id:
+                item["run_id"] = self.run_id
         item["updated_at"] = now
         if channel:
             item["channel"] = channel
@@ -508,11 +574,8 @@ def _write(path: Path, items: list[dict[str, Any]]) -> None:
         "summary": _summary(normalized),
         "vacancies": normalized,
     }
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
     try:
-        tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        tmp_path.replace(path)
+        write_report_file(path, payload)
     except OSError as exc:
         raise ProcessedError(f"Не удалось сохранить {path}: {exc}") from exc
 

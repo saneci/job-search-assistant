@@ -1,4 +1,4 @@
-"""Логирование запуска: JSON Lines, один файл на дату в каталоге logs."""
+"""Логирование запуска: JSON Lines, один файл на дату в каталоге data/logs."""
 
 from __future__ import annotations
 
@@ -11,8 +11,14 @@ from typing import Any, Iterable, TextIO
 # Что чистим по сроку хранения: журналы событий и скриншоты проблемных состояний.
 LOG_FILE_PATTERNS = ("*.jsonl", "*.json", "*.png")
 
-# Дата в имени файла: 2026-10-21.jsonl, 2026-10-21-170519-captcha.png.
 _FILE_DATE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})")
+
+RUN_ID_FORMAT = "%Y%m%d%H%M%S"
+
+
+def new_run_id(now: datetime | None = None) -> str:
+    """Идентификатор запуска в едином формате агента и веб-интерфейса."""
+    return (now or datetime.now()).strftime(RUN_ID_FORMAT)
 
 
 def prune_logs(
@@ -62,7 +68,7 @@ def _log_file_date(path: Path) -> date | None:
 
 
 class RunLogger:
-    """Пишет события в logs/<дата>.jsonl и дублирует прогресс в консоль.
+    """Пишет события в data/logs/<дата>.jsonl и дублирует прогресс в консоль.
 
     Файл один на дату: перезапуски дописывают события в конец, поэтому в каждой
     записи есть ``run_id`` — по нему видно, к какому запуску относится событие.
@@ -72,7 +78,7 @@ class RunLogger:
         now = datetime.now()
         self.logs_dir = logs_dir
         self.logs_dir.mkdir(parents=True, exist_ok=True)
-        self.run_id = run_id or now.strftime("%Y-%m-%d-%H%M%S")
+        self.run_id = run_id or new_run_id(now)
         self.day = now.strftime("%Y-%m-%d")
         self.events_path = self.logs_dir / f"{self.day}.jsonl"
         self._file: TextIO = self.events_path.open("a", encoding="utf-8")
