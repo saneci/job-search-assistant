@@ -52,13 +52,24 @@ class FakeElement:
 
 
 class FakeScope:
-    """Заглушка Locator/Page, отдающая элементы по CSS-селектору."""
+    """Заглушка Locator/Page, отдающая элементы по CSS-селектору и по роли."""
 
-    def __init__(self, mapping: dict[str, list[FakeElement]]) -> None:
+    def __init__(
+        self,
+        mapping: dict[str, list[FakeElement]],
+        roles: dict[str, list[FakeElement]] | None = None,
+    ) -> None:
         self._mapping = mapping
+        self._roles = roles or {}
 
     def locator(self, selector: str) -> "FakeList":
         return FakeList(self._mapping.get(selector, []))
+
+    def get_by_role(self, role: str, name: Any = None) -> "FakeList":
+        elements = self._roles.get(role, [])
+        if name is not None and hasattr(name, "search"):
+            elements = [item for item in elements if name.search(item.inner_text())]
+        return FakeList(elements)
 
 
 class FakeList:
@@ -82,6 +93,20 @@ def test_detects_test_screen_by_button() -> None:
     scope = FakeScope({"button": [FakeElement("Пройти тест")]})
 
     assert detect_response_blocker(scope) == "test"  # type: ignore[arg-type]
+
+
+def test_detects_test_screen_by_link() -> None:
+    """Кнопка теста у hh.ru бывает ссылкой Bloko: роль ссылки тоже признак."""
+    scope = FakeScope({}, roles={"link": [FakeElement("Пройти тест")]})
+
+    assert detect_response_blocker(scope) == "test"  # type: ignore[arg-type]
+
+
+def test_does_not_treat_plain_link_as_test() -> None:
+    """Обычная ссылка формы тестом не считается."""
+    scope = FakeScope({}, roles={"link": [FakeElement("Сопроводительное письмо")]})
+
+    assert detect_response_blocker(scope) is None  # type: ignore[arg-type]
 
 
 def test_detects_questionnaire() -> None:
@@ -438,6 +463,20 @@ def test_response_notice_skips_hidden_resume_warning_when_form_ready() -> None:
         "«Видно всем работодателям, зарегистрированным на hh.ru»"
     )
     page = FakeNoticePage(FakeNoticeModal({"p": [FakeElement(notice)]}))
+
+    assert response_notice(page, include_hidden_warning=False) == ""  # type: ignore[arg-type]
+    assert response_notice(page) == notice  # type: ignore[arg-type]
+
+
+def test_response_notice_skips_visibility_hint_in_explicit_block() -> None:
+    """Подсказка о видимости в явном блоке notice при готовой форме — не причина."""
+    notice = (
+        "Чтобы откликнуться на эту вакансию, поменяйте видимость резюме на "
+        "«Видно всем работодателям, зарегистрированным на hh.ru»"
+    )
+    page = FakeNoticePage(
+        FakeNoticeModal({"[data-qa='vacancy-response-popup-form-notice']": [FakeElement(notice)]})
+    )
 
     assert response_notice(page, include_hidden_warning=False) == ""  # type: ignore[arg-type]
     assert response_notice(page) == notice  # type: ignore[arg-type]

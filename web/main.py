@@ -21,6 +21,10 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
+from agent.config import DEFAULT_LOGS_DIR
+from agent.logging_setup import new_run_id
+from agent.report_io import report_lock, write_report_file
+
 from .metrics import (
     CHANNEL_LABELS,
     build_metrics,
@@ -31,10 +35,10 @@ from .metrics import (
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 REPORTS_DIR = PROJECT_ROOT / "data" / "report"
+LOGS_DIR = DEFAULT_LOGS_DIR
+WEB_RUN_ID = new_run_id()
 TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
-
-# Статусы записи: те же, что в отчёте агента (agent/models.py STATUSES).
 STATUSES = (
     "sent",
     "skipped",
@@ -45,33 +49,19 @@ STATUSES = (
     "rejected",
     "offer",
 )
-
-# Записи Habr и внешней формы идут без резюме: в фильтре это отдельный пункт
-# с названием канала.
 NO_PROFILE_LABEL = "без резюме"
-
-# Исход отклика человек ставит вручную: причина всегда одна и та же, попытки
-# отклика не пересчитываем (agent/models.py).
 STATUS_SENT = "sent"
 STATUS_INVITE = "invite"
-# Архив — не статус записи, а признак: в отчёт он пишется полем `archived`.
 STATUS_ARCHIVED = "archived"
 STATUS_REJECTED = "rejected"
 STATUS_OFFER = "offer"
 REJECTED_REASON = "По отклику пришёл отказ"
 OFFER_REASON = "По отклику пришёл оффер"
-# Ручной перевод в «Отправлено»: письма LLM у веб-интерфейса нет, поэтому
-# причина та же, что у уже отправленного ранее отклика.
 SENT_REASON = "отклик уже отправлен"
-# Причина архивной записи: у всех записей с `archived: true` она одна.
 ARCHIVE_REASON = (
     "Вакансия в архиве, работодатель, больше не принимает отклики на эту вакансию"
 )
-
-# Исход отклика — терминальная операция: после него статус не меняется.
 TERMINAL_STATUSES = (STATUS_REJECTED, STATUS_OFFER)
-
-# Периоды воронки: считаются по календарю относительно последней даты в данных.
 PERIODS = ("year", "quarter", "month", "week", "day")
 PERIOD_LABELS = {
     "year": "Год",
@@ -141,7 +131,6 @@ class StatusUpdate(BaseModel):
 
     report_name: str
     url: str
-    # None — старый клиент: профиль не передан, ищем запись по URL.
     profile: str | None = None
     status: str
 
@@ -193,13 +182,13 @@ def read_report(path: Path) -> dict[str, Any]:
 
 
 def write_report(path: Path, data: dict[str, Any]) -> None:
-    """Сохраняет файл дня, обновляя шапку: время и итоги по статусам."""
+    """Сохраняет файл дня, обновляя шапку: время и итоги по статусам.
+
+    Агент может писать тот же файл в это же время, поэтому запись атомарная.
+    """
     data["updated_at"] = now()
     data["summary"] = summarize(data["vacancies"])
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    with tmp_path.open("w", encoding="utf-8") as file:
-        json.dump(data, file, ensure_ascii=False, indent=2)
-    tmp_path.replace(path)
+    write_report_file(path, data)
 
 
 def summarize(vacancies: list[dict[str, Any]]) -> dict[str, int]:
@@ -506,6 +495,39 @@ def now() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
 
 
+def log_status_update(
+    *,
+    report_name: str,
+    url: str,
+    old_status: str,
+    new_status: str,
+    archived: bool,
+) -> None:
+    """Дублирует ручную правку статуса в технический журнал агента.
+
+    Формат события общий с `agent/logging_setup.py`, а `run_id` один на запуск
+    веб-приложения: по типу `ui_status_update` видно, что статус менял человек.
+    Ошибки записи не мешают правке статуса.
+    """
+    event = {
+        "ts": now(),
+        "run_id": WEB_RUN_ID,
+        "event": "ui_status_update",
+        "report": report_name,
+        "url": url,
+        "old_status": old_status,
+        "new_status": new_status,
+        "archived": bool(archived),
+    }
+    try:
+        LOGS_DIR.mkdir(parents=True, exist_ok=True)
+        path = LOGS_DIR / f"{date.today().isoformat()}.jsonl"
+        with path.open("a", encoding="utf-8") as file:
+            file.write(json.dumps(event, ensure_ascii=False) + "\n")
+    except OSError:
+        return
+
+
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request) -> HTMLResponse:
     """Главная страница: переход к воронке и отчёту, живые итоги."""
@@ -618,100 +640,95 @@ async def update_status(update: StatusUpdate) -> dict[str, Any]:
     if update.status not in STATUSES and update.status != STATUS_ARCHIVED:
         raise HTTPException(status_code=422, detail=f"Неизвестный статус: {update.status}")
     report_path(update.report_name)
-    vacancy = find_vacancy(update.url, update.profile)
-    if vacancy is None:
-        raise HTTPException(status_code=404, detail="Вакансия не найдена в отчётах")
-    vacancy = dict(vacancy)
+    with report_lock(REPORTS_DIR):
+        vacancy = find_vacancy(update.url, update.profile)
+        if vacancy is None:
+            raise HTTPException(status_code=404, detail="Вакансия не найдена в отчётах")
+        vacancy = dict(vacancy)
 
-    current_status = str(vacancy.get("status", ""))
-    # «В архиве» терминальный: запись закрыта, вернуть её в работу нельзя.
-    if vacancy.get("archived"):
-        raise HTTPException(
-            status_code=409,
-            detail="Статус «В архиве» терминальный: изменить его нельзя",
-        )
-    # Отказ и оффер терминальны: из них можно только пометить архив.
-    if current_status in TERMINAL_STATUSES and update.status != STATUS_ARCHIVED:
-        label = "Отказ" if current_status == STATUS_REJECTED else "Оффер"
-        raise HTTPException(
-            status_code=409,
-            detail=f"Статус «{label}» терминальный: изменить его нельзя",
-        )
-    if update.status == STATUS_INVITE and current_status != STATUS_SENT:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                "Приглашение можно поставить только после статуса «Отправлено» "
-                f"(сейчас: {current_status or 'нет статуса'})"
-            ),
-        )
-    if update.status == STATUS_OFFER and current_status not in (STATUS_SENT, STATUS_INVITE):
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                "Оффер можно поставить только после статуса «Отправлено» или «Приглашение» "
-                f"(сейчас: {current_status or 'нет статуса'})"
-            ),
-        )
-
-    changed_at = now()
-    # Дата создания не меняется при смене статуса и переносе между отчётами.
-    vacancy["created_at"] = str(
-        vacancy.get("created_at") or vacancy.get("updated_at") or changed_at
-    )
-    # У Habr и внешней формы резюме нет: не возвращаем пустое поле в отчёт.
-    if str(vacancy.get("channel", "")) in ("habr", "external"):
-        vacancy.pop("profile", None)
-    else:
-        vacancy["profile"] = str(vacancy.get("profile") or "")
-    vacancy["updated_at"] = changed_at
-    if update.status == STATUS_ARCHIVED:
-        # Архив — признак, а не статус: прежний статус остаётся, поэтому метрики
-        # и сводка не меняются, а попытка не расходуется. Причина у архивной
-        # записи всегда одна и та же.
-        vacancy["archived"] = True
-        vacancy["reason"] = ARCHIVE_REASON
-    else:
-        # Обычный статус снимает архив: запись возвращается в работу.
-        vacancy.pop("archived", None)
-        vacancy["status"] = update.status
-        if update.status == STATUS_INVITE:
-            # Момент приглашения фиксируется один раз: по нему метрики считают
-            # «дошло до приглашения» и после перехода в оффер или отказ.
-            vacancy["invited_at"] = str(vacancy.get("invited_at") or changed_at)
-        if update.status in TERMINAL_STATUSES:
-            vacancy["reason"] = (
-                REJECTED_REASON if update.status == STATUS_REJECTED else OFFER_REASON
+        current_status = str(vacancy.get("status", ""))
+        if vacancy.get("archived"):
+            raise HTTPException(
+                status_code=409,
+                detail="Статус «В архиве» терминальный: изменить его нельзя",
             )
+        if current_status in TERMINAL_STATUSES and update.status != STATUS_ARCHIVED:
+            label = "Отказ" if current_status == STATUS_REJECTED else "Оффер"
+            raise HTTPException(
+                status_code=409,
+                detail=f"Статус «{label}» терминальный: изменить его нельзя",
+            )
+        if update.status == STATUS_INVITE and current_status != STATUS_SENT:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Приглашение можно поставить только после статуса «Отправлено» "
+                    f"(сейчас: {current_status or 'нет статуса'})"
+                ),
+            )
+        if update.status == STATUS_OFFER and current_status not in (STATUS_SENT, STATUS_INVITE):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Оффер можно поставить только после статуса «Отправлено» или «Приглашение» "
+                    f"(сейчас: {current_status or 'нет статуса'})"
+                ),
+            )
+
+        changed_at = now()
+        vacancy["created_at"] = str(
+            vacancy.get("created_at") or vacancy.get("updated_at") or changed_at
+        )
+        if str(vacancy.get("channel", "")) in ("habr", "external"):
+            vacancy.pop("profile", None)
         else:
-            if update.status == STATUS_SENT and current_status != STATUS_SENT:
-                # Ручной перевод в «Отправлено»: письма LLM нет, поэтому
-                # причина не остаётся от прежнего статуса. Уже отправленный
-                # отклик сохраняет причину, записанную агентом.
-                vacancy["reason"] = SENT_REASON
-            vacancy["attempts"] = int(vacancy.get("attempts", 0)) + 1
+            vacancy["profile"] = str(vacancy.get("profile") or "")
+        vacancy["updated_at"] = changed_at
+        if update.status == STATUS_ARCHIVED:
+            vacancy["archived"] = True
+            vacancy["reason"] = ARCHIVE_REASON
+        else:
+            vacancy.pop("archived", None)
+            vacancy["status"] = update.status
+            if update.status == STATUS_INVITE:
+                vacancy["invited_at"] = str(vacancy.get("invited_at") or changed_at)
+            if update.status in TERMINAL_STATUSES:
+                vacancy["reason"] = (
+                    REJECTED_REASON if update.status == STATUS_REJECTED else OFFER_REASON
+                )
+            else:
+                if update.status == STATUS_SENT and current_status != STATUS_SENT:
+                    vacancy["reason"] = SENT_REASON
+                vacancy["attempts"] = int(vacancy.get("attempts", 0)) + 1
 
-    for path in report_files():
-        data = read_report(path)
-        wanted = None if update.profile is None else profile_value(update.profile)
-        rows = [
-            row
-            for row in data["vacancies"]
-            if not isinstance(row, dict)
-            or str(row.get("url", "")) != update.url
-            or (wanted is not None and profile_key(row) != wanted)
-        ]
-        if len(rows) != len(data["vacancies"]):
-            data["vacancies"] = rows
-            write_report(path, data)
+        for path in report_files():
+            data = read_report(path)
+            wanted = None if update.profile is None else profile_value(update.profile)
+            rows = [
+                row
+                for row in data["vacancies"]
+                if not isinstance(row, dict)
+                or str(row.get("url", "")) != update.url
+                or (wanted is not None and profile_key(row) != wanted)
+            ]
+            if len(rows) != len(data["vacancies"]):
+                data["vacancies"] = rows
+                write_report(path, data)
 
-    today = current_report_path()
-    if today.exists():
-        data = read_report(today)
-    else:
-        data = {"date": today.stem, "updated_at": now(), "summary": summarize([]), "vacancies": []}
-    data["vacancies"].append(vacancy)
-    write_report(today, data)
+        today = current_report_path()
+        if today.exists():
+            data = read_report(today)
+        else:
+            data = {"date": today.stem, "updated_at": now(), "summary": summarize([]), "vacancies": []}
+        data["vacancies"].append(vacancy)
+        write_report(today, data)
+    log_status_update(
+        report_name=update.report_name,
+        url=update.url,
+        old_status=current_status,
+        new_status=update.status,
+        archived=update.status == STATUS_ARCHIVED,
+    )
 
     summary = summarize(dedupe_vacancies(all_vacancies(report_files())))
     return {

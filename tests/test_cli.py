@@ -13,7 +13,6 @@ from agent.cli import (
     RETRY_ALL,
     RETRY_CHOICES,
     RETRY_STATUS_HELP,
-    _notify_test,
     build_parser,
     CliUsageError,
     excluded_help,
@@ -22,6 +21,7 @@ from agent.cli import (
     help_requested,
     help_topic,
     main,
+    notify_test,
     retry_help,
     retry_help_requested,
 )
@@ -31,7 +31,7 @@ from agent.logging_setup import RunLogger
 
 GENERAL_HELP_TEXT = """Персональный ассистент для поиска работы, который отсеивает нерелевантное и оставляет только то, что стоит вашего внимания
 
-Опции:
+Options:
   -h, --help                  показать справку и выйти
   --install-browser           установить Chromium для Playwright (не нужен при browser.channel)
   --login                     открыть браузер, войти на сайт выбранного канала и сохранить сессию
@@ -493,7 +493,7 @@ def test_notify_test_sends_to_each_enabled_kind(tmp_path: Path, monkeypatch, cap
 
     monkeypatch.setattr("agent.cli.send_test_notification", fake_send)
 
-    assert _notify_test(config, logger) == 0
+    assert notify_test(config, logger) == 0
     logger.close()
 
     assert sent_to == ["report@example.com", "captcha@example.com"]
@@ -513,7 +513,7 @@ def test_notify_test_dedupes_same_address(tmp_path: Path, monkeypatch) -> None:
 
     monkeypatch.setattr("agent.cli.send_test_notification", fake_send)
 
-    assert _notify_test(config, logger) == 0
+    assert notify_test(config, logger) == 0
     logger.close()
 
     assert sent_to == ["to@example.com"]
@@ -527,7 +527,7 @@ def test_notify_test_reports_failure(tmp_path: Path, monkeypatch, capsys) -> Non
         lambda channel, recipient: (False, "не удалось отправить email: timeout"),
     )
 
-    assert _notify_test(config, logger) == 1
+    assert notify_test(config, logger) == 1
     logger.close()
 
     assert "timeout" in capsys.readouterr().err
@@ -550,7 +550,7 @@ def test_notify_test_with_all_kinds_disabled(tmp_path: Path, capsys) -> None:
     config = make_config(tmp_path, notifications)
     logger = RunLogger(tmp_path / "logs", run_id="notify")
 
-    assert _notify_test(config, logger) == 1
+    assert notify_test(config, logger) == 1
     logger.close()
 
     assert "уведомления отключены" in capsys.readouterr().err

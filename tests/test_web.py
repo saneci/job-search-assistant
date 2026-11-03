@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -10,7 +11,14 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
+from agent.config import DEFAULT_LOGS_DIR
 import web.main as web_main
+
+
+@pytest.fixture(autouse=True)
+def isolate_logs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Правка статуса пишет событие в журнал: в тестах — во временный каталог."""
+    monkeypatch.setattr(web_main, "LOGS_DIR", tmp_path / "logs")
 
 
 def write_report(directory: Path, name: str, vacancies: list[dict[str, Any]]) -> None:
@@ -1021,3 +1029,46 @@ def test_update_status_from_archive_is_rejected(
     ][0]
     assert row["status"] == "skipped"
     assert row["archived"] is True
+
+
+def test_update_status_writes_ui_event_to_journal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ручная правка статуса попадает в jsonl-журнал агента."""
+    monkeypatch.setattr(web_main, "REPORTS_DIR", tmp_path)
+    today = tmp_path / "today.json"
+    monkeypatch.setattr(web_main, "current_report_path", lambda: today)
+    write_report(tmp_path, "2026-10-24.json", [vacancy("1", "sent")])
+    client = TestClient(web_main.app)
+
+    response = client.post(
+        "/api/v1/update-status",
+        json={
+            "report_name": "2026-10-24.json",
+            "url": "https://hh.ru/vacancy/1",
+            "status": "rejected",
+        },
+    )
+
+    assert response.status_code == 200
+    journal = web_main.LOGS_DIR / f"{date.today().isoformat()}.jsonl"
+    events = [
+        json.loads(line) for line in journal.read_text(encoding="utf-8").splitlines()
+    ]
+    assert events[-1]["event"] == "ui_status_update"
+    assert events[-1]["run_id"] == web_main.WEB_RUN_ID
+    assert re.fullmatch(r"\d{14}", events[-1]["run_id"])
+    assert events[-1]["url"] == "https://hh.ru/vacancy/1"
+    assert events[-1]["old_status"] == "sent"
+    assert events[-1]["new_status"] == "rejected"
+    assert "profile" not in events[-1]
+    assert "company" not in events[-1]
+
+
+def test_web_journal_is_written_to_project_logs_dir(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Журнал правок лежит в data/logs: там же журналы агента и чистка по сроку."""
+    monkeypatch.undo()
+    assert web_main.LOGS_DIR == web_main.PROJECT_ROOT / "data" / "logs"
+    assert web_main.LOGS_DIR == DEFAULT_LOGS_DIR

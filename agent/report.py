@@ -16,22 +16,25 @@ from .models import RunError, SentVacancy, SkippedVacancy
 
 @dataclass
 class RunStats:
-    """Итоги одного запуска."""
+    """Итоги одного запуска.
+
+    `report_sent` — отклики в файле дня на момент завершения запуска: в нём есть
+    и отклики прошлых запусков этого дня, поэтому значение отличается от `sent`.
+    """
 
     started_at: datetime
     finished_at: datetime | None = None
     sent: list[SentVacancy] = field(default_factory=list)
     skipped: list[SkippedVacancy] = field(default_factory=list)
     excluded: list[SkippedVacancy] = field(default_factory=list)
-    # Отказы работодателей по уже отправленным откликам (статус rejected).
     rejected: list[SkippedVacancy] = field(default_factory=list)
-    # Вакансии, где отклик уже отправлен (статус sent в файле дня): лимит
-    # запуска они не расходуют, поэтому лежат отдельно от `sent`.
     already_sent: list[SkippedVacancy] = field(default_factory=list)
     queued: list[dict[str, Any]] = field(default_factory=list)
     errors: list[RunError] = field(default_factory=list)
     stop_reason: str = ""
     reviewed: int = 0
+    run_id: str = ""
+    report_sent: int | None = None
 
     @property
     def sent_count(self) -> int:
@@ -51,9 +54,11 @@ def build_report(stats: RunStats, report_path: Path | None = None) -> str:
         f"Отчёт за {stats.started_at.strftime('%Y-%m-%d %H:%M')}",
         separator,
         f"- Обработано вакансий: {stats.reviewed}",
-        f"- Отправлено откликов: {len(stats.sent)}",
-        f"- Пропущено (не подошло): {len(stats.skipped)}",
+        f"- Отправлено откликов за запуск: {len(stats.sent)}",
     ]
+    if stats.report_sent is not None:
+        lines.append(f"- Отправлено откликов за день: {stats.report_sent}")
+    lines.append(f"- Пропущено (не подошло): {len(stats.skipped)}")
     if stats.excluded:
         lines.append(f"- Исключённые вакансии: {len(stats.excluded)}")
     if stats.rejected:
@@ -64,6 +69,8 @@ def build_report(stats: RunStats, report_path: Path | None = None) -> str:
     if stats.stop_reason:
         lines.append(f"- Причина остановки: {stats.stop_reason}")
     lines.append(f"- Длительность: {_duration(stats.started_at, finished)}")
+    if stats.run_id:
+        lines.append(f"- Идентификатор запуска: {stats.run_id}")
 
     if not stats.sent:
         lines.append("")
@@ -122,7 +129,6 @@ def send_email(
                 server.login(config.username, password)
             server.send_message(message)
     except smtplib.SMTPServerDisconnected as exc:
-        # Частый случай: провайдер принимает соединение, но рвёт его на AUTH.
         return False, (
             f"SMTP-сервер закрыл соединение ({exc}). Обычно это блокировка входа "
             "по SMTP у провайдера: попробуйте другой smtp_host (например, smtp.yandex.ru) "

@@ -42,7 +42,6 @@ from agent.pipeline import (
     _counters,
     _final_message,
     _generation_reason_text,
-    _last_letter_sentence,
     _letter_has_project_link,
     _notify_captcha,
     _notify_captcha_stop,
@@ -1140,7 +1139,7 @@ def test_outcome_reason_takes_already_responded_reason() -> None:
 
 
 def test_outcome_reason_takes_sent_letter_reason() -> None:
-    """У настоящего отклика причина — последнее предложение письма LLM."""
+    """У настоящего отклика причина — вердикт Generation, записанный в sent."""
     stats = RunStats(started_at=datetime(2026, 10, 21, 9, 0))
     sentence = (
         "Практического опыта с gRPC, GraphQL и Redis в профиле нет, "
@@ -1157,29 +1156,6 @@ def test_outcome_reason_takes_sent_letter_reason() -> None:
     )
 
     assert _outcome_reason(stats, (0, 0, 0, 0, 0, 0, 0), OUTCOME_SENT) == sentence
-
-
-def test_last_letter_sentence_skips_signature() -> None:
-    """В причину sent идёт последнее предложение письма, а не подпись."""
-    sentence = (
-        "Практического опыта с gRPC, GraphQL и Redis в профиле нет, "
-        "но это не перекрывает основной релевантный опыт."
-    )
-    signature = "С уважением,\nАлександр Гладской\nТелеграм: @saneci\nПочта: a@b.ru"
-    letter = f"Здравствуйте! Готов обсудить вакансию. {sentence}\n\n{signature}"
-
-    assert _last_letter_sentence(letter, signature) == sentence
-
-
-def test_last_letter_sentence_drops_signature_added_by_model() -> None:
-    """Если модель добавила подпись сама, строки контактов в причину не попадают."""
-    sentence = "Готов обсудить задачи и сроки на созвоне."
-    letter = (
-        f"Здравствуйте! {sentence}\n\nС уважением,\nАлександр\n"
-        "Телеграм: @saneci\nПочта: a@b.ru"
-    )
-
-    assert _last_letter_sentence(letter) == sentence
 
 
 def test_remember_card_already_responded_keeps_sent_record(tmp_path: Path) -> None:
@@ -1936,8 +1912,8 @@ def test_pause_happens_before_response(tmp_path: Path, monkeypatch) -> None:
     assert order == ["перед отправкой отклика", "respond", "после отправки отклика"]
 
 
-def test_sent_vacancy_reason_is_last_letter_sentence(tmp_path: Path, monkeypatch) -> None:
-    """В причине sent — последнее предложение письма, а не общий вердикт."""
+def test_sent_vacancy_reason_is_generation_verdict(tmp_path: Path, monkeypatch) -> None:
+    """В причине sent — вердикт Generation, а не последнее предложение письма."""
     config = make_config(tmp_path)
     details = VacancyDetails(
         url="https://hh.ru/vacancy/138836233",
@@ -1962,11 +1938,14 @@ def test_sent_vacancy_reason_is_last_letter_sentence(tmp_path: Path, monkeypatch
             del profile, vacancy, max_length, signature
             return GenerationResult(
                 verdict="подходит",
-                reason="ok",
+                reason=(
+                    "Профиль хорошо совпадает с задачами backend-автоматизации "
+                    "на Java, не указан опыт автоматизации интерфейсов - это "
+                    "направление потребуется освоить"
+                ),
                 cover_letter=(
                     "Здравствуйте! Готов обсудить вакансию. "
-                    "Практического опыта с gRPC в профиле нет, "
-                    "но это не перекрывает основной релевантный опыт."
+                    "Буду рад обсудить, как мой опыт будет полезен команде."
                 ),
             )
 
@@ -1992,8 +1971,9 @@ def test_sent_vacancy_reason_is_last_letter_sentence(tmp_path: Path, monkeypatch
     logger.close()
 
     assert stats.sent[0].reason == (
-        "Практического опыта с gRPC в профиле нет, "
-        "но это не перекрывает основной релевантный опыт."
+        "Профиль хорошо совпадает с задачами backend-автоматизации "
+        "на Java, не указан опыт автоматизации интерфейсов - это "
+        "направление потребуется освоить"
     )
 
 
@@ -2418,3 +2398,233 @@ def test_resume_not_found_is_logged_and_stops_run(tmp_path: Path, monkeypatch) -
     found = [item for item in events if item["event"] == "resume_not_found"]
     assert found[0]["resume"] == "Team Lead"
     assert found[0]["url"] == details.url
+
+
+def test_retry_uses_resume_from_config(tmp_path: Path, monkeypatch) -> None:
+    """Повтор обрабатывает запись другого резюме резюме из конфига запуска."""
+    config = with_resume(make_config(tmp_path), "Java Developer")
+    store = ProcessedStore(tmp_path / "report", today=date.today())
+    store.record(
+        url="https://hh.ru/vacancy/1",
+        title="Java-разработчик",
+        company="Ozon",
+        status="queued",
+        profile="Разработчик программного обеспечения",
+    )
+    logger = RunLogger(tmp_path / "logs", run_id="retry-profile")
+    stats = make_stats()
+    profiles: list[str] = []
+
+    def fake_process(page, config, profile, llm, stats, logger, card) -> None:
+        profiles.append(config.pipeline.resume.name)
+
+    monkeypatch.setattr("agent.pipeline._process_vacancy", fake_process)
+
+    _retry_vacancies(
+        _FakePage("https://hh.ru/vacancy/1"),
+        config,
+        Profile(text="Java", examples="", style_rules=""),
+        None,  # type: ignore[arg-type]
+        stats,
+        logger,
+        store,
+        ("queued",),
+    )
+    logger.close()
+
+    assert profiles == ["Java Developer"]
+
+
+def test_retry_skips_other_resume_when_current_already_processed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Обработанную своим резюме вакансию повтор не открывает второй раз."""
+    config = with_resume(make_config(tmp_path), "Java Developer")
+    store = ProcessedStore(tmp_path / "report", today=date.today())
+    store.record(
+        url="https://hh.ru/vacancy/1",
+        title="Java-разработчик",
+        company="Ozon",
+        status="queued",
+        profile="Разработчик программного обеспечения",
+    )
+    store.record(
+        url="https://hh.ru/vacancy/1",
+        title="Java-разработчик",
+        company="Ozon",
+        status="sent",
+        profile="Java Developer",
+    )
+    logger = RunLogger(tmp_path / "logs", run_id="retry-profile")
+    stats = make_stats()
+    visited: list[str] = []
+
+    def fake_process(page, config, profile, llm, stats, logger, card) -> None:
+        visited.append(card.url)
+
+    monkeypatch.setattr("agent.pipeline._process_vacancy", fake_process)
+
+    _retry_vacancies(
+        _FakePage("https://hh.ru/vacancy/1"),
+        config,
+        Profile(text="Java", examples="", style_rules=""),
+        None,  # type: ignore[arg-type]
+        stats,
+        logger,
+        store,
+        ("queued",),
+    )
+    logger.close()
+
+    assert visited == []
+    events = [
+        json.loads(line) for line in logger.events_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert [item["event"] for item in events].count("retry_profile_mismatch") == 1
+
+
+def test_interrupted_vacancy_is_saved_to_report(tmp_path: Path, monkeypatch) -> None:
+    """Остановка во время обработки не теряет вакансию: запись и лог остаются."""
+    config = with_resume(make_config(tmp_path), "Java Developer")
+    store = ProcessedStore(tmp_path / "report", today=date.today(), run_id="run-interrupted")
+    logger = RunLogger(tmp_path / "logs", run_id="run-interrupted")
+    stats = make_stats()
+    card = VacancyCard(
+        title="Senior Java Developer",
+        company="ООО Компания",
+        url="https://hh.ru/vacancy/139090751",
+    )
+
+    def fake_process(page, config, profile, llm, stats, logger, card) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("agent.pipeline._process_vacancy", fake_process)
+
+    with pytest.raises(KeyboardInterrupt):
+        _process_and_remember(
+            _FakePage(card.url),
+            config,
+            Profile(text="Java", examples="", style_rules=""),
+            None,  # type: ignore[arg-type]
+            stats,
+            logger,
+            store,
+            card,
+        )
+    logger.close()
+
+    row = store.find_record(card.title, card.company, card.url, "Java Developer")
+    assert row is not None
+    assert row["status"] == "queued"
+    assert row["reason"] == QUEUE_REASON_TEXTS["interrupted"]
+    assert row["run_id"] == "run-interrupted"
+    assert len(stats.queued) == 1
+    events = [
+        json.loads(line) for line in logger.events_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert [item.get("code") for item in events if item["event"] == "queued"] == ["interrupted"]
+
+
+def test_retry_counts_only_records_of_run_channel(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """Повтор считает только записи своего канала: чужие вакансии не попадают в счёт."""
+    config = with_resume(make_config(tmp_path), "Java Developer")
+    store = ProcessedStore(tmp_path / "report", today=date.today())
+    store.record(
+        url="https://hh.ru/vacancy/1",
+        title="Java-разработчик",
+        company="Ozon",
+        status="queued",
+        profile="Java Developer",
+    )
+    store.record(
+        url="https://career.habr.com/vacancies/1000164183",
+        title="Java-разработчик",
+        company="ЛАНИТ",
+        status="queued",
+        channel="habr",
+    )
+    logger = RunLogger(tmp_path / "logs", run_id="retry-channel")
+    stats = make_stats()
+    visited: list[str] = []
+
+    def fake_process(page, config, profile, llm, stats, logger, card) -> None:
+        visited.append(card.url)
+
+    monkeypatch.setattr("agent.pipeline._process_vacancy", fake_process)
+
+    _retry_vacancies(
+        _FakePage("https://hh.ru/vacancy/1"),
+        config,
+        Profile(text="Java", examples="", style_rules=""),
+        None,  # type: ignore[arg-type]
+        stats,
+        logger,
+        store,
+        ("queued",),
+    )
+    logger.close()
+    console = capsys.readouterr().out
+
+    events = [
+        json.loads(line) for line in logger.events_path.read_text(encoding="utf-8").splitlines()
+    ]
+    selected = [item for item in events if item["event"] == "retry_selected"]
+    mismatched = [item for item in events if item["event"] == "retry_channel_mismatch"]
+
+    assert visited == ["https://hh.ru/vacancy/1"]
+    assert stats.reviewed == 1
+    assert selected[0]["count"] == 1
+    assert selected[0]["channel"] == "hh"
+    assert mismatched[0]["count"] == 1
+    assert "другого канала" in mismatched[0]["message"]
+    assert "1 вакансия (queued)" in console
+
+
+def test_retry_profile_mismatch_has_message(tmp_path: Path, monkeypatch) -> None:
+    """Событие пропуска по другому резюме объясняет причину в поле message."""
+    config = with_resume(make_config(tmp_path), "Java Developer")
+    store = ProcessedStore(tmp_path / "report", today=date.today())
+    store.record(
+        url="https://hh.ru/vacancy/1",
+        title="Java-разработчик",
+        company="Ozon",
+        status="queued",
+        profile="Разработчик программного обеспечения",
+    )
+    store.record(
+        url="https://hh.ru/vacancy/1",
+        title="Java-разработчик",
+        company="Ozon",
+        status="sent",
+        profile="Java Developer",
+    )
+    logger = RunLogger(tmp_path / "logs", run_id="retry-profile-message")
+    stats = make_stats()
+
+    monkeypatch.setattr(
+        "agent.pipeline._process_vacancy",
+        lambda page, config, profile, llm, stats, logger, card: None,
+    )
+
+    _retry_vacancies(
+        _FakePage("https://hh.ru/vacancy/1"),
+        config,
+        Profile(text="Java", examples="", style_rules=""),
+        None,  # type: ignore[arg-type]
+        stats,
+        logger,
+        store,
+        ("queued",),
+    )
+    logger.close()
+
+    events = [
+        json.loads(line) for line in logger.events_path.read_text(encoding="utf-8").splitlines()
+    ]
+    found = [item for item in events if item["event"] == "retry_profile_mismatch"]
+
+    assert found[0]["url"] == "https://hh.ru/vacancy/1"
+    assert "другим резюме" in found[0]["message"]
+
