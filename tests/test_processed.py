@@ -906,6 +906,77 @@ def test_mark_archived_keeps_status(tmp_path: Path) -> None:
     assert row["attempts"] == 1
 
 
+def test_record_always_has_questionary_block(tmp_path: Path) -> None:
+    """Блок `questionary` есть в записи всегда: без ответов это пустой список."""
+    store = ProcessedStore(tmp_path / "report", today=date(2026, 11, 4), run_id="run")
+
+    store.record(
+        url="https://hh.ru/vacancy/1",
+        title="Java-разработчик",
+        company="Ozon",
+        status="queued",
+    )
+
+    payload = json.loads(
+        (tmp_path / "report" / "2026-11-04.json").read_text(encoding="utf-8")
+    )
+    assert payload["vacancies"][0]["questionary"] == []
+
+
+def test_record_stores_questionary_block(tmp_path: Path) -> None:
+    """Ответы на анкету попадают в запись отчёта блоком `questionary`."""
+    store = ProcessedStore(tmp_path, today=date(2026, 11, 4), run_id="run-1")
+    store.record(
+        url="https://hh.ru/vacancy/1",
+        title="Java-разработчик",
+        company="Ozon",
+        status="sent",
+        reason="подходит",
+        profile="Java Developer",
+        questionary=[{"question": "Готовы к офису?", "answer": "Да"}],
+    )
+
+    payload = json.loads((tmp_path / "2026-11-04.json").read_text(encoding="utf-8"))
+    assert payload["vacancies"][0]["questionary"] == [
+        {"question": "Готовы к офису?", "answer": "Да"}
+    ]
+
+
+def test_record_stores_message_and_clears_it_on_new_outcome(tmp_path: Path) -> None:
+    """Полный текст причины хранится отдельно и снимается при новом исходе."""
+    store = ProcessedStore(tmp_path / "report", today=date(2026, 11, 4), run_id="run")
+    store.record(
+        url="https://hh.ru/vacancy/1",
+        title="Java-разработчик",
+        company="Ozon",
+        status="queued",
+        reason="Короткая причина",
+        message="Полный текст причины",
+    )
+
+    payload = json.loads(
+        (tmp_path / "report" / "2026-11-04.json").read_text(encoding="utf-8")
+    )
+    row = payload["vacancies"][0]
+    assert row["reason"] == "Короткая причина"
+    assert row["message"] == "Полный текст причины"
+
+    store.record(
+        url="https://hh.ru/vacancy/1",
+        title="Java-разработчик",
+        company="Ozon",
+        status="sent",
+        reason="Отклик отправлен",
+    )
+
+    payload = json.loads(
+        (tmp_path / "report" / "2026-11-04.json").read_text(encoding="utf-8")
+    )
+    row = payload["vacancies"][0]
+    assert row["status"] == "sent"
+    assert "message" not in row
+
+
 def test_record_writes_run_id(tmp_path: Path) -> None:
     """Запись отчёта помнит запуск, который обработал вакансию."""
     store = ProcessedStore(tmp_path, today=date(2026, 10, 21), run_id="2026-10-21-090000")

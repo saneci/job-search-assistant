@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
-# Запуск hh-agent: Git Bash (Windows), WSL, Linux, macOS.
+# Запуск агента поиска работы: Git Bash (Windows), WSL, Linux, macOS.
 # Аналог run.bat: создаёт .venv при первом запуске и передаёт аргументы в run.py.
 set -eu
 
@@ -44,6 +44,9 @@ if [ -z "$PYTHON" ]; then
 
     "$PYTHON" -m pip install --upgrade pip || exit 1
     "$PYTHON" -m pip install -r requirements.txt || exit 1
+    if [ -f requirements-web.txt ]; then
+        "$PYTHON" -m pip install -r requirements-web.txt || exit 1
+    fi
     "$PYTHON" run.py --install-browser || exit 1
 fi
 

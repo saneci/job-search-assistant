@@ -249,6 +249,31 @@ def test_report_page_counts_sent_status_as_otpravleno(client: TestClient) -> Non
     assert '<div class="label">Отклики</div>' not in response.text
 
 
+def test_report_page_has_site_nav_and_details_dialog(client: TestClient) -> None:
+    """В шапке есть навигация, а детали очереди открываются в модальном окне."""
+    response = client.get("/report")
+
+    assert response.status_code == 200
+    assert 'class="site-nav"' in response.text
+    assert 'aria-current="page"' in response.text
+    assert 'id="detailsDialog"' in response.text
+    assert 'id="detailsBody"' in response.text
+    assert "Основная информация" in response.text
+    assert "Подробности" in response.text
+    assert "Ответы на анкету" in response.text
+    assert "currentStatus === 'skipped'" in response.text
+
+
+def test_index_has_site_nav(client: TestClient) -> None:
+    """С главной страницы в отчёты можно перейти из шапки, а не только по карточке."""
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert 'class="site-nav"' in response.text
+    assert 'aria-current="page"' in response.text
+    assert 'href="/report"' in response.text
+
+
 def test_report_page_has_offer_status(client: TestClient) -> None:
     response = client.get("/report")
 
@@ -353,6 +378,65 @@ def test_update_status_preserves_profile(
     assert data["vacancies"][0]["profile"] == "Java Developer"
 
 
+def test_update_status_keeps_questionary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ручная смена статуса сохраняет ответы на анкету: их пишет только пайплайн."""
+    monkeypatch.setattr(web_main, "REPORTS_DIR", tmp_path)
+    today = tmp_path / "today.json"
+    monkeypatch.setattr(web_main, "current_report_path", lambda: today)
+    item = vacancy_with_dates(
+        "1", "sent", "2026-10-24T10:00:00+03:00", "2026-10-24T10:00:00+03:00"
+    )
+    answers = [{"question": "Готовы к офису?", "answer": "Да"}]
+    item["questionary"] = answers
+    write_report(tmp_path, "2026-10-24.json", [item])
+    client = TestClient(web_main.app)
+
+    response = client.post(
+        "/api/v1/update-status",
+        json={
+            "report_name": "2026-10-24.json",
+            "url": "https://hh.ru/vacancy/1",
+            "status": "invite",
+        },
+    )
+
+    assert response.status_code == 200
+    data = json.loads(today.read_text(encoding="utf-8"))
+    assert data["vacancies"][0]["questionary"] == answers
+
+
+def test_update_status_archived_clears_message(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Перевод в архив убирает полный текст причины вместе со старой причиной."""
+    monkeypatch.setattr(web_main, "REPORTS_DIR", tmp_path)
+    today = tmp_path / "today.json"
+    monkeypatch.setattr(web_main, "current_report_path", lambda: today)
+    item = vacancy_with_dates(
+        "1", "queued", "2026-10-24T10:00:00+03:00", "2026-10-24T10:00:00+03:00"
+    )
+    item["reason"] = "Короткая причина"
+    item["message"] = "Полный текст причины"
+    write_report(tmp_path, "2026-10-24.json", [item])
+    client = TestClient(web_main.app)
+
+    response = client.post(
+        "/api/v1/update-status",
+        json={
+            "report_name": "2026-10-24.json",
+            "url": "https://hh.ru/vacancy/1",
+            "status": "archived",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["message"] == ""
+    data = json.loads(today.read_text(encoding="utf-8"))
+    assert "message" not in data["vacancies"][0]
+
+
 def test_update_status_keeps_habr_without_profile(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -433,8 +517,8 @@ def test_offer_status_can_be_set_manually(client: TestClient) -> None:
     assert result["reason"] == "По отклику пришёл оффер"
 
 
-def test_sent_status_sets_reason(client: TestClient, tmp_path: Path) -> None:
-    """Ручной перевод в «Отправлено» не оставляет причину прежнего статуса."""
+def test_sent_status_keeps_previous_reason(client: TestClient, tmp_path: Path) -> None:
+    """Ручной перевод в «Отправлено» не затирает комментарий прежнего статуса."""
     path = tmp_path / "2026-10-24.json"
     payload = web_main.read_report(path)
     payload["vacancies"][3]["reason"] = "старая причина прежнего статуса"
@@ -450,11 +534,11 @@ def test_sent_status_sets_reason(client: TestClient, tmp_path: Path) -> None:
     )
 
     assert response.status_code == 200
-    assert response.json()["reason"] == "отклик уже отправлен"
+    assert response.json()["reason"] == "старая причина прежнего статуса"
     row = web_main.find_vacancy("https://hh.ru/vacancy/4", None)
     assert row is not None
     assert row["status"] == "sent"
-    assert row["reason"] == "отклик уже отправлен"
+    assert row["reason"] == "старая причина прежнего статуса"
 
 
 def test_sent_status_keeps_agent_reason(client: TestClient, tmp_path: Path) -> None:
@@ -475,6 +559,45 @@ def test_sent_status_keeps_agent_reason(client: TestClient, tmp_path: Path) -> N
 
     assert response.status_code == 200
     assert response.json()["reason"] == "последнее предложение письма"
+
+
+def test_rejected_requires_sent_status(client: TestClient) -> None:
+    """Отказ ставится только по отправленному отклику: у пропуска отклика не было."""
+    response = client.post(
+        "/api/v1/update-status",
+        json={
+            "report_name": "2026-10-24.json",
+            "url": "https://hh.ru/vacancy/4",
+            "status": "rejected",
+        },
+    )
+
+    assert response.status_code == 409
+    assert "только после" in response.json()["detail"]
+
+
+def test_rejected_cannot_be_set_from_invite(client: TestClient) -> None:
+    """Из «Приглашения» отказ не ставится: отказ фиксируется сразу по отклику."""
+    invite = client.post(
+        "/api/v1/update-status",
+        json={
+            "report_name": "2026-10-24.json",
+            "url": "https://hh.ru/vacancy/1",
+            "status": "invite",
+        },
+    )
+    rejected = client.post(
+        "/api/v1/update-status",
+        json={
+            "report_name": "2026-10-24.json",
+            "url": "https://hh.ru/vacancy/1",
+            "status": "rejected",
+        },
+    )
+
+    assert invite.status_code == 200
+    assert rejected.status_code == 409
+    assert "только после" in rejected.json()["detail"]
 
 
 def test_offer_requires_sent_status(client: TestClient) -> None:
@@ -804,6 +927,17 @@ def test_report_page_has_archived_filter_and_warning(client: TestClient) -> None
     assert "confirm: 'Зафиксировать архив'" in html
 
 
+def test_report_page_has_invite_status_filter(client: TestClient) -> None:
+    """«Приглашение» в фильтре статуса пользуется ключом записи `invite`, а не подписью пункта."""
+    response = client.get("/report")
+
+    assert response.status_code == 200
+    html = response.text
+    assert 'data-status="invite"' in html
+    assert 'data-status="invited"' not in html
+    assert "Приглашение" in html
+
+
 def test_archived_vacancy_shows_archive_reason(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -882,6 +1016,15 @@ def test_archive_status_is_terminal_in_menu(client: TestClient) -> None:
     assert "new Set(['rejected', 'offer', 'archived'])" in html
     # Архивная строка не открывает меню.
     assert "TERMINAL_STATUSES.has(baseStatus) || Boolean(v.archived)" in html
+
+
+def test_rejected_option_is_blocked_without_sent_status(client: TestClient) -> None:
+    """«Отказ» в меню недоступен, пока отклик не отправлен."""
+    response = client.get("/report")
+
+    assert response.status_code == 200
+    html = response.text
+    assert "key === 'rejected' && baseStatus !== 'sent'" in html
 
 
 def test_date_menu_collects_several_dates(client: TestClient) -> None:
@@ -1070,5 +1213,4 @@ def test_web_journal_is_written_to_project_logs_dir(
 ) -> None:
     """Журнал правок лежит в data/logs: там же журналы агента и чистка по сроку."""
     monkeypatch.undo()
-    assert web_main.LOGS_DIR == web_main.PROJECT_ROOT / "data" / "logs"
     assert web_main.LOGS_DIR == DEFAULT_LOGS_DIR

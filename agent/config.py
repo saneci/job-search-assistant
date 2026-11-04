@@ -2,8 +2,8 @@
 
 Схема описана pydantic-моделями: типы, диапазоны и обязательные поля проверяются
 при старте, а все ошибки собираются за один проход (`ConfigError` со списком).
-Раскладка `config.yaml` повторяет модели: `search`, `pipeline`, `data`, `llm`,
-`browser`, `notifications`. Источники по убыванию приоритета: аргументы,
+Раскладка `config.yaml` повторяет модели: `search`, `pipeline` (с префильтром), `data`,
+`llm`, `browser`, `notifications`. Источники по убыванию приоритета: аргументы,
 окружение, `.env`, `config.yaml` (структура, лежит в git) + `config.local.yaml`
 (личные данные, файл не в git), дефолты схемы.
 """
@@ -32,6 +32,7 @@ from pydantic import (
 from pydantic.fields import FieldInfo
 from pydantic_settings import BaseSettings, NoDecode, PydanticBaseSettingsSource, SettingsConfigDict
 from ruamel.yaml import YAML
+from platformdirs import user_data_path
 from ruamel.yaml.error import YAMLError
 
 from .models import RETRYABLE_STATUSES, STATUS_ERROR, STATUS_EXCLUDED, STATUS_QUEUED
@@ -44,21 +45,29 @@ except ImportError:  # pragma: no cover - зависимость есть в req
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
+# Личные данные живут в каталоге пользователя, а не в репозитории: обновление
+# проекта не затирает сессию, отчёты и профиль.
+APP_NAME = "job-search-assistant"
+# appauthor=False: platformdirs иначе на Windows удваивает имя приложения.
+DEFAULT_DATA_DIR = Path(user_data_path(APP_NAME, appauthor=False, ensure_exists=True))
+
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config.yaml"
 # Личные данные (адреса, подпись, название резюме, запросы) — в отдельном файле,
 # он в .gitignore: в репозитории остаётся только структура config.yaml.
 LOCAL_CONFIG_NAME = "config.local.yaml"
 DEFAULT_SYSTEM_PROMPT_PATH = PROJECT_ROOT / "SYSTEM_PROMPT.md"
 
-DEFAULT_PROFILE_PATH = PROJECT_ROOT / "data" / "profile.md"
+DEFAULT_PROFILE_PATH = DEFAULT_DATA_DIR / "profile.md"
 # Файлы сессии раздельные: cookie hh.ru и career.habr.com не мешают друг другу.
-DEFAULT_STATE_PATH = PROJECT_ROOT / "data" / "hh-state.json"
-DEFAULT_HABR_STATE_PATH = PROJECT_ROOT / "data" / "habr-state.json"
+DEFAULT_STATE_PATH = DEFAULT_DATA_DIR / "hh-state.json"
+DEFAULT_HABR_STATE_PATH = DEFAULT_DATA_DIR / "habr-state.json"
 # Постоянный профиль Chrome для habr: без него hCaptcha не отрисовывается.
-DEFAULT_HABR_PROFILE_PATH = PROJECT_ROOT / "data" / "habr-profile"
-DEFAULT_CACHE_PATH = PROJECT_ROOT / "data" / "cache.json"
-DEFAULT_LOGS_DIR = PROJECT_ROOT / "data" / "logs"
-DEFAULT_REPORT_DIR = PROJECT_ROOT / "data" / "report"
+DEFAULT_HABR_PROFILE_PATH = DEFAULT_DATA_DIR / "habr-profile"
+DEFAULT_CACHE_PATH = DEFAULT_DATA_DIR / "cache.json"
+DEFAULT_LOGS_DIR = DEFAULT_DATA_DIR / "logs"
+DEFAULT_REPORT_DIR = DEFAULT_DATA_DIR / "report"
+# Ответы на анкеты и тесты: файл на вакансию, локальные данные пользователя.
+DEFAULT_QUESTIONARY_DIR = DEFAULT_DATA_DIR / "report" / "questionary"
 
 DEFAULT_API_KEY_ENV = "AITUNNEL_API_KEY"
 DEFAULT_SMTP_USERNAME_ENV = "SMTP_USERNAME"
@@ -91,6 +100,13 @@ AREA_IDS: dict[str, int] = {
 
 EXPERIENCE_VALUES = frozenset({"noExperience", "between1And3", "between3And6", "moreThan6"})
 SCHEDULE_VALUES = frozenset({"fullDay", "shift", "flexible", "remote", "flyInFlyOut"})
+
+# Значения полей профиля для анкеты работодателя (pipeline.prefilter.answers).
+EDUCATION_VALUES = frozenset({"higher_tech", "higher_other", "none"})
+RELOCATION_VALUES = frozenset({"yes", "no", "remote_only"})
+WORK_FORMAT_VALUES = frozenset({"office", "hybrid", "remote", "any"})
+WORK_PERMIT_VALUES = frozenset({"citizen", "permit", "sponsorship_needed"})
+SELF_EMPLOYED_VALUES = frozenset({"yes", "no", "maybe"})
 # Размеры страницы выдачи, которые понимает hh.ru (параметр items_on_page).
 PER_PAGE_VALUES = frozenset({20, 50, 100})
 
@@ -194,6 +210,8 @@ def _optional_positive_int(value: Any, key: str) -> int | None:
 def _optional_non_negative_int(value: Any, key: str) -> int | None:
     if value is None:
         return None
+    if isinstance(value, str) and value.strip().casefold() in {"none", "нет", "null"}:
+        return None
     if isinstance(value, str) and value.strip().isdigit():
         value = int(value.strip())  # значение из окружения приходит строкой
     if isinstance(value, bool) or not isinstance(value, int):
@@ -223,6 +241,11 @@ def _parse_queries(value: Any) -> tuple[str, ...]:
     if not queries:
         raise ValueError("search.queries должен содержать хотя бы один непустой запрос")
     return queries
+
+
+def _one_line(value: Any) -> str:
+    """Однострочный текст: в форме отклика это обычное поле, переносы там лишние."""
+    return " ".join(str(value or "").split())
 
 
 def _str_list(value: Any, key: str) -> tuple[str, ...]:
@@ -273,15 +296,20 @@ def _schedule(value: Any) -> str | None:
     return schedule
 
 
-def _resolve_project_path(value: Any, key: str) -> Path:
+def _resolve_data_path(value: Any, key: str) -> Path:
+    """Путь к локальным данным: относительный считается от каталога пользователя.
+
+    Старые конфиги хранят префикс `data/`: его отбрасываем, чтобы данные
+    продолжали находиться, но уже в каталоге пользователя.
+    """
     text = _str(value, key)
     path = Path(text)
     if not path.is_absolute():
-        path = PROJECT_ROOT / path
-    resolved = path.resolve()
-    if resolved != PROJECT_ROOT and PROJECT_ROOT not in resolved.parents:
-        raise ValueError(f"{key} должен указывать внутрь каталога проекта: {resolved}")
-    return resolved
+        parts = path.parts
+        if parts and parts[0] == "data":
+            path = Path(*parts[1:])
+        path = DEFAULT_DATA_DIR / path
+    return path.resolve()
 
 
 def _area_text(value: Any) -> str:
@@ -498,28 +526,6 @@ class SearchConfig(BaseModel):
         return self
 
 
-class PipelineConfig(BaseModel):
-    """Параметры запуска: лимиты, паузы, подъём резюме и повторы."""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    resume: ResumeConfig = Field(default_factory=ResumeConfig)
-    limit_per_run: int
-    delay_between_actions: DelayRange
-    max_vacancies: int = 200
-    retry: RetryConfig = Field(default_factory=RetryConfig)
-
-    @field_validator("limit_per_run", mode="before")
-    @classmethod
-    def _limit_per_run(cls, value: Any) -> int:
-        return _positive_int(value, "pipeline.limit_per_run")
-
-    @field_validator("max_vacancies", mode="before")
-    @classmethod
-    def _max_vacancies(cls, value: Any) -> int:
-        return _positive_int(value, "pipeline.max_vacancies")
-
-
 class DataPathsConfig(BaseModel):
     """Пути к локальным данным проекта."""
 
@@ -533,6 +539,8 @@ class DataPathsConfig(BaseModel):
     habr_profile: Path = DEFAULT_HABR_PROFILE_PATH
     cache: Path = DEFAULT_CACHE_PATH
     report_dir: Path = DEFAULT_REPORT_DIR
+    # Ответы на вопросы анкет и тестов: data/questionary/<вакансия>-<резюме>.json.
+    questionary_dir: Path = DEFAULT_QUESTIONARY_DIR
     logs_dir: Path = DEFAULT_LOGS_DIR
 
     @field_validator(
@@ -542,12 +550,13 @@ class DataPathsConfig(BaseModel):
         "habr_profile",
         "cache",
         "report_dir",
+        "questionary_dir",
         "logs_dir",
         mode="before",
     )
     @classmethod
     def _project_path(cls, value: Any, info: ValidationInfo) -> Path:
-        return _resolve_project_path(value, str(info.field_name))
+        return _resolve_data_path(value, str(info.field_name))
 
 
 class DataConfig(BaseModel):
@@ -599,6 +608,190 @@ class CoverLetterConfig(BaseModel):
                 result.append(text)
         return tuple(result)
 
+
+
+class PrefilterAnswersConfig(BaseModel):
+    """Ответы профиля для анкеты работодателя (pipeline.prefilter.answers).
+
+    Личные данные: их место — config.local.yaml, из окружения и `.env` они
+    не читаются. Пустое значение означает «поле не заполнено»: вопрос с таким
+    полем уходит в ручные и никогда не приводит к отсеву.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    # Навыки: по ним отвечаем на вопросы анкеты про стек («есть ли опыт со Spring?»).
+    skills: Annotated[tuple[str, ...], NoDecode] = ()
+    # Свободный текст для вопроса «важные достижения» — одна строка.
+    achievements: str = ""
+    education_level: str = ""
+    location_country: str = ""
+    # Стаж: старое work_experience остаётся синонимом общего стажа.
+    work_experience: float | None = None
+    work_experience_total: float | None = None
+    work_experience_profile: float | None = None
+    salary_min: float | None = None
+    # Свободный текст про зарплату: нужен, когда вакансия просит «пожелания»,
+    # а не конкретную сумму.
+    salary_message: str = ""
+    relocation_ready: str = ""
+    # Формат работы: одно значение или список. В списке порядок — приоритет:
+    # сначала берём первый формат, который есть в вариантах анкеты.
+    work_format: Annotated[tuple[str, ...], NoDecode] = ()
+    work_permit: str = ""
+    notice_period: int | None = None
+    languages: str = ""
+    has_electronic_workbook: bool | None = None
+    travel_ready: bool | None = None
+    # Статус ИП: yes | no | maybe (нет, но могу открыть).
+    self_employed: str = ""
+    age: int | None = None
+    # Подтверждённый стаж по трудовой книжке, лет.
+    russian_labour_code_expirience: float | None = None
+    # Опыт из проектной (заказной/аутсорс) разработки.
+    is_project_based_experience: bool | None = None
+    # Готовность работать с оплатой за единицу результата.
+    payment_per_unit_engagement: bool | None = None
+    # Домашний офис: гарнитура, веб-камера, интернет для видеоконференций.
+    has_remote_workspace: bool | None = None
+
+    @field_validator(
+        "education_level", "relocation_ready", "work_permit", "self_employed", mode="before"
+    )
+    @classmethod
+    def _enums(cls, value: Any, info: ValidationInfo) -> str:
+        allowed = {
+            "education_level": EDUCATION_VALUES,
+            "relocation_ready": RELOCATION_VALUES,
+            "work_permit": WORK_PERMIT_VALUES,
+            "self_employed": SELF_EMPLOYED_VALUES,
+        }[str(info.field_name)]
+        text = _optional_str(value) or ""
+        if text and text not in allowed:
+            raise ValueError(
+                f"pipeline.prefilter.answers.{info.field_name}: неизвестное значение «{text}» "
+                "(допустимо: " + ", ".join(sorted(allowed)) + ")"
+            )
+        return text
+
+    @field_validator(
+        "work_experience",
+        "work_experience_total",
+        "work_experience_profile",
+        "salary_min",
+        "russian_labour_code_expirience",
+        mode="before",
+    )
+    @classmethod
+    def _numbers(cls, value: Any, info: ValidationInfo) -> float | None:
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return None
+        if isinstance(value, str) and value.strip().casefold() in {"none", "нет", "null"}:
+            return None
+        number = _as_float(value)
+        if number < 0:
+            raise ValueError(f"pipeline.prefilter.answers.{info.field_name} не может быть отрицательным")
+        return number
+
+    @field_validator("notice_period", mode="before")
+    @classmethod
+    def _notice_period(cls, value: Any) -> int | None:
+        return _optional_non_negative_int(value, "pipeline.prefilter.answers.notice_period")
+
+    @field_validator("age", mode="before")
+    @classmethod
+    def _age(cls, value: Any) -> int | None:
+        return _optional_non_negative_int(value, "pipeline.prefilter.answers.age")
+
+    @field_validator("work_format", mode="before")
+    @classmethod
+    def _work_formats(cls, value: Any) -> tuple[str, ...]:
+        return _filter_values(value, "pipeline.prefilter.answers.work_format", WORK_FORMAT_VALUES)
+
+    @field_validator("location_country", "languages", mode="before")
+    @classmethod
+    def _texts(cls, value: Any) -> str:
+        return _optional_str(value) or ""
+
+    @field_validator("salary_message", "achievements", mode="before")
+    @classmethod
+    def _one_line_text(cls, value: Any) -> str:
+        """Свободный текст — одной строкой: в форме это обычное поле ввода."""
+        return _one_line(value)
+
+    @field_validator("skills", mode="before")
+    @classmethod
+    def _skills(cls, value: Any) -> tuple[str, ...]:
+        """Навыки без повторов: «Spring» и « spring » — одна технология."""
+        result: list[str] = []
+        seen: set[str] = set()
+        for skill in _str_list(value, "pipeline.prefilter.answers.skills"):
+            key = skill.casefold()
+            if key not in seen:
+                seen.add(key)
+                result.append(skill)
+        return tuple(result)
+
+    @field_validator(
+        "has_electronic_workbook",
+        "travel_ready",
+        "is_project_based_experience",
+        "payment_per_unit_engagement",
+        "has_remote_workspace",
+        mode="before",
+    )
+    @classmethod
+    def _flags(cls, value: Any, info: ValidationInfo) -> bool | None:
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return None
+        try:
+            return _as_bool(value)
+        except ValueError:
+            raise ValueError(
+                f"pipeline.prefilter.answers.{info.field_name}: должно быть true или false"
+            ) from None
+
+
+class PrefilterConfig(BaseModel):
+    """Knockout-префильтр анкеты работодателя: вопросы формы до Generation."""
+
+    model_config = ConfigDict(frozen=True)
+
+    # В схеме выключен, чтобы поведение по умолчанию оставалось прежним;
+    # рабочий config.yaml включает префильтр явно.
+    enabled: bool = False
+    # Отправлять отклик с автоматически заполненной анкетой. false — ответы
+    # проставляются, но отклик остаётся за человеком (первый этап по ТЗ).
+    submit_auto_fill: bool = False
+    answers: PrefilterAnswersConfig = Field(default_factory=PrefilterAnswersConfig)
+
+    @field_validator("enabled", "submit_auto_fill", mode="before")
+    @classmethod
+    def _flags(cls, value: Any) -> bool:
+        return _as_bool(value)
+
+
+class PipelineConfig(BaseModel):
+    """Параметры запуска: лимиты, паузы, подъём резюме, префильтр анкеты и повторы."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    resume: ResumeConfig = Field(default_factory=ResumeConfig)
+    limit_per_run: int
+    delay_between_actions: DelayRange
+    max_vacancies: int = 200
+    retry: RetryConfig = Field(default_factory=RetryConfig)
+    prefilter: PrefilterConfig = Field(default_factory=PrefilterConfig)
+
+    @field_validator("limit_per_run", mode="before")
+    @classmethod
+    def _limit_per_run(cls, value: Any) -> int:
+        return _positive_int(value, "pipeline.limit_per_run")
+
+    @field_validator("max_vacancies", mode="before")
+    @classmethod
+    def _max_vacancies(cls, value: Any) -> int:
+        return _positive_int(value, "pipeline.max_vacancies")
 
 
 class DecisionConfig(BaseModel):
@@ -850,6 +1043,7 @@ class YamlSource(PydanticBaseSettingsSource):
 PERSONAL_FIELDS = frozenset({
     "llm.cover_letter.signature",
     "llm.cover_letter.pet_projects",
+    "pipeline.prefilter.answers",
 })
 
 

@@ -29,6 +29,7 @@ from .models import (
 )
 from .notify import notify_test as send_test_notification
 from .notify import notify_test_targets
+from .web_server import ensure_web_server
 from .pipeline import (
     RETRY_ALL,
     ResumeNameError,
@@ -575,6 +576,8 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"Не удалось сохранить сессию: {exc}", file=sys.stderr)
                 return 1
             return 0
+
+        ensure_web_server(config, logger)
 
         if not config.llm.api_key.get_secret_value():
             print(

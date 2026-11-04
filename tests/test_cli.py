@@ -434,6 +434,7 @@ def test_main_passes_channel_and_retry_to_run(tmp_path: Path, monkeypatch) -> No
 
     monkeypatch.setattr("agent.cli.RunLogger", lambda *args, **kwargs: FakeLogger())
     monkeypatch.setattr("agent.cli.run", fake_run)
+    monkeypatch.setattr("agent.cli.ensure_web_server", lambda *args, **kwargs: None)
 
     assert main(["--config", str(path), "--ch", "habr", "--retry"]) == 0
     assert captured == {"channel": "habr", "retry": RETRY_ALL}
@@ -463,6 +464,7 @@ def test_main_stops_on_resume_not_found(tmp_path: Path, monkeypatch, capsys) -> 
 
     monkeypatch.setattr("agent.cli.RunLogger", lambda *args, **kwargs: FakeLogger())
     monkeypatch.setattr("agent.cli.run", fake_run)
+    monkeypatch.setattr("agent.cli.ensure_web_server", lambda *args, **kwargs: None)
 
     assert main(["--config", str(path)]) == 1
     err = capsys.readouterr().err

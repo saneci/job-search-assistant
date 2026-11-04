@@ -17,11 +17,8 @@
                         <h1>📋 Отчёт по обработанным вакансиям</h1>
                         <div class="meta" id="headerMeta">Загрузка данных…</div>
                     </div>
+                    {% include "_nav.html" %}
                     <div class="header-actions header-actions--fixed">
-                        <a href="/" class="theme-toggle theme-toggle--link" title="На главную"
-                           aria-label="На главную">
-                            🏠
-                        </a>
                         <button class="theme-toggle" id="themeToggle" type="button" aria-label="Переключить тему"
                                 title="Переключить тему">🌙
                         </button>
@@ -44,9 +41,10 @@
                     <div class="dropdown-menu" id="datePanel" hidden>
                         <div class="dropdown-scroll">
                             <button class="dropdown-option" type="button" id="dateAll"
-                                    role="menuitemcheckbox" aria-checked="true"><span class="option-check"
-                                                                                   aria-hidden="true">✓</span><span
-                                class="option-label">Выбрать всё</span></button>
+                                    role="menuitemcheckbox" aria-checked="true">
+                                <span class="option-check" aria-hidden="true">✓</span>
+                                <span class="option-label">Выбрать всё</span>
+                            </button>
                             <div id="dateList"></div>
                         </div>
                     </div>
@@ -62,44 +60,59 @@
                     <div class="dropdown-menu" id="statusMenu" role="menu" hidden>
                         <div class="dropdown-scroll">
                             <button class="dropdown-option checked" type="button" data-status="all"
-                                    role="menuitemradio" aria-checked="true"><span class="option-check"
-                                                                                   aria-hidden="true">✓</span><span
-                                class="option-label">Все</span></button>
-                            <button class="dropdown-option" type="button" data-status="sent"
-                                    role="menuitemradio" aria-checked="false"><span class="option-check"
-                                                                                    aria-hidden="true">✓</span><span
-                                class="option-label">Отправлено</span></button>
-                            <button class="dropdown-option" type="button" data-status="queued"
-                                    role="menuitemradio" aria-checked="false"><span class="option-check"
-                                                                                    aria-hidden="true">✓</span><span
-                                class="option-label">В очереди</span></button>
+                                    role="menuitemradio" aria-checked="true">
+                                <span class="option-check" aria-hidden="true">✓</span>
+                                <span class="option-label">Все</span>
+                            </button>
                             <button class="dropdown-option" type="button" data-status="excluded"
-                                    role="menuitemradio" aria-checked="false"><span class="option-check"
-                                                                                    aria-hidden="true">✓</span><span
-                                class="option-label">Исключено</span></button>
+                                    role="menuitemradio" aria-checked="false">
+                                <span class="option-check" aria-hidden="true">✓</span>
+                                <span class="option-label">Исключено</span>
+                            </button>
+                            <button class="dropdown-option" type="button" data-status="queued"
+                                    role="menuitemradio" aria-checked="false">
+                                <span class="option-check" aria-hidden="true">✓</span>
+                                <span class="option-label">В очереди</span>
+                            </button>
                             <button class="dropdown-option" type="button" data-status="skipped"
-                                    role="menuitemradio" aria-checked="false"><span class="option-check"
-                                                                                    aria-hidden="true">✓</span><span
-                                class="option-label">Не подходит</span></button>
-                            <button class="dropdown-option" type="button" data-status="rejected"
-                                    role="menuitemradio" aria-checked="false"><span class="option-check"
-                                                                                    aria-hidden="true">✓</span><span
-                                class="option-label">Отказ</span></button>
+                                    role="menuitemradio" aria-checked="false">
+                                <span class="option-check" aria-hidden="true">✓</span>
+                                <span class="option-label">Не подходит</span>
+                            </button>
+                            <button class="dropdown-option" type="button" data-status="sent"
+                                    role="menuitemradio" aria-checked="false">
+                                <span class="option-check" aria-hidden="true">✓</span>
+                                <span class="option-label">Отправлено</span>
+                            </button>
+                            <button class="dropdown-option" type="button" data-status="invite"
+                                    role="menuitemradio" aria-checked="false">
+                                <span class="option-check" aria-hidden="true">✓</span>
+                                <span class="option-label">Приглашение</span>
+                            </button>
                             <button class="dropdown-option" type="button" data-status="offer"
-                                    role="menuitemradio" aria-checked="false"><span class="option-check"
-                                                                                    aria-hidden="true">✓</span><span
-                                class="option-label">Оффер</span></button>
+                                    role="menuitemradio" aria-checked="false">
+                                <span class="option-check" aria-hidden="true">✓</span>
+                                <span class="option-label">Оффер</span>
+                            </button>
+                            <button class="dropdown-option" type="button" data-status="rejected"
+                                    role="menuitemradio" aria-checked="false">
+                                <span class="option-check" aria-hidden="true">✓</span>
+                                <span class="option-label">Отказ</span>
+                            </button>
                             <button class="dropdown-option" type="button" data-status="error"
-                                    role="menuitemradio" aria-checked="false"><span class="option-check"
-                                                                                    aria-hidden="true">✓</span><span
-                                class="option-label">Ошибки</span></button>
+                                    role="menuitemradio" aria-checked="false">
+                                <span class="option-check" aria-hidden="true">✓</span>
+                                <span class="option-label">Ошибки</span>
+                            </button>
                             <button class="dropdown-option" type="button" data-status="archived"
-                                    role="menuitemradio" aria-checked="false"><span class="option-check"
-                                                                                   aria-hidden="true">✓</span><span
-                                class="option-label">В архиве</span></button>
+                                    role="menuitemradio" aria-checked="false">
+                                <span class="option-check" aria-hidden="true">✓</span>
+                                <span class="option-label">В архиве</span>
+                            </button>
                         </div>
                     </div>
                 </div>
+
                 <div class="dropdown" id="channelFilter">
                     <button class="dropdown-toggle" id="channelToggle" type="button"
                             aria-haspopup="true" aria-expanded="false" aria-controls="channelMenu">
@@ -110,25 +123,30 @@
                     <div class="dropdown-menu" id="channelMenu" role="menu" hidden>
                         <div class="dropdown-scroll">
                             <button class="dropdown-option checked" type="button" data-channel="all"
-                                    role="menuitemradio" aria-checked="true"><span class="option-check"
-                                                                                   aria-hidden="true">✓</span><span
-                                class="option-label">Все</span></button>
+                                    role="menuitemradio" aria-checked="true">
+                                <span class="option-check" aria-hidden="true">✓</span>
+                                <span class="option-label">Все</span>
+                            </button>
                             <button class="dropdown-option" type="button" data-channel="hh"
-                                    role="menuitemradio" aria-checked="false"><span class="option-check"
-                                                                                    aria-hidden="true">✓</span><span
-                                class="option-label">hh.ru</span></button>
+                                    role="menuitemradio" aria-checked="false">
+                                <span class="option-check" aria-hidden="true">✓</span>
+                                <span class="option-label">hh.ru</span>
+                            </button>
                             <button class="dropdown-option" type="button" data-channel="habr"
-                                    role="menuitemradio" aria-checked="false"><span class="option-check"
-                                                                                    aria-hidden="true">✓</span><span
-                                class="option-label">Habr Career</span></button>
+                                    role="menuitemradio" aria-checked="false">
+                                <span class="option-check" aria-hidden="true">✓</span>
+                                <span class="option-label">Habr Career</span>
+                            </button>
                             <button class="dropdown-option" type="button" data-channel="external"
-                                    role="menuitemradio" aria-checked="false"><span class="option-check"
-                                                                                    aria-hidden="true">✓</span><span
-                                class="option-label">Сайт компании</span></button>
+                                    role="menuitemradio" aria-checked="false">
+                                <span class="option-check" aria-hidden="true">✓</span>
+                                <span class="option-label">Сайт компании</span>
+                            </button>
                             <button class="dropdown-option" type="button" data-channel="unknown"
-                                    role="menuitemradio" aria-checked="false"><span class="option-check"
-                                                                                    aria-hidden="true">✓</span><span
-                                class="option-label">Без канала</span></button>
+                                    role="menuitemradio" aria-checked="false">
+                                <span class="option-check" aria-hidden="true">✓</span>
+                                <span class="option-label">Без канала</span>
+                            </button>
                         </div>
                     </div>
                 </div>
@@ -140,37 +158,33 @@
             </div>
 
             <div class="summary-grid" id="summaryGrid">
-                <div class="summary-card card-sent">
-                    <div class="label">Отправлено</div>
-                    <div class="value" id="sumSent">—</div>
+                <div class="summary-card card-excluded">
+                    <div class="label">Исключено</div>
+                    <div class="value" id="sumExcluded">0</div>
                 </div>
                 <div class="summary-card card-queued">
                     <div class="label">В очереди</div>
-                    <div class="value" id="sumQueued">—</div>
+                    <div class="value" id="sumQueued">4</div>
                 </div>
-                <div class="summary-card card-excluded">
-                    <div class="label">Исключено</div>
-                    <div class="value" id="sumExcluded">—</div>
-                </div>
-                <div class="summary-card card-skipped">
-                    <div class="label">Не подходит</div>
-                    <div class="value" id="sumSkipped">—</div>
+                <div class="summary-card card-sent">
+                    <div class="label">Отправлено</div>
+                    <div class="value" id="sumSent">5</div>
                 </div>
                 <div class="summary-card card-invite">
                     <div class="label">Приглашения</div>
-                    <div class="value" id="sumInvited">—</div>
+                    <div class="value" id="sumInvited">0</div>
                 </div>
                 <div class="summary-card card-offer">
                     <div class="label">Офферы</div>
-                    <div class="value" id="sumOffered">—</div>
+                    <div class="value" id="sumOffered">0</div>
                 </div>
                 <div class="summary-card card-rejected">
                     <div class="label">Отказы</div>
-                    <div class="value" id="sumRejected">—</div>
+                    <div class="value" id="sumRejected">3</div>
                 </div>
                 <div class="summary-card card-error">
                     <div class="label">Ошибки</div>
-                    <div class="value" id="sumError">—</div>
+                    <div class="value" id="sumError">0</div>
                 </div>
             </div>
 
@@ -214,6 +228,25 @@
             </div>
         </div>
 
+        <div class="modal-backdrop" id="detailsDialog" hidden>
+            <div class="modal-card modal-card--wide" role="dialog" aria-modal="true"
+                 aria-labelledby="detailsTitle" aria-describedby="detailsMeta">
+                <div class="details-head">
+                    <div>
+                        <h2 id="detailsTitle">Детали вакансии</h2>
+                        <p class="details-meta" id="detailsMeta"></p>
+                    </div>
+                    <button class="modal-close" id="detailsClose" type="button" aria-label="Закрыть">×</button>
+                </div>
+                <div class="details-body" id="detailsBody"></div>
+                <div class="modal-actions details-actions">
+                    <button class="modal-btn modal-btn-cancel" id="detailsStatus" type="button"
+                            aria-haspopup="menu" aria-expanded="false">Сменить статус</button>
+                    <button class="modal-btn modal-btn-confirm" id="detailsOk" type="button">Закрыть</button>
+                </div>
+            </div>
+        </div>
+
         <script src="{{ asset_url('script.js') }}"></script>
         <script src="{{ asset_url('filters.js') }}"></script>
         <script>
@@ -229,6 +262,12 @@
                 offer: 'Оффер',
                 // Архив — признак записи: статус у неё остаётся прежним.
                 archived: 'В архиве'
+            };
+
+            const CHANNEL_LABELS = {
+                hh: 'hh.ru',
+                habr: 'career.habr.com',
+                external: 'сайт компании'
             };
 
             // Исход отклика фиксируется один раз: после rejected/offer статус не меняется.
@@ -288,7 +327,6 @@
                 headerMeta: document.getElementById('headerMeta'),
                 sumSent: document.getElementById('sumSent'),
                 sumInvited: document.getElementById('sumInvited'),
-                sumSkipped: document.getElementById('sumSkipped'),
                 sumQueued: document.getElementById('sumQueued'),
                 sumExcluded: document.getElementById('sumExcluded'),
                 sumError: document.getElementById('sumError'),
@@ -316,6 +354,13 @@
                 datePanel: document.getElementById('datePanel'),
                 dateAll: document.getElementById('dateAll'),
                 dateList: document.getElementById('dateList'),
+                detailsDialog: document.getElementById('detailsDialog'),
+                detailsTitle: document.getElementById('detailsTitle'),
+                detailsMeta: document.getElementById('detailsMeta'),
+                detailsBody: document.getElementById('detailsBody'),
+                detailsClose: document.getElementById('detailsClose'),
+                detailsOk: document.getElementById('detailsOk'),
+                detailsStatus: document.getElementById('detailsStatus'),
                 terminalDialog: document.getElementById('terminalDialog'),
                 terminalTitle: document.getElementById('terminalTitle'),
                 terminalText: document.getElementById('terminalText'),
@@ -336,6 +381,124 @@
             function escapeHtml(s) {
                 if (s == null) return '';
                 return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+            }
+
+            /* ---------- Детали вакансии ---------- */
+            let detailsVacancy = null;
+            let detailsFocus = null;
+
+            function addDetailRow(dl, label, value) {
+                const dt = document.createElement('dt');
+                dt.textContent = label;
+                const dd = document.createElement('dd');
+                if (value instanceof Node) {
+                    dd.appendChild(value);
+                } else {
+                    dd.textContent = value == null || value === '' ? '—' : String(value);
+                }
+                dl.appendChild(dt);
+                dl.appendChild(dd);
+            }
+
+            function renderDetails(v) {
+                const status = v.archived ? 'archived' : (v.status || 'skipped');
+                const statusLabel = STATUS_LABELS[status] || status;
+                els.detailsTitle.textContent = v.title || '(без названия)';
+                els.detailsMeta.textContent = [v.company, statusLabel].filter(Boolean).join(' · ');
+                const body = els.detailsBody;
+                body.innerHTML = '';
+
+                const infoHeading = document.createElement('h3');
+                infoHeading.className = 'details-subtitle';
+                infoHeading.textContent = 'Основная информация';
+                body.appendChild(infoHeading);
+
+                const dl = document.createElement('dl');
+                dl.className = 'details-grid';
+                if (v.url) {
+                    const link = document.createElement('a');
+                    link.href = v.url;
+                    link.target = '_blank';
+                    link.rel = 'noopener noreferrer';
+                    link.textContent = v.url;
+                    addDetailRow(dl, 'Ссылка', link);
+                } else {
+                    addDetailRow(dl, 'Ссылка', '—');
+                }
+                addDetailRow(dl, 'Канал', CHANNEL_LABELS[v.channel] || v.channel || '—');
+                addDetailRow(dl, 'Резюме', v.profile || '—');
+                addDetailRow(dl, 'Статус', statusLabel);
+                addDetailRow(dl, 'Причина', v.reason || '—');
+                if (v.message && v.message !== v.reason) {
+                    addDetailRow(dl, 'Подробности', v.message);
+                }
+                addDetailRow(dl, 'Попыток', v.attempts ?? '—');
+                addDetailRow(dl, 'Создана', formatDateTime(v.created_at));
+                addDetailRow(dl, 'Обновлена', formatDateTime(v.updated_at));
+                addDetailRow(dl, 'Приглашение', formatDateTime(v.invited_at));
+                addDetailRow(dl, 'Запуск', v.run_id || '—');
+                addDetailRow(dl, 'Архив', v.archived ? 'Да' : 'Нет');
+                body.appendChild(dl);
+
+                const heading = document.createElement('h3');
+                heading.className = 'details-subtitle';
+                heading.textContent = 'Ответы на анкету';
+                body.appendChild(heading);
+
+                const answers = Array.isArray(v.questionary) ? v.questionary : [];
+                if (answers.length === 0) {
+                    const empty = document.createElement('p');
+                    empty.className = 'details-empty';
+                    empty.textContent = 'Ответов нет.';
+                    body.appendChild(empty);
+                } else {
+                    const list = document.createElement('div');
+                    list.className = 'questionary-list';
+                    for (const item of answers) {
+                        const card = document.createElement('div');
+                        card.className = 'questionary-item';
+                        const question = document.createElement('div');
+                        question.className = 'questionary-question';
+                        question.textContent = item.question || 'Вопрос без формулировки';
+                        const answer = document.createElement('div');
+                        answer.className = 'questionary-answer';
+                        answer.textContent = item.answer || 'Без ответа';
+                        card.appendChild(question);
+                        card.appendChild(answer);
+                        list.appendChild(card);
+                    }
+                    body.appendChild(list);
+                }
+
+                const terminal = TERMINAL_STATUSES.has(v.status || '') || Boolean(v.archived);
+                els.detailsStatus.hidden = terminal;
+                els.detailsStatus.disabled = false;
+                els.detailsStatus.dataset.url = v.url || '';
+                els.detailsStatus.dataset.profile = v.profile || '';
+                els.detailsStatus.dataset.report = v.report_name || '';
+                els.detailsStatus.dataset.status = v.status || '';
+            }
+
+            function openDetails(v) {
+                closeStatusMenu();
+                closeDropdowns();
+                detailsVacancy = v;
+                detailsFocus = document.activeElement;
+                renderDetails(v);
+                els.detailsDialog.hidden = false;
+                document.body.style.overflow = 'hidden';
+                els.detailsClose.focus();
+            }
+
+            function closeDetails() {
+                if (els.detailsDialog.hidden) return;
+                els.detailsDialog.hidden = true;
+                document.body.style.overflow = '';
+                detailsVacancy = null;
+                if (detailsFocus instanceof HTMLElement && detailsFocus.isConnected) {
+                    detailsFocus.focus();
+                }
+                detailsFocus = null;
             }
 
             /* ---------- Подтверждение терминального статуса ---------- */
@@ -376,12 +539,47 @@
                 if (event.key === 'Escape' && !els.terminalDialog.hidden) closeTerminalDialog(false);
             });
 
+            els.detailsClose.addEventListener('click', closeDetails);
+            els.detailsOk.addEventListener('click', closeDetails);
+            els.detailsDialog.addEventListener('click', (event) => {
+                if (event.target === els.detailsDialog) closeDetails();
+            });
+            els.detailsStatus.addEventListener('click', (event) => {
+                event.stopPropagation();
+                if (!detailsVacancy) return;
+                if (statusMenu && statusMenu.control === els.detailsStatus) {
+                    closeStatusMenu();
+                    return;
+                }
+                openStatusMenu(els.detailsStatus, detailsVacancy);
+            });
+            document.addEventListener('keydown', (event) => {
+                if (event.key === 'Escape' && !els.detailsDialog.hidden && !statusMenu) closeDetails();
+            });
+            els.detailsDialog.addEventListener('keydown', (event) => {
+                if (event.key !== 'Tab' || els.detailsDialog.hidden) return;
+                const focusable = Array.from(
+                    els.detailsDialog.querySelectorAll(
+                        'a[href], button:not([disabled]):not([hidden]), [tabindex]:not([tabindex="-1"])'
+                    )
+                );
+                if (focusable.length === 0) return;
+                const first = focusable[0];
+                const last = focusable[focusable.length - 1];
+                if (event.shiftKey && document.activeElement === first) {
+                    event.preventDefault();
+                    last.focus();
+                } else if (!event.shiftKey && document.activeElement === last) {
+                    event.preventDefault();
+                    first.focus();
+                }
+            });
+
             /* ---------- Отрисовка ---------- */
             function renderSummary(summary) {
                 const s = summary || {};
                 els.sumSent.textContent = s.sent ?? 0;
                 els.sumInvited.textContent = s.invite ?? 0;
-                els.sumSkipped.textContent = s.skipped ?? 0;
                 els.sumQueued.textContent = s.queued ?? 0;
                 els.sumExcluded.textContent = s.excluded ?? 0;
                 els.sumError.textContent = s.error ?? 0;
@@ -522,10 +720,12 @@
                     text.textContent = label;
                     option.appendChild(mark);
                     option.appendChild(text);
-                    // Текущий статус и оффер без отклика выбрать нельзя.
+                    // Текущий статус, отказ и оффер без отклика выбрать нельзя:
+                    // оба исхода фиксируются только по отправленному отклику.
                     const offerBlocked = key === 'offer' && baseStatus !== 'sent';
-                    option.disabled = active || offerBlocked;
-                    if (offerBlocked) {
+                    const rejectedBlocked = key === 'rejected' && baseStatus !== 'sent';
+                    option.disabled = active || offerBlocked || rejectedBlocked;
+                    if (offerBlocked || rejectedBlocked) {
                         option.title = 'Сначала переведите вакансию в статус «Отправлено»';
                     }
                     option.addEventListener('click', () => {
@@ -575,7 +775,17 @@
                 control.dataset.status = currentStatus;
                 control.textContent = STATUS_LABELS[currentStatus] || currentStatus;
                 control.setAttribute('aria-expanded', 'false');
-                if (isTerminal) {
+                if (currentStatus === 'queued' || currentStatus === 'skipped') {
+                    // У очереди и пропусков клик открывает детали: по ним видно, что заполнено.
+                    control.classList.add('is-details');
+                    control.title = 'Открыть детали отчёта';
+                    control.setAttribute('aria-haspopup', 'dialog');
+                    control.setAttribute('aria-controls', 'detailsDialog');
+                    control.addEventListener('click', (event) => {
+                        event.stopPropagation();
+                        openDetails(v);
+                    });
+                } else if (isTerminal) {
                     // Терминальная запись не открывает меню: подсказка вместо списка.
                     control.disabled = true;
                     control.classList.add('is-terminal');
@@ -620,8 +830,10 @@
                 const reportName = control.dataset.report;
                 // Блокируем на время запроса.
                 control.disabled = true;
-                control.className = 'status-select ' + newStatus
-                    + (TERMINAL_STATUSES.has(newStatus) ? ' is-terminal' : '');
+                if (control.classList.contains('status-select')) {
+                    control.className = 'status-select ' + newStatus
+                        + (TERMINAL_STATUSES.has(newStatus) ? ' is-terminal' : '');
+                }
                 try {
                     const resp = await fetch('/api/v1/update-status', {
                         method: 'POST',
@@ -663,15 +875,22 @@
                         if (result.report_name) vac.report_name = result.report_name;
                         if (result.attempts !== undefined) vac.attempts = result.attempts;
                         if (result.reason !== undefined) vac.reason = result.reason;
+                        if (result.message !== undefined) {
+                            if (result.message) vac.message = result.message;
+                            else delete vac.message;
+                        }
                         if (result.created_at) vac.created_at = result.created_at;
                         if (result.updated_at) vac.updated_at = result.updated_at;
                         allVacancies = allVacancies.filter(x => x.url !== url || x === vac);
                     }
                     renderSummary(summaryCounts(allVacancies));
                     renderTable();
+                    closeDetails();
                 } catch (err) {
                     alert('Не удалось сохранить статус: ' + err.message);
-                    control.className = oldClass;
+                    if (control.classList.contains('status-select')) {
+                        control.className = oldClass;
+                    }
                     control.disabled = TERMINAL_STATUSES.has(oldStatus);
                 }
             }
@@ -985,6 +1204,7 @@
                 els.dateAll.setAttribute('aria-checked', String(everyDate));
                 els.dateLabel.textContent = dateLabelText(state);
             }
+
             /* Отметки после клика обновляются на месте: перерисовка списка
                обнуляет наведение мыши, и меню закрывается раньше времени. */
             function applyDateDraft() {
@@ -999,8 +1219,6 @@
                 els.dateAll.setAttribute('aria-checked', String(everyDate));
                 els.dateLabel.textContent = dateLabelText(dateDraft);
             }
-
-
 
             /* ---------- Загрузка данных с сервера ---------- */
             async function loadReports() {

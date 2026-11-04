@@ -21,7 +21,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
-from agent.config import DEFAULT_LOGS_DIR
+from agent.config import DEFAULT_LOGS_DIR, DEFAULT_REPORT_DIR
 from agent.logging_setup import new_run_id
 from agent.report_io import report_lock, write_report_file
 
@@ -33,8 +33,7 @@ from .metrics import (
     profile_value,
 )
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-REPORTS_DIR = PROJECT_ROOT / "data" / "report"
+REPORTS_DIR = DEFAULT_REPORT_DIR
 LOGS_DIR = DEFAULT_LOGS_DIR
 WEB_RUN_ID = new_run_id()
 TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
@@ -57,7 +56,6 @@ STATUS_REJECTED = "rejected"
 STATUS_OFFER = "offer"
 REJECTED_REASON = "По отклику пришёл отказ"
 OFFER_REASON = "По отклику пришёл оффер"
-SENT_REASON = "отклик уже отправлен"
 ARCHIVE_REASON = (
     "Вакансия в архиве, работодатель, больше не принимает отклики на эту вакансию"
 )
@@ -251,6 +249,7 @@ def all_vacancies(paths: list[Path]) -> list[dict[str, Any]]:
                 item = {**vacancy, "report_name": path.name}
                 if vacancy.get("archived"):
                     item["reason"] = ARCHIVE_REASON
+                    item.pop("message", None)
                 items.append(item)
     items.sort(
         key=lambda item: str(item.get("updated_at") or item.get("created_at") or ""),
@@ -532,7 +531,9 @@ def log_status_update(
 async def index(request: Request) -> HTMLResponse:
     """Главная страница: переход к воронке и отчёту, живые итоги."""
     return templates.TemplateResponse(
-        request=request, name="index.html", context={"metrics": current_metrics()}
+        request=request,
+        name="index.html",
+        context={"metrics": current_metrics(), "active_page": "index"},
     )
 
 
@@ -540,7 +541,9 @@ async def index(request: Request) -> HTMLResponse:
 @app.get("/report.html", response_class=HTMLResponse, include_in_schema=False)
 async def report(request: Request) -> HTMLResponse:
     """Страница отчёта: таблица вакансий, фильтры и правка статусов."""
-    return templates.TemplateResponse(request=request, name="report.html")
+    return templates.TemplateResponse(
+        request=request, name="report.html", context={"active_page": "report"}
+    )
 
 
 @app.get("/metrics", response_class=HTMLResponse)
@@ -556,7 +559,10 @@ async def metrics(
     return templates.TemplateResponse(
         request=request,
         name="metrics.html",
-        context={"metrics": current_metrics(period=period, profiles=profile)},
+        context={
+            "metrics": current_metrics(period=period, profiles=profile),
+            "active_page": "metrics",
+        },
     )
 
 
@@ -632,10 +638,10 @@ async def update_status(update: StatusUpdate) -> dict[str, Any]:
     В отчётах одна запись на пару «URL и резюме»: вакансия с этим профилем
     удаляется из всех файлов, а обновлённая запись попадает в файл сегодняшней
     даты. `created_at` при этом не меняется, `updated_at` становится временем
-    правки. `rejected`, `offer` и `archived` терминальны: `invite` ставится
-    только из `sent`,
-    `offer` — из `sent` или `invite`. Момент приглашения пишется в `invited_at`
-    и не сбрасывается при переходе в оффер или отказ.
+    правки. `rejected`, `offer` и `archived` терминальны: `invite` и `rejected`
+    ставятся только из `sent`, `offer` — из `sent` или `invite`. Момент
+    приглашения пишется в `invited_at` и не сбрасывается при переходе в оффер.
+    Причину ручная правка не переписывает, кроме терминальных статусов.
     """
     if update.status not in STATUSES and update.status != STATUS_ARCHIVED:
         raise HTTPException(status_code=422, detail=f"Неизвестный статус: {update.status}")
@@ -666,6 +672,14 @@ async def update_status(update: StatusUpdate) -> dict[str, Any]:
                     f"(сейчас: {current_status or 'нет статуса'})"
                 ),
             )
+        if update.status == STATUS_REJECTED and current_status != STATUS_SENT:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Отказ можно поставить только после статуса «Отправлено» "
+                    f"(сейчас: {current_status or 'нет статуса'})"
+                ),
+            )
         if update.status == STATUS_OFFER and current_status not in (STATUS_SENT, STATUS_INVITE):
             raise HTTPException(
                 status_code=409,
@@ -687,6 +701,7 @@ async def update_status(update: StatusUpdate) -> dict[str, Any]:
         if update.status == STATUS_ARCHIVED:
             vacancy["archived"] = True
             vacancy["reason"] = ARCHIVE_REASON
+            vacancy.pop("message", None)
         else:
             vacancy.pop("archived", None)
             vacancy["status"] = update.status
@@ -696,9 +711,10 @@ async def update_status(update: StatusUpdate) -> dict[str, Any]:
                 vacancy["reason"] = (
                     REJECTED_REASON if update.status == STATUS_REJECTED else OFFER_REASON
                 )
+                vacancy.pop("message", None)
             else:
-                if update.status == STATUS_SENT and current_status != STATUS_SENT:
-                    vacancy["reason"] = SENT_REASON
+                # Причину ручная правка не переписывает: в ней вердикт агента
+                # или объяснение прежнего статуса, и оно остаётся в отчёте.
                 vacancy["attempts"] = int(vacancy.get("attempts", 0)) + 1
 
         for path in report_files():
@@ -739,6 +755,7 @@ async def update_status(update: StatusUpdate) -> dict[str, Any]:
         "status": str(vacancy.get("status", "")),
         "archived": bool(vacancy.get("archived")),
         "reason": str(vacancy.get("reason", "")),
+        "message": str(vacancy.get("message", "")),
         "profile": str(vacancy.get("profile", "")),
         "created_at": vacancy["created_at"],
         "updated_at": vacancy["updated_at"],

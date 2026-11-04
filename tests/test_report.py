@@ -65,6 +65,48 @@ def test_build_report(tmp_path: Path) -> None:
     assert f"Отчёт сохранён в файле: {report_path}" in report
 
 
+def test_report_names_single_vacancy() -> None:
+    """Заголовок отчёта называет вакансию, если запуск был по одной."""
+    stats = RunStats(
+        started_at=datetime(2026, 11, 4, 7, 27),
+        finished_at=datetime(2026, 11, 4, 7, 30),
+    )
+    stats.sent = [
+        SentVacancy(
+            title="Fullstack QA (Java)",
+            company="IBS",
+            url="https://hh.ru/vacancy/138948221",
+            probability=0.98,
+        )
+    ]
+    stats.reviewed = 1
+
+    lines = build_report(stats, vacancy_title="Fullstack QA (Java)").splitlines()
+
+    assert lines[1] == "Отчёт за 2026-11-04 07:27 по вакансии «Fullstack QA (Java)»"
+
+
+def test_report_names_single_resume() -> None:
+    """Заголовок hh-запуска по одной вакансии называет резюме, а не вакансию."""
+    stats = RunStats(
+        started_at=datetime(2026, 11, 4, 19, 39),
+        finished_at=datetime(2026, 11, 4, 19, 41),
+    )
+    stats.sent = [
+        SentVacancy(
+            title="Java-разработчик",
+            company="Ozon",
+            url="https://hh.ru/vacancy/1",
+            probability=0.98,
+        )
+    ]
+    stats.reviewed = 1
+
+    lines = build_report(stats, resume_name="Java Developer").splitlines()
+
+    assert lines[1] == "Отчёт за 2026-11-04 19:39 по резюме «Java Developer»"
+
+
 def test_report_lists_rejections() -> None:
     """Отказы по откликам видно отдельной строкой отчёта."""
     stats = make_stats()

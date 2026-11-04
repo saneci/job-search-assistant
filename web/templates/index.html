@@ -12,21 +12,24 @@
     <body>
         <div class="container">
             <!-- Шапка -->
-            <div class="header header--row">
-                <div>
-                    <h1>🏹 Мониторинг поиска работы</h1>
-                    <div class="meta">Воронка найма и детальный отчёт по обработанным вакансиям</div>
-                    <div class="meta">
-                        {% if metrics.total %}
-                            {{ metrics.summary_text }} · обновлено {{ metrics.updated_at_text }}
-                        {% else %}
-                            В отчётах пока нет данных
-                        {% endif %}
+            <div class="header">
+                <div class="header--row">
+                    <div>
+                        <h1>🏹 Мониторинг поиска работы</h1>
+                        <div class="meta">Воронка найма и детальный отчёт по обработанным вакансиям</div>
+                        <div class="meta">
+                            {% if metrics.total %}
+                                {{ metrics.summary_text }} · обновлено {{ metrics.updated_at_text }}
+                            {% else %}
+                                В отчётах пока нет данных
+                            {% endif %}
+                        </div>
                     </div>
+                    {% include "_nav.html" %}
+                    <button class="theme-toggle" id="themeToggle" type="button" aria-label="Переключить тему"
+                            title="Переключить тему">🌙
+                    </button>
                 </div>
-                <button class="theme-toggle" id="themeToggle" type="button" aria-label="Переключить тему"
-                        title="Переключить тему">🌙
-                </button>
             </div>
 
             <!-- Навигация -->

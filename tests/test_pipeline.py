@@ -27,6 +27,7 @@ from agent.models import (
     VacancyCard,
     VacancyDetails,
 )
+from agent.prefilter import Question
 from agent.pipeline import (
     OUTCOME_ERROR,
     OUTCOME_EXCLUDED,
@@ -35,6 +36,7 @@ from agent.pipeline import (
     OUTCOME_SENT,
     OUTCOME_SKIPPED,
     PAGE_STATUS_REASONS,
+    QUESTIONARY_MANUAL_REASON,
     QUEUE_REASON_TEXTS,
     ResumeNameError,
     _captcha_waiter,
@@ -47,6 +49,7 @@ from agent.pipeline import (
     _notify_captcha_stop,
     _outcome,
     _outcome_reason,
+    _pending_reason,
     _plural,
     _process_and_remember,
     _process_vacancies,
@@ -55,6 +58,7 @@ from agent.pipeline import (
     _queue,
     _remember_card_already_responded,
     _remember_processing,
+    _report_context,
     _require_resume_name,
     _retry_statuses,
     _retry_vacancies,
@@ -138,6 +142,29 @@ def test_profile_name_is_only_for_hh(tmp_path: Path) -> None:
 
     assert _profile_name(config, channel_for(config)) == "Java Developer"
     assert _profile_name(config, channel_for(config, "habr")) == ""
+
+
+def test_report_context_names_resume_for_hh_and_vacancy_for_habr(tmp_path: Path) -> None:
+    """Для hh в заголовке резюме, для habr — вакансия: у Habr резюме hh нет."""
+    config = with_resume(make_config(tmp_path), "Java Developer")
+    stats = make_stats(queued=[{"title": "Java-разработчик"}])
+
+    assert _report_context(config, channel_for(config), stats) == ("", "Java Developer")
+    assert _report_context(config, channel_for(config, "habr"), stats) == (
+        "Java-разработчик",
+        "",
+    )
+
+
+def test_pending_reason_keeps_full_question_in_message() -> None:
+    """Короткая причина для списка, полный вопрос — для окна деталей."""
+    long_question = ("Устраивает ли вас график: " + "полный рабочий день в офисе " * 10).strip()
+    pending = [Question(name="q1", text=long_question, kind="text")]
+
+    assert _pending_reason(pending, {}) == QUESTIONARY_MANUAL_REASON
+    full = _pending_reason(pending, {}, full=True)
+    assert long_question in full
+    assert "Без ответа 1 из 1" in full
 
 
 def test_final_message_without_actions(tmp_path: Path) -> None:
@@ -2222,6 +2249,56 @@ def test_retry_goes_by_url_from_report(tmp_path: Path, monkeypatch) -> None:
         json.loads(line) for line in logger.events_path.read_text(encoding="utf-8").splitlines()
     ]
     assert [item["count"] for item in events if item["event"] == "retry_selected"] == [1]
+
+
+def test_retry_writes_questionary_block(tmp_path: Path, monkeypatch) -> None:
+    """Повтор по отчётам сохраняет ответы анкеты в записи, как обычный запуск."""
+    config = make_config(tmp_path)
+    store = ProcessedStore(tmp_path / "report", today=date(2026, 10, 21))
+    store.record(url="https://hh.ru/vacancy/1", title="Java", company="Ozon", status="queued")
+    logger = RunLogger(tmp_path / "logs", run_id="retry-questionary")
+    logger.switch_day("2026-10-21")
+    stats = make_stats()
+
+    def fake_process(page, config, profile, llm, stats, logger, card) -> None:
+        stats.questionary[card.url] = [{"question": "Готовы к офису?", "answer": "Да"}]
+        stats.sent.append(
+            SentVacancy(
+                title=card.title,
+                company=card.company,
+                url=card.url,
+                probability=0.9,
+            )
+        )
+
+    monkeypatch.setattr("agent.pipeline._process_vacancy", fake_process)
+
+    class _ReportDay(date):
+        """«Сегодня» в конвейере — та же дата, что у отчёта: файл дня не меняется."""
+
+        @classmethod
+        def today(cls) -> date:
+            return date(2026, 10, 21)
+
+    monkeypatch.setattr("agent.pipeline.date", _ReportDay)
+
+    _retry_vacancies(
+        _FakePage("https://hh.ru/vacancy/1"),
+        config,
+        Profile(text="Java", examples="", style_rules=""),
+        None,  # type: ignore[arg-type]
+        stats,
+        logger,
+        store,
+        ("queued",),
+    )
+    logger.close()
+
+    payload = json.loads((tmp_path / "report" / "2026-10-21.json").read_text(encoding="utf-8"))
+
+    assert payload["vacancies"][0]["questionary"] == [
+        {"question": "Готовы к офису?", "answer": "Да"}
+    ]
 
 
 def test_generation_reason_strips_positive_intro() -> None:

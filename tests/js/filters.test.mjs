@@ -402,3 +402,26 @@ test('sameDateSelection: «дат нет» и «все даты» различа
         false
     );
 });
+
+test('matchesFilters: статус invite отделяет приглашения', () => {
+    const invited = vacancy({status: 'invite'});
+
+    assert.equal(f.matchesFilters(invited, filters({status: 'invite'})), true);
+    assert.equal(f.matchesFilters(vacancy({status: 'sent'}), filters({status: 'invite'})), false);
+});
+
+test('matchesFilters: архивная запись не попадает в invite', () => {
+    const archived = vacancy({status: 'invite', archived: true});
+
+    assert.equal(f.matchesFilters(archived, filters({status: 'invite'})), false);
+    assert.equal(f.matchesFilters(archived, filters({status: 'archived'})), true);
+});
+
+test('invite: выбор статуса сохраняется в адресе и восстанавливается', () => {
+    const params = f.toSearchParams(filters({status: 'invite'}));
+
+    assert.equal(params.get('status'), 'invite');
+    assert.equal(f.parseSearchParams('?status=invite', STATUSES).status, 'invite');
+    assert.equal(f.normalizeFilters({status: 'invite'}, STATUSES).status, 'invite');
+});
+

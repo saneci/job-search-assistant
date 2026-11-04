@@ -1,8 +1,13 @@
 .header-top {
     display: flex;
-    align-items: flex-start;
+    align-items: center;
     justify-content: space-between;
+    flex-wrap: wrap;
     gap: 16px;
+}
+
+.header-top > div:first-child {
+    min-width: 0;
 }
 
 .summary-grid {
@@ -298,6 +303,7 @@ tbody tr:hover {
     white-space: nowrap;
     border: 1px solid transparent;
     cursor: pointer;
+    touch-action: manipulation;
     outline: none;
     appearance: none;
     -webkit-appearance: none;
@@ -315,6 +321,11 @@ tbody tr:hover {
 .status-select:disabled {
     opacity: 0.5;
     cursor: wait;
+}
+
+.status-select:focus-visible {
+    outline: 2px solid var(--link);
+    outline-offset: 2px;
 }
 
 /* Селект статуса: тон берётся из переменной статуса, а фон и граница
@@ -524,7 +535,8 @@ tbody tr:hover {
 /* Firefox: своих псевдоэлементов прокрутки там нет, поэтому тонкая полоса
    задаётся стандартными свойствами. */
 @supports not selector(::-webkit-scrollbar) {
-    .dropdown-scroll {
+    .dropdown-scroll,
+    .details-body {
         scrollbar-width: thin;
         scrollbar-color: var(--muted-light) transparent;
     }
@@ -619,6 +631,7 @@ tbody tr:hover {
     padding: 20px;
     background: rgba(8, 15, 25, .55);
     backdrop-filter: blur(2px);
+    overscroll-behavior: contain;
 }
 
 .modal-backdrop[hidden] {
@@ -668,6 +681,7 @@ tbody tr:hover {
     border-radius: 10px;
     border: 1px solid var(--filter-border);
     cursor: pointer;
+    touch-action: manipulation;
 }
 
 .modal-btn-cancel {
@@ -692,4 +706,157 @@ tbody tr:hover {
 .modal-btn:focus-visible {
     outline: 2px solid var(--link);
     outline-offset: 2px;
+}
+
+/* Детали вакансии: широкое окно, таблица полей и ответы на анкету. */
+.modal-card--wide {
+    max-width: 760px;
+    max-height: 90vh;
+    display: flex;
+    flex-direction: column;
+}
+
+.details-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+}
+
+.details-head h2 {
+    margin: 0;
+}
+
+.details-meta {
+    margin: 4px 0 0;
+    color: var(--muted);
+    font-size: .9rem;
+}
+
+.modal-close {
+    font: inherit;
+    font-size: 1.4rem;
+    line-height: 1;
+    padding: 0 4px;
+    border: 0;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--muted);
+    cursor: pointer;
+    touch-action: manipulation;
+}
+
+.modal-close:hover {
+    color: var(--text);
+    background: var(--surface-2);
+}
+
+.modal-close:focus-visible {
+    outline: 2px solid var(--link);
+    outline-offset: 2px;
+}
+
+.details-body {
+    margin-top: 18px;
+    display: grid;
+    gap: 18px;
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+}
+
+/* Полоса прокрутки окна деталей — как у выпадающих списков. */
+.details-body::-webkit-scrollbar {
+    width: 8px;
+}
+
+.details-body::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.details-body::-webkit-scrollbar-thumb {
+    border-radius: 8px;
+    background: var(--muted-light);
+}
+
+.details-grid {
+    display: grid;
+    grid-template-columns: minmax(120px, 180px) 1fr;
+    gap: 8px 16px;
+}
+
+.details-grid dt {
+    color: var(--muted);
+    font-size: .85rem;
+}
+
+.details-grid dd {
+    margin: 0;
+    overflow-wrap: anywhere;
+}
+
+.details-grid a {
+    color: var(--link);
+}
+
+.details-subtitle {
+    margin: 0;
+    font-size: 1rem;
+}
+
+.questionary-list {
+    display: grid;
+    gap: 8px;
+}
+
+.questionary-item {
+    padding: 10px 12px;
+    border: 1px solid var(--border-soft);
+    border-radius: 10px;
+    background: var(--surface-2);
+}
+
+.questionary-question {
+    margin-bottom: 4px;
+    font-weight: 600;
+}
+
+.questionary-answer {
+    color: var(--muted-strong);
+    white-space: pre-wrap;
+}
+
+.details-empty {
+    margin: 0;
+    color: var(--muted);
+}
+
+.details-actions {
+    margin-top: 0;
+}
+
+/* Меню статуса из окна деталей должно быть выше подложки окна. */
+.status-menu {
+    z-index: 1100;
+}
+
+.status-select.is-details {
+    background-image: none;
+    padding-right: 12px;
+    cursor: pointer;
+}
+
+.status-select.is-details:hover {
+    filter: brightness(1.06);
+}
+
+@media (max-width: 600px) {
+    .details-grid {
+        grid-template-columns: 1fr;
+        gap: 4px;
+    }
+
+    .details-grid dt {
+        margin-top: 8px;
+    }
 }

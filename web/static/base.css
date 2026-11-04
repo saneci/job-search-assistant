@@ -169,6 +169,57 @@ body {
     flex-shrink: 0;
 }
 
+/* Навигация в шапке: прямые ссылки между разделами без возврата на главную. */
+.site-nav {
+    display: flex;
+    flex-wrap: wrap;
+    flex-shrink: 0;
+    gap: 6px;
+    margin: 0 12px 0 auto;
+}
+
+.site-nav__link {
+    color: var(--header-text);
+    text-decoration: none;
+    font-size: .85rem;
+    font-weight: 600;
+    padding: 6px 12px;
+    border-radius: 999px;
+    border: 1px solid transparent;
+    opacity: .78;
+    touch-action: manipulation;
+    transition: background .15s ease, opacity .15s ease, border-color .15s ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .site-nav__link {
+        transition: none;
+    }
+}
+
+@media (max-width: 640px) {
+    .site-nav {
+        width: 100%;
+        margin: 0;
+    }
+}
+
+.site-nav__link:hover {
+    opacity: 1;
+    background: var(--btn-toggle-hover);
+}
+
+.site-nav__link.is-active {
+    opacity: 1;
+    background: var(--btn-toggle-bg);
+    border-color: rgba(255, 255, 255, .25);
+}
+
+.site-nav__link:focus-visible {
+    outline: 2px solid var(--header-text);
+    outline-offset: 2px;
+}
+
 /* Ссылка с видом кнопки: подчёркивание не нужно. */
 .theme-toggle--link {
     text-decoration: none;
@@ -194,8 +245,13 @@ body {
 .header--row {
     display: flex;
     justify-content: space-between;
-    align-items: flex-start;
+    align-items: center;
+    flex-wrap: wrap;
     gap: 16px;
+}
+
+.header--row > div:first-child {
+    min-width: 0;
 }
 
 .header h1 {
