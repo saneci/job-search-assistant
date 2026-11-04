@@ -13,7 +13,12 @@ from typing import Any
 
 import pytest
 
-from agent.config import ConfigError, load_config, resolve_area_id
+from agent.config import DEFAULT_DATA_DIR, ConfigError, load_config, resolve_area_id
+
+
+def test_default_data_dir_uses_new_app_name() -> None:
+    """Каталог данных называется по актуальному имени приложения."""
+    assert DEFAULT_DATA_DIR.name == "job-search-assistant"
 
 
 def _merge(base: dict[str, Any], extra: dict[str, Any]) -> dict[str, Any]:
@@ -103,7 +108,6 @@ def test_defaults(tmp_path: Path, field: str, expected: Any) -> None:
             {"notifications": {"captcha": {"enabled": "да"}}},
             "notifications.captcha.enabled",
         ),
-        ({"data": {"paths": {"logs_dir": "/tmp/logs"}}}, "data.paths.logs_dir"),
         ({"llm": {"system_prompt_path": "no_such_prompt.md"}}, "llm.system_prompt_path"),
     ],
 )
@@ -112,10 +116,38 @@ def test_invalid_values_fail_fast(tmp_path: Path, updates: dict[str, Any], error
         load_config(write_config(tmp_path, updates))
 
 
+def test_data_paths_are_resolved_from_user_data_dir(tmp_path: Path) -> None:
+    """Относительный путь к данным считается от каталога пользователя."""
+    config = load_config(write_config(tmp_path, {"data": {"paths": {"logs_dir": "logs"}}}))
+
+    assert config.data.paths.logs_dir == (DEFAULT_DATA_DIR / "logs").resolve()
+
+
+def test_old_data_prefix_is_stripped(tmp_path: Path) -> None:
+    """Старый префикс `data/` не создаёт вложенный каталог в данных пользователя."""
+    config = load_config(
+        write_config(tmp_path, {"data": {"paths": {"logs_dir": "data/logs"}}})
+    )
+
+    assert config.data.paths.logs_dir == (DEFAULT_DATA_DIR / "logs").resolve()
+
+
 def test_flat_legacy_key_is_rejected(tmp_path: Path) -> None:
     """Формат один: старый плоский ключ — ошибка, а не тихий пропуск."""
     with pytest.raises(ConfigError, match="limit_per_run"):
         load_config(write_config(tmp_path, {"limit_per_run": 3}))
+
+
+def test_prefilter_lives_inside_pipeline(tmp_path: Path) -> None:
+    """Префильтр читается из `pipeline.prefilter`, плоский ключ `prefilter` — ошибка."""
+    config = load_config(
+        write_config(tmp_path, {"pipeline": {"prefilter": {"enabled": True}}})
+    )
+
+    assert config.pipeline.prefilter.enabled is True
+
+    with pytest.raises(ConfigError, match="prefilter"):
+        load_config(write_config(tmp_path, {"prefilter": {"enabled": True}}))
 
 
 def test_local_config_overrides_base(tmp_path: Path) -> None:

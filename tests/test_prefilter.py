@@ -23,7 +23,7 @@ from agent.hh_vacancy import (
 from agent.llm import DecisionResult, GenerationResult
 from agent.logging_setup import RunLogger
 from agent.models import VacancyCard, VacancyDetails
-from agent.pipeline import QUEUE_REASON_TEXTS, _process_vacancy
+from agent.pipeline import QUESTIONARY_MANUAL_REASON, QUEUE_REASON_TEXTS, _process_vacancy
 from agent.prefilter import (
     VERDICT_AUTO_FILL,
     VERDICT_MANUAL,
@@ -32,6 +32,8 @@ from agent.prefilter import (
     Question,
     QuestionOption,
     evaluate,
+    llm_answers,
+    manual_hint,
     questions_from_records,
     read_questions,
 )
@@ -41,13 +43,15 @@ from agent.report import RunStats
 
 @dataclass(frozen=True)
 class Answers:
-    """Ответы профиля для тестов: те же поля, что в prefilter.answers."""
+    """Ответы профиля для тестов: те же поля, что в pipeline.prefilter.answers."""
 
     skills: tuple[str, ...] = ()
     achievements: str = ""
     education_level: str = ""
     location_country: str = ""
     work_experience: float | None = None
+    work_experience_total: float | None = None
+    work_experience_profile: float | None = None
     salary_min: float | None = None
     salary_message: str = ""
     relocation_ready: str = ""
@@ -57,6 +61,12 @@ class Answers:
     languages: str = ""
     has_electronic_workbook: bool | None = None
     travel_ready: bool | None = None
+    self_employed: str = ""
+    age: int | None = None
+    russian_labour_code_expirience: float | None = None
+    is_project_based_experience: bool | None = None
+    payment_per_unit_engagement: bool | None = None
+    has_remote_workspace: bool | None = None
 
 
 def radio(question: str, labels: list[str], name: str = "q1") -> Question:
@@ -92,6 +102,19 @@ def test_records_of_one_group_become_one_question() -> None:
     assert questions[0].required is True
 
 
+def test_radio_record_keeps_label_as_option() -> None:
+    """Подпись радиокнопки — вариант ответа: снимок приходит с пустым списком опций."""
+    records = [
+        {"name": "q1", "kind": "radio", "question": "Вы в РФ?", "label": "Да", "options": []},
+        {"name": "q1", "kind": "radio", "question": "Вы в РФ?", "label": "Нет", "options": []},
+    ]
+
+    questions = questions_from_records(records)
+
+    assert len(questions) == 1
+    assert questions[0].labels == ("Да", "Нет")
+
+
 def test_select_record_keeps_its_options() -> None:
     record = {"name": "fmt", "kind": "select", "question": "Формат работы"}
     record["options"] = ["Офис", "Удалённо"]
@@ -106,6 +129,44 @@ def test_records_of_unknown_kind_and_garbage_are_ignored() -> None:
     assert questions_from_records([{"kind": "slider", "question": "Оцените"}]) == ()
     assert questions_from_records("нет") == ()
     assert questions_from_records(None) == ()
+
+
+def test_generic_placeholder_is_not_a_question() -> None:
+    """Подсказка «Писать тут» не становится вопросом: по ней ничего не распознать."""
+    record = {"name": "salary", "kind": "text", "question": "", "hint": "Писать тут"}
+
+    assert questions_from_records([record])[0].text == ""
+
+
+def test_invisible_question_text_is_cleaned() -> None:
+    """Невидимые символы разметки не попадают в формулировку вопроса."""
+    record = {"name": "q1", "kind": "text", "question": "\u200b \ufeff", "hint": ""}
+
+    assert questions_from_records([record])[0].text == ""
+
+
+def test_block_question_wins_over_placeholder() -> None:
+    """Настоящая формулировка блока важнее подсказки поля: у hh.ru там «Писать тут»."""
+    record = {
+        "name": "salary",
+        "kind": "text",
+        "question": "Ваши зарплатные ожидания",
+        "hint": "Писать тут",
+    }
+
+    assert questions_from_records([record])[0].text == "Ваши зарплатные ожидания"
+
+
+def test_meaningful_hint_fills_empty_question() -> None:
+    """Осмысленная подсказка остаётся формулировкой, если блока вопроса нет."""
+    record = {
+        "name": "achievements",
+        "kind": "text",
+        "question": "",
+        "hint": "Напишите пару важных достижений…",
+    }
+
+    assert questions_from_records([record])[0].text == "Напишите пару важных достижений…"
 
 
 class _BrokenScope:
@@ -400,7 +461,13 @@ def _write_config(tmp_path: Path, updates: dict[str, Any] | None = None) -> Path
         "pipeline": {"limit_per_run": 5, "delay_between_actions": {"from": 0, "to": 0}},
     }
     for key, value in (updates or {}).items():
-        data[key] = value
+        current = data.get(key)
+        if isinstance(current, dict) and isinstance(value, dict):
+            merged = dict(current)
+            merged.update(value)
+            data[key] = merged
+        else:
+            data[key] = value
     path = tmp_path / "config.yaml"
     path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
     return path
@@ -410,41 +477,76 @@ def test_prefilter_is_off_by_default(tmp_path: Path) -> None:
     """Схема по умолчанию не меняет прежнее поведение отклика."""
     config = load_config(_write_config(tmp_path))
 
-    assert config.prefilter.enabled is False
-    assert config.prefilter.submit_auto_fill is False
-    assert config.prefilter.answers.location_country == ""
-    assert config.prefilter.answers.work_experience is None
+    assert config.pipeline.prefilter.enabled is False
+    assert config.pipeline.prefilter.submit_auto_fill is False
+    assert config.pipeline.prefilter.answers.location_country == ""
+    assert config.pipeline.prefilter.answers.work_experience is None
 
 
 def test_prefilter_answers_come_from_local_file(tmp_path: Path) -> None:
-    _write_config(tmp_path, {"prefilter": {"enabled": True}})
-    local = {"prefilter": {"answers": {"location_country": "RU", "work_experience": 7}}}
+    _write_config(tmp_path, {"pipeline": {"prefilter": {"enabled": True}}})
+    local = {"pipeline": {"prefilter": {"answers": {"location_country": "RU", "work_experience": 7}}}}
     (tmp_path / "config.local.yaml").write_text(
         json.dumps(local, ensure_ascii=False), encoding="utf-8"
     )
 
     config = load_config(tmp_path / "config.yaml")
 
-    assert config.prefilter.enabled is True
-    assert config.prefilter.answers.location_country == "RU"
-    assert config.prefilter.answers.work_experience == 7.0
+    assert config.pipeline.prefilter.enabled is True
+    assert config.pipeline.prefilter.answers.location_country == "RU"
+    assert config.pipeline.prefilter.answers.work_experience == 7.0
 
 
 def test_prefilter_answers_are_not_read_from_environment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Личные ответы живут только в config.local.yaml."""
-    monkeypatch.setenv("PREFILTER__ANSWERS__LOCATION_COUNTRY", "KZ")
+    monkeypatch.setenv("PIPELINE__PREFILTER__ANSWERS__LOCATION_COUNTRY", "KZ")
 
     config = load_config(_write_config(tmp_path))
 
-    assert config.prefilter.answers.location_country == ""
+    assert config.pipeline.prefilter.answers.location_country == ""
+
+
+def test_none_labour_code_experience_means_empty(tmp_path: Path) -> None:
+    """`none` в числовом поле значит «не заполнено», а не ошибку схемы."""
+    config = load_config(
+        _write_config(
+            tmp_path,
+            {
+                "pipeline": {
+                    "prefilter": {
+                        "answers": {"russian_labour_code_expirience": "none"}
+                    }
+                }
+            },
+        )
+    )
+
+    assert config.pipeline.prefilter.answers.russian_labour_code_expirience is None
+
+
+def test_self_employed_unknown_value_fails_fast(tmp_path: Path) -> None:
+    """Статус ИП принимает только yes/no/maybe."""
+    with pytest.raises(ConfigError, match="self_employed"):
+        load_config(
+            _write_config(
+                tmp_path,
+                {
+                    "pipeline": {
+                        "prefilter": {"answers": {"self_employed": "позже"}}
+                    }
+                },
+            )
+        )
 
 
 def test_unknown_prefilter_answer_fails_fast(tmp_path: Path) -> None:
-    path = _write_config(tmp_path, {"prefilter": {"answers": {"education_level": "высшее"}}})
+    path = _write_config(
+        tmp_path, {"pipeline": {"prefilter": {"answers": {"education_level": "высшее"}}}}
+    )
 
-    with pytest.raises(ConfigError, match="prefilter.answers.education_level"):
+    with pytest.raises(ConfigError, match="pipeline.prefilter.answers.education_level"):
         load_config(path)
 
 
@@ -452,17 +554,19 @@ def test_work_format_list_and_free_text_are_accepted(tmp_path: Path) -> None:
     path = _write_config(
         tmp_path,
         {
-            "prefilter": {
-                "answers": {
-                    "work_format": ["hybrid", "remote"],
-                    "salary_message": "Ориентируюсь на рынок.\n\n  Готов обсудить вилку.  ",
-                    "achievements": "Перевёл\n монолит на  микросервисы.",
+            "pipeline": {
+                "prefilter": {
+                    "answers": {
+                        "work_format": ["hybrid", "remote"],
+                        "salary_message": "Ориентируюсь на рынок.\n\n  Готов обсудить вилку.  ",
+                        "achievements": "Перевёл\n монолит на  микросервисы.",
+                    }
                 }
             }
         },
     )
 
-    answers = load_config(path).prefilter.answers
+    answers = load_config(path).pipeline.prefilter.answers
 
     assert answers.work_format == ("hybrid", "remote")
     # Свободный текст — одной строкой: в форме это обычное поле ввода.
@@ -473,21 +577,164 @@ def test_work_format_list_and_free_text_are_accepted(tmp_path: Path) -> None:
 def test_skills_are_read_as_a_list(tmp_path: Path) -> None:
     path = _write_config(
         tmp_path,
-        {"prefilter": {"answers": {"skills": ["java", " spring ", "spring", "junit"]}}},
+        {
+            "pipeline": {
+                "prefilter": {
+                    "answers": {"skills": ["java", " spring ", "spring", "junit"]}
+                }
+            }
+        },
     )
 
-    answers = load_config(path).prefilter.answers
+    answers = load_config(path).pipeline.prefilter.answers
 
     assert answers.skills == ("java", "spring", "junit")
 
 
 def test_unknown_work_format_in_list_fails_fast(tmp_path: Path) -> None:
     path = _write_config(
-        tmp_path, {"prefilter": {"answers": {"work_format": ["remote", "дача"]}}}
+        tmp_path,
+        {"pipeline": {"prefilter": {"answers": {"work_format": ["remote", "дача"]}}}},
     )
 
-    with pytest.raises(ConfigError, match="prefilter.answers.work_format"):
+    with pytest.raises(ConfigError, match="pipeline.prefilter.answers.work_format"):
         load_config(path)
+
+
+def text_question(text: str, name: str = "q1") -> Question:
+    """Текстовый вопрос формы."""
+    return Question(name=name, text=text, kind="text")
+
+
+def test_salary_short_zp_is_recognized() -> None:
+    """«Ваши зп ожидания?» — это вопрос про зарплату, а не неизвестный."""
+    result = evaluate((text_question("Ваши зп ожидания?"),), Answers(salary_min=250000))
+
+    assert result.verdict == VERDICT_AUTO_FILL
+    assert result.answers[0].value == "250000"
+
+
+def test_age_question_is_answered() -> None:
+    """Возраст из профиля вписывается в текстовое поле."""
+    result = evaluate(
+        (text_question("Ваш полный возраст (количество полных лет)"),), Answers(age=25)
+    )
+
+    assert result.verdict == VERDICT_AUTO_FILL
+    assert result.answers[0].value == "25"
+
+
+def test_labour_code_experience_uses_its_own_field() -> None:
+    """Подтверждённый стаж по трудовой книжке берётся из отдельного поля."""
+    question = radio(
+        "Имеется ли у вас подтвержденный стаж работы по данной должности от 3-х лет, "
+        "зафиксированный в трудовой книжке?",
+        ["Да", "Нет"],
+    )
+
+    result = evaluate(
+        (question,),
+        Answers(work_experience_profile=2.5, russian_labour_code_expirience=5),
+    )
+
+    assert result.verdict == VERDICT_AUTO_FILL
+    assert result.answers[0].value == "Да"
+
+
+def test_project_experience_flag_answers_choice() -> None:
+    """Флаг проектного опыта закрывает вопрос выбором «Да»."""
+    result = evaluate(
+        (radio("Является ли ваш опыт проектной разработкой?", ["Да", "Нет"]),),
+        Answers(is_project_based_experience=True),
+    )
+
+    assert result.verdict == VERDICT_AUTO_FILL
+    assert result.answers[0].value == "Да"
+
+
+def test_payment_per_unit_answers_choice() -> None:
+    """Готовность к оплате за результат закрывает вопрос выбором."""
+    result = evaluate(
+        (radio("Готовы ли вы работать с оплатой за единицу результата?", ["Да", "Нет"]),),
+        Answers(payment_per_unit_engagement=False),
+    )
+
+    assert result.verdict == VERDICT_AUTO_FILL
+    assert result.answers[0].value == "Нет"
+
+
+def test_remote_workspace_text_answers_ready() -> None:
+    """Оснащение домашнего офиса в текстовое поле отвечается без рода."""
+    result = evaluate(
+        (
+            text_question(
+                'Оснащение вашего домашнего офиса: укажите "Готов(а)", если есть гарнитура '
+                "и веб-камера"
+            ),
+        ),
+        Answers(has_remote_workspace=True),
+    )
+
+    assert result.verdict == VERDICT_AUTO_FILL
+    assert result.answers[0].value == "Всё необходимое есть"
+
+
+def test_llm_answer_drops_meta_about_profile() -> None:
+    """Ответ на анкету не ссылается на профиль: мета-фраза отбрасывается."""
+    question = text_question("Расскажите об автоматизации тестирования")
+    answers = llm_answers(
+        (question,),
+        {
+            1: (
+                "На последнем месте работы я занимался разработкой и внедрением "
+                "тестового покрытия. Информация о ручном тестировании на этом месте "
+                "в профиле не указана."
+            )
+        },
+    )
+
+    assert answers[0].value == (
+        "На последнем месте работы я занимался разработкой и внедрением тестового покрытия."
+    )
+
+
+def test_llm_answer_with_only_meta_is_unanswered() -> None:
+    """Если после очистки ничего не осталось, вопрос уходит в ручные."""
+    question = text_question("Расскажите об автоматизации тестирования")
+
+    assert llm_answers((question,), {1: "В профиле нет информации"}) == ()
+
+
+def test_choice_prefers_short_yes_over_long_option() -> None:
+    """Если есть короткое «Да», не выбираем длинную формулировку с «готов(а)»."""
+    question = radio(
+        "Имеется ли у вас подтвержденный стаж работы по данной должности от 3-х лет, "
+        "зафиксированный в трудовой книжке?",
+        [
+            "Да, подтверждаю наличие необходимого стажа по ТК РФ и готов(а) "
+            "документально его верифицировать",
+            "Да",
+            "Нет",
+        ],
+    )
+
+    result = evaluate((question,), Answers(russian_labour_code_expirience=5))
+
+    assert result.verdict == VERDICT_AUTO_FILL
+    assert result.answers[0].value == "Да"
+
+
+def test_self_employed_maybe_finds_option() -> None:
+    """«Нет, но могу открыть» выбирается, если такой вариант есть в анкете."""
+    question = radio(
+        "Есть ли у вас открытое и действующее статусное ИП?",
+        ["Да", "Нет", "Нет, но могу открыть"],
+    )
+
+    result = evaluate((question,), Answers(self_employed="maybe"))
+
+    assert result.verdict == VERDICT_AUTO_FILL
+    assert result.answers[0].value == "Нет, но могу открыть"
 
 
 # --- Пайплайн -------------------------------------------------------------
@@ -555,9 +802,11 @@ def _run_vacancy(
     prefilter: dict[str, Any] = {"enabled": enabled, "submit_auto_fill": submit_auto_fill}
     if answers is not None:
         prefilter["answers"] = answers
-    config = load_config(_write_config(tmp_path, {"prefilter": prefilter}))
+    config = load_config(_write_config(tmp_path, {"pipeline": {"prefilter": prefilter}}))
     # Файл ответов пишется в data проекта: в тестах его подменяем заглушкой.
-    monkeypatch.setattr("agent.pipeline.questionary_store.save", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "agent.pipeline.questionary_store.save_screenshot", lambda *args, **kwargs: None
+    )
     details = VacancyDetails(
         url="https://hh.ru/vacancy/138435882",
         title="Java-разработчик",
@@ -614,7 +863,9 @@ def test_unknown_question_is_answered_by_the_same_llm_call(
     form = ResponseForm(status="ready", questions=(radio("Какой у вас любимый цвет?", ["Красный"]),))
     monkeypatch.setattr(
         "agent.pipeline.submit_response",
-        lambda page, form, letter, waiter=None, answers=(): ResponseResult(status=STATUS_SENT),
+        lambda page, form, letter, waiter=None, answers=(), after_fill=None: ResponseResult(
+            status=STATUS_SENT
+        ),
     )
 
     stats, llm, _ = _run_vacancy(
@@ -643,7 +894,92 @@ def test_question_without_answer_queues_vacancy(
 
     assert llm.generations == 1
     assert stats.sent == []
-    assert "Какой у вас любимый цвет?" in stats.queued[0]["reason"]
+    assert stats.queued[0]["reason"] == QUESTIONARY_MANUAL_REASON
+    assert "Какой у вас любимый цвет?" in stats.queued[0]["message"]
+
+
+def test_partial_answers_are_saved_in_questionary_block(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ответы, которые LLM успела дать, сохраняются даже при неполной анкете."""
+    form = ResponseForm(
+        status="ready",
+        questions=(
+            radio("Какой у вас любимый цвет?", ["Красный"], name="q1"),
+            radio("Какое у вас хобби?", ["Спорт", "Книги"], name="q2"),
+        ),
+    )
+
+    stats, _, _ = _run_vacancy(
+        tmp_path,
+        monkeypatch,
+        form,
+        answers={},
+        submit_auto_fill=True,
+        llm_answers={1: "красный"},
+    )
+
+    assert stats.questionary[VACANCY_URL] == [
+        {"question": "Какой у вас любимый цвет?", "answer": "Красный"}
+    ]
+    assert stats.queued[0]["reason"] == QUESTIONARY_MANUAL_REASON
+    assert "Какое у вас хобби?" in stats.queued[0]["message"]
+
+
+def test_manual_verdict_logs_short_message_and_keeps_reason_in_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Журнал печатает короткую строку, а причина ручного разбора остаётся в отчёте."""
+    form = ResponseForm(status="ready", questions=(radio("Вы находитесь в РФ?", ["Да", "Нет"]),))
+
+    stats, _, logger = _run_vacancy(tmp_path, monkeypatch, form, answers={})
+
+    events = [
+        json.loads(line)
+        for line in logger.events_path.read_text(encoding="utf-8").splitlines()
+    ]
+    messages = [item["message"] for item in events if item["event"] == "info"]
+    assert any(
+        "не удалось заполнить анкету, подробная информация в дневном отчёте" in item
+        for item in messages
+    )
+    assert not any("Что сделать:" in item for item in messages)
+    prefilter = [item for item in events if item["event"] == "prefilter"][0]
+    assert "Вы находитесь в РФ?" in prefilter["reason"]
+    assert "ответьте на анкету вручную" in prefilter["reason"]
+    assert stats.queued[0]["reason"] == QUESTIONARY_MANUAL_REASON
+    assert "Вы находитесь в РФ?" in stats.queued[0]["message"]
+    assert "требует ручного ответа" in stats.queued[0]["message"]
+
+
+def test_unknown_question_reason_is_subjective_and_needs_manual_answer() -> None:
+    """Незнакомый профилю вопрос в отчёте описан как субъективный, без технических кодов."""
+    result = evaluate((radio("Какой у вас любимый цвет?", ["Красный"]),), Answers())
+
+    assert result.verdict == VERDICT_MANUAL
+    assert "субъективен" in result.reason
+    assert "требует ручного ответа" in result.reason
+
+
+def test_manual_hint_points_to_daily_report() -> None:
+    """Короткая строка консоли отсылает человека к подробностям в дневном отчёте."""
+    result = evaluate(
+        (radio("Вы находитесь в РФ?", ["Может быть"]),), Answers(location_country="RU")
+    )
+
+    assert result.verdict == VERDICT_MANUAL
+    assert "дневном отчёте" in manual_hint(result)
+
+
+def test_experience_threshold_reads_hyphenated_years() -> None:
+    """«от 3-х лет» — тот же порог, что «от 3 лет»: иначе вопрос уходит в ручные."""
+    result = evaluate(
+        (radio("Имеется ли у вас подтвержденный стаж работы от 3-х лет?", ["Да", "Нет"]),),
+        Answers(work_experience=4),
+    )
+
+    assert result.verdict == VERDICT_AUTO_FILL
+    assert result.answers[0].value == "Да"
 
 
 def test_auto_fill_waits_for_human_by_default(
@@ -654,7 +990,7 @@ def test_auto_fill_waits_for_human_by_default(
     stats, llm, _ = _run_vacancy(tmp_path, monkeypatch, form, answers={"location_country": "RU"})
 
     assert llm.generations == 0
-    assert stats.queued[0]["reason"] == QUEUE_REASON_TEXTS["prefilter_auto_fill"]
+    assert stats.queued[0]["reason"] == QUEUE_REASON_TEXTS["prefilter_auto_fill_disabled"]
 
 
 def test_auto_fill_sends_response_when_allowed(
@@ -663,7 +999,9 @@ def test_auto_fill_sends_response_when_allowed(
     form = ResponseForm(status="ready", questions=(radio("Вы находитесь в РФ?", ["Да", "Нет"]),))
     monkeypatch.setattr(
         "agent.pipeline.submit_response",
-        lambda page, form, letter, waiter=None, answers=(): ResponseResult(status=STATUS_SENT),
+        lambda page, form, letter, waiter=None, answers=(), after_fill=None: ResponseResult(
+            status=STATUS_SENT
+        ),
     )
 
     stats, llm, _ = _run_vacancy(
@@ -672,6 +1010,42 @@ def test_auto_fill_sends_response_when_allowed(
 
     assert llm.generations == 1
     assert len(stats.sent) == 1
+
+
+def test_questionary_snapshot_is_taken_when_form_is_filled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Пайплайн снимает заполненную форму до отправки: сбой съёмки виден в журнале."""
+    form = ResponseForm(status="ready", questions=(radio("Вы находитесь в РФ?", ["Да", "Нет"]),))
+
+    def fake_submit(
+        page: Any,
+        form: ResponseForm,
+        letter: str,
+        waiter: Any = None,
+        answers: Any = (),
+        after_fill: Any = None,
+    ) -> ResponseResult:
+        if after_fill is not None:
+            after_fill()
+        return ResponseResult(status=STATUS_SENT)
+
+    monkeypatch.setattr("agent.pipeline.submit_response", fake_submit)
+
+    _, _, logger = _run_vacancy(
+        tmp_path, monkeypatch, form, answers={"location_country": "RU"}, submit_auto_fill=True
+    )
+
+    events = [
+        json.loads(line)
+        for line in logger.events_path.read_text(encoding="utf-8").splitlines()
+    ]
+    snapshot_events = [
+        item["event"]
+        for item in events
+        if item["event"].startswith("questionary_screenshot")
+    ]
+    assert snapshot_events == ["questionary_screenshot_error"]
 
 
 def test_form_without_questions_follows_usual_flow(
@@ -700,7 +1074,7 @@ def test_test_screen_is_passed_and_answered(
     )
     monkeypatch.setattr(
         "agent.pipeline.submit_test",
-        lambda page, answers, waiter=None: ResponseResult(status=TEST_PASSED),
+        lambda page, answers, waiter=None, after_fill=None: ResponseResult(status=TEST_PASSED),
     )
     monkeypatch.setattr(
         "agent.pipeline.respond",
@@ -734,7 +1108,7 @@ def test_failed_test_queues_vacancy(
     )
     monkeypatch.setattr(
         "agent.pipeline.submit_test",
-        lambda page, answers, waiter=None: ResponseResult(status=TEST_FAILED),
+        lambda page, answers, waiter=None, after_fill=None: ResponseResult(status=TEST_FAILED),
     )
 
     def boom(*args: Any, **kwargs: Any) -> None:

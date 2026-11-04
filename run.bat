@@ -28,6 +28,15 @@ if not exist ".venv\Scripts\python.exe" (
         exit /b 1
     )
 
+    if exist "requirements-web.txt" (
+        ".venv\Scripts\python.exe" -m pip install -r requirements-web.txt
+        if errorlevel 1 (
+            echo Не удалось установить зависимости веб-интерфейса.
+            pause
+            exit /b 1
+        )
+    )
+
     ".venv\Scripts\python.exe" run.py --install-browser
     if errorlevel 1 (
         echo Не удалось подготовить браузер для Playwright.

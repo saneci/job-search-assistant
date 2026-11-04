@@ -872,12 +872,15 @@ def submit_response(
     letter: str,
     captcha_waiter: Callable[[], bool] | None = None,
     answers: Sequence[Answer] = (),
+    after_fill: Callable[[], None] | None = None,
 ) -> ResponseResult:
     """Заполняет открытую форму отклика и отправляет её.
 
     `answers` — ответы префильтра: проставляем их до письма, чтобы анкета
     уходила вместе с откликом. Вместе со статусом возвращаем причину, которую
     hh.ru показал в форме: без неё непонятно, почему отклик не ушёл.
+    `after_fill` вызывается, когда форма заполнена и готова к отправке:
+    по нему снимается снимок того, что именно уйдёт работодателю.
     """
     if not form.ready:
         return ResponseResult(status=form.status, reason=form.reason)
@@ -917,6 +920,9 @@ def submit_response(
     # Письмо вставляем, если форма позволяет (по ТЗ).
     if _fill_letter(page, scope, letter):
         page.wait_for_timeout(LETTER_SETTLE_MS)
+
+    if after_fill is not None:
+        after_fill()
 
     submit = _find_action(scope, SUBMIT_SELECTORS, RESPOND_RE)
     if submit is None:
@@ -990,8 +996,13 @@ def submit_test(
     page: Page,
     answers: Sequence[Answer],
     captcha_waiter: Callable[[], bool] | None = None,
+    after_fill: Callable[[], None] | None = None,
 ) -> ResponseResult:
-    """Проставляет ответы в тест, отправляет его и читает результат."""
+    """Проставляет ответы в тест, отправляет его и читает результат.
+
+    `after_fill` вызывается после простановки ответов, до отправки теста:
+    по нему снимается снимок заполненной формы.
+    """
     scope = _response_scope(page)
     expected = sum(1 for answer in answers if answer.filled)
     if expected and apply_answers(scope, answers) < expected:
@@ -999,6 +1010,8 @@ def submit_test(
             "test",
             reason="hh.ru не дал ответить на все вопросы теста — нужен ручной проход",
         )
+    if after_fill is not None:
+        after_fill()
     submit = _find_action(scope, TEST_SELECTORS + ACTION_TEXT_SELECTORS, TEST_SUBMIT_RE)
     if submit is None:
         return _result("test", reason="hh.ru не показал кнопку отправки теста")

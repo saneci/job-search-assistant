@@ -1,9 +1,8 @@
-"""Тесты ответов на анкеты и тесты: LLM-контракт, слияние с профилем, хранение."""
+"""Тесты ответов на анкеты и тесты: LLM-контракт, слияние с профилем, снимок формы."""
 
 from __future__ import annotations
 
-import json
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -18,7 +17,7 @@ from agent.prefilter import (
     question_lines,
     without_rejects,
 )
-from agent.questionary import file_name, save
+from agent.questionary import save_screenshot
 
 
 def _radio(text: str, *labels: str) -> Question:
@@ -111,36 +110,55 @@ def test_unknown_question_stays_unanswered() -> None:
     assert result.answers[0].cluster == UNKNOWN_CLUSTER
 
 
-def test_questionary_saved_per_vacancy_and_profile(tmp_path: Path) -> None:
-    """Файл ответов: номер вакансии и резюме, содержимое — вопрос и ответ."""
-    path = save(
+class _ShotPage:
+    """Заглушка страницы: пишет файл вместо реального скриншота."""
+
+    def screenshot(self, path: str, timeout: int | None = None) -> None:
+        Path(path).write_bytes(b"png")
+
+
+class _BrokenShotPage:
+    """Страница, у которой скриншот падает: снимок не должен ронять запуск."""
+
+    def screenshot(self, path: str, timeout: int | None = None) -> None:
+        raise RuntimeError("скриншот недоступен")
+
+
+def test_questionary_screenshot_has_date_and_vacancy(tmp_path: Path) -> None:
+    """Снимок формы: дата, номер вакансии и суффикс `questionary`, файл создан."""
+    path = save_screenshot(
         tmp_path,
+        _ShotPage(),
         url="https://hh.ru/vacancy/138435882",
-        profile="Java Developer",
-        channel="hh",
-        status="sent",
-        questionary=[("Вы в РФ?", "Да")],
-        title="Java-разработчик",
-        company="Ozon",
         saved_at=datetime(2026, 10, 31, 12, 0),
     )
 
     assert path is not None
-    assert path.name == "138435882-java-developer.json"
-    saved = json.loads(path.read_text(encoding="utf-8"))
-    assert saved["questionary"] == [{"question": "Вы в РФ?", "answer": "Да"}]
-    assert saved["url"] == "https://hh.ru/vacancy/138435882"
-    assert saved["profile"] == "Java Developer"
+    assert path.name == "2026-10-31-138435882-questionary.png"
+    assert path.read_bytes() == b"png"
 
 
-def test_questionary_without_answers_saves_nothing(tmp_path: Path) -> None:
-    assert save(
-        tmp_path, url="https://hh.ru/vacancy/1", profile="Java", channel="hh", status="sent",
-        questionary=[],
-    ) is None
+def test_questionary_screenshot_without_date_uses_today(tmp_path: Path) -> None:
+    path = save_screenshot(tmp_path, _ShotPage(), url="https://hh.ru/vacancy/42")
+
+    assert path is not None
+    assert path.name == f"{date.today().isoformat()}-42-questionary.png"
+
+
+def test_questionary_screenshot_failure_returns_none(tmp_path: Path) -> None:
+    """Сбой скриншота не ломает отклик и не оставляет мусора."""
+    assert save_screenshot(tmp_path, _BrokenShotPage(), url="https://hh.ru/vacancy/42") is None
     assert list(tmp_path.iterdir()) == []
 
 
-def test_questionary_file_name_is_safe_for_any_url() -> None:
-    """Имя файла — только латиница, цифры и дефис: кириллица в имени не выживает."""
-    assert file_name("https://hh.ru/vacancy/42", "Резюме Java") == "42-java.json"
+def test_questionary_screenshot_name_is_safe_for_any_url(tmp_path: Path) -> None:
+    """Номер вакансии берётся из пути: query и кириллица в имени файла не выживают."""
+    path = save_screenshot(
+        tmp_path,
+        _ShotPage(),
+        url="https://company.example/вакансия/42?utm=hh",
+        saved_at=datetime(2026, 10, 31, 12, 0),
+    )
+
+    assert path is not None
+    assert path.name == "2026-10-31-42-questionary.png"

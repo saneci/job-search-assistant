@@ -43,17 +43,28 @@ class RunStats:
         return len(self.sent)
 
 
-def build_report(stats: RunStats, report_path: Path | None = None) -> str:
+def build_report(
+    stats: RunStats,
+    report_path: Path | None = None,
+    vacancy_title: str = "",
+    resume_name: str = "",
+) -> str:
     """Формирует текст отчёта для консоли и письма.
 
     С `report_path=None` путь к файлу дня не добавляется — его печатает
-    консоль отдельной строкой с меткой времени.
+    консоль отдельной строкой с меткой времени. В заголовок добавляется
+    резюме для hh или вакансия для Habr, когда запуск обработал ровно одну.
     """
     finished = stats.finished_at or datetime.now()
     separator = "=" * 33
+    header = f"Отчёт за {stats.started_at.strftime('%Y-%m-%d %H:%M')}"
+    if resume_name:
+        header += f" по резюме «{resume_name}»"
+    elif vacancy_title:
+        header += f" по вакансии «{vacancy_title}»"
     lines = [
         separator,
-        f"Отчёт за {stats.started_at.strftime('%Y-%m-%d %H:%M')}",
+        header,
         separator,
         f"- Обработано вакансий: {stats.reviewed}",
         f"- Отправлено откликов за запуск: {len(stats.sent)}",

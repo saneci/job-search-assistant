@@ -13,17 +13,17 @@
     <body>
         <div class="container">
             <!-- Шапка -->
-            <div class="header header--row">
-                <div>
-                    <h1>📊 Воронка поиска работы</h1>
-                    <div class="meta">{{ metrics.updated_text }}</div>
-                    <div class="meta">Период воронки считается по дате первой обработки вакансии в приложении</div>
-                </div>
-                <div class="header-actions">
-                    <a href="/" class="theme-toggle theme-toggle--link" title="На главную" aria-label="На главную">
-                        🏠
-                    </a>
-                    <button class="theme-toggle" id="themeToggle" type="button">🌙</button>
+            <div class="header">
+                <div class="header--row">
+                    <div>
+                        <h1>📊 Воронка поиска работы</h1>
+                        <div class="meta">{{ metrics.updated_text }}</div>
+                        <div class="meta">Период воронки считается по дате первой обработки вакансии в приложении</div>
+                    </div>
+                    {% include "_nav.html" %}
+                    <div class="header-actions">
+                        <button class="theme-toggle" id="themeToggle" type="button">🌙</button>
+                    </div>
                 </div>
             </div>
 

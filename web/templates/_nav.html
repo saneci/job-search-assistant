@@ -1,0 +1,8 @@
+<nav class="site-nav" aria-label="Основная навигация">
+    <a class="site-nav__link{% if active_page == 'index' %} is-active{% endif %}" href="/"
+       {% if active_page == 'index' %}aria-current="page"{% endif %}>Главная</a>
+    <a class="site-nav__link{% if active_page == 'metrics' %} is-active{% endif %}" href="/metrics"
+       {% if active_page == 'metrics' %}aria-current="page"{% endif %}>Воронка</a>
+    <a class="site-nav__link{% if active_page == 'report' %} is-active{% endif %}" href="/report"
+       {% if active_page == 'report' %}aria-current="page"{% endif %}>Отчёты</a>
+</nav>

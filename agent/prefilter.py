@@ -3,7 +3,7 @@
 Анкета появляется только после нажатия «Откликнуться»: это отдельная форма,
 которую рендерит hh.ru или ATS работодателя. В тексте вакансии вопросов нет,
 поэтому работаем с DOM формы: читаем вопросы, сопоставляем их с полями профиля
-(`prefilter.answers`) и решаем судьбу вакансии.
+(`pipeline.prefilter.answers`) и решаем судьбу вакансии.
 
 Вердикты:
 
@@ -46,10 +46,14 @@ UNKNOWN_CLUSTER = "unknown"
 MAX_QUESTIONS = 30
 # Длина формулировки вопроса в причине отчёта: анкета может быть огромной.
 REASON_TEXT_LIMIT = 120
+# Невидимые символы разметки (нулевой ширины, BOM, мягкий перенос): человек их
+# не видит, но в причине отчёта они выглядят мусором.
+_INVISIBLE_RE = re.compile(r"[\u200b-\u200f\u202a-\u202e\u2060-\u2064\ufeff\u00ad]")
+NO_QUESTION_LABEL = "без формулировки"
 
 
 class Answers(Protocol):
-    """Значения профиля для анкеты: их даёт схема конфига (prefilter.answers).
+    """Значения профиля для анкеты: их даёт схема конфига (pipeline.prefilter.answers).
 
     Значение `None` или пустая строка означают «поле не заполнено» — такой
     вопрос уходит в `manual_required` и никогда не приводит к отсеву.
@@ -60,6 +64,8 @@ class Answers(Protocol):
     education_level: str
     location_country: str
     work_experience: float | None
+    work_experience_total: float | None
+    work_experience_profile: float | None
     salary_min: float | None
     salary_message: str
     relocation_ready: str
@@ -69,6 +75,12 @@ class Answers(Protocol):
     languages: str
     has_electronic_workbook: bool | None
     travel_ready: bool | None
+    self_employed: str
+    age: int | None
+    russian_labour_code_expirience: float | None
+    is_project_based_experience: bool | None
+    payment_per_unit_engagement: bool | None
+    has_remote_workspace: bool | None
 
 
 @dataclass(frozen=True)
@@ -147,10 +159,14 @@ class PrefilterResult:
 # Один снимок DOM вместо десятка CSS-селекторов: разметка анкеты у каждого
 # работодателя своя, а снимок разбирается в Python и проверяется тестами.
 # Стратегии поиска блока вопроса: fieldset / role=radiogroup / data-qa*question,
-# затем legend, data-qa-заголовок, aria-label и первый абзац группы.
+# затем legend, data-qa-заголовок, aria-label, текст блока без вариантов ответа
+# и ближайший текст над полем. Подсказка поля («Писать тут») вопросом не считается.
 
 _QUESTIONS_BODY = r"""
-  const norm = (value) => (value || "").replace(/\s+/g, " ").trim();
+  // Невидимые символы разметки (нулевой ширины, BOM) в тексте вопроса: человек
+  // их не видит, а признак «формулировка найдена» из-за них срабатывает ложно.
+  const INVISIBLE = /[\u200b-\u200f\u202a-\u202e\u2060-\u2064\ufeff\u00ad]/g;
+  const norm = (value) => (value || "").replace(INVISIBLE, "").replace(/\s+/g, " ").trim();
   const visible = (el) => !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
   const SKIP_RE = /сопроводительн|response-letter|popup-form-letter|резюме для отклика|видимость резюме/i;
   const CUSTOM_RE = /^(свой вариант|другое|другой вариант|иное)$/i;
@@ -160,6 +176,7 @@ _QUESTIONS_BODY = r"""
     "legend",
     "[data-qa*='question-title']",
     "[data-qa*='question-text']",
+    "[data-qa='task-question']",
     "[data-qa='vacancy-response-popup-form-question']"
   ];
   const SKIP_DIRECT = "label, input, select, textarea, option, button, [role='radiogroup']";
@@ -184,6 +201,43 @@ _QUESTIONS_BODY = r"""
     return "";
   };
 
+  // Текст-кандидат в формулировку вопроса: без контролов внутри и в пределах
+  // длины. Отсоединённую копию блока видимостью не проверяем.
+  const textOf = (node, limit, attached) => {
+    if (!node) return "";
+    if (attached !== false && !visible(node)) return "";
+    if (node.matches(SKIP_DIRECT)) return "";
+    if (node.querySelector("input, select, textarea")) return "";
+    const text = norm(node.innerText);
+    return text && text.length <= limit ? text : "";
+  };
+
+  // Формулировка из блока вопроса целиком: убираем варианты ответа и кнопки,
+  // остаётся сам текст вопроса.
+  const promptOf = (block) => {
+    const copy = block.cloneNode(true);
+    copy.querySelectorAll("input, select, textarea, button, label, [role='radiogroup']")
+      .forEach((node) => node.remove());
+    return textOf(copy, 400, false);
+  };
+
+  // Формулировка над полем: у поля без своего заголовка вопрос стоит
+  // в предыдущем соседе ближайшего предка. Блок с контролами вопросом не считаем.
+  const nearbyText = (control) => {
+    let current = control;
+    for (let depth = 0; depth < 5; depth += 1) {
+      let sibling = current.previousElementSibling;
+      while (sibling) {
+        const text = textOf(sibling, 300);
+        if (text) return text;
+        sibling = sibling.previousElementSibling;
+      }
+      if (!current.parentElement || current.parentElement === root) return "";
+      current = current.parentElement;
+    }
+    return "";
+  };
+
   const questionOf = (block) => {
     for (const selector of TITLE_SELECTORS) {
       const node = block.querySelector(selector);
@@ -192,10 +246,11 @@ _QUESTIONS_BODY = r"""
     }
     const aria = block.getAttribute("aria-label");
     if (aria) return norm(aria);
+    const prompt = promptOf(block);
+    if (prompt) return prompt;
     for (const child of Array.from(block.children)) {
-      if (child.matches(SKIP_DIRECT)) continue;
-      const text = norm(child.innerText);
-      if (text && text.length <= 300) return text;
+      const text = textOf(child, 300);
+      if (text) return text;
     }
     return "";
   };
@@ -206,9 +261,13 @@ _QUESTIONS_BODY = r"""
   );
   for (const control of controls) {
     if (control.disabled || !visible(control)) continue;
-    const block = control.closest(GROUP_SELECTOR) || control.parentElement;
+    // Анкета hh.ru кладёт формулировку и поле в общий блок задачи:
+    // без него поле видно, а вопрос остаётся за пределами блока.
+    const block = control.closest(GROUP_SELECTOR) ||
+      control.closest("[data-qa='task-body']") ||
+      control.parentElement;
     if (!block || !visible(block)) continue;
-    const question = questionOf(block);
+    const question = questionOf(block) || nearbyText(control);
     const label = labelOf(control);
     const name = control.getAttribute("name") || control.getAttribute("id") || "";
     if (SKIP_RE.test(name + " " + label + " " + question)) continue;
@@ -222,12 +281,13 @@ _QUESTIONS_BODY = r"""
         custom: false, required: required, options: options
       });
     } else if (control.tagName === "TEXTAREA") {
-      // Подсказка в поле точнее обёртки: «Напишите пару важных достижений…».
-      const placeholder = norm(control.getAttribute("placeholder"));
+      // Подсказка поля уходит отдельным полем: «Писать тут» стоит в каждом
+      // текстовом поле и формулировкой вопроса не является. Осмысленную
+      // подсказку использует разбор снимка, когда вопроса рядом нет.
+      const hint = norm(control.getAttribute("placeholder"));
       records.push({
-        name: name, kind: "text", question: placeholder || question,
-        label: placeholder || label,
-        custom: false, required: required, options: []
+        name: name, kind: "text", question: question, hint: hint,
+        label: "", custom: false, required: required, options: []
       });
     } else {
       records.push({
@@ -263,13 +323,41 @@ def read_questions(scope: Locator | Page) -> tuple[Question, ...]:
     return questions_from_records(records)
 
 
+# Подсказки поля ввода, которые вопросом не считаются: у hh.ru в каждом
+# текстовом поле стоит «Писать тут», по такой подсказке вопрос не распознать.
+GENERIC_HINTS = frozenset(
+    {
+        "писать тут",
+        "пишите тут",
+        "напишите здесь",
+        "напишите тут",
+        "введите текст",
+        "введите ответ",
+        "введите значение",
+        "текст ответа",
+        "ваш ответ",
+        "ответ",
+    }
+)
+_HINT_STRIP = " \t\r\n.!…:;"
+
+
+def _usable_hint(value: object) -> str:
+    """Подсказка поля как формулировка вопроса: только осмысленный текст."""
+    hint = clean_text(value)
+    if not hint or hint.casefold().strip(_HINT_STRIP) in GENERIC_HINTS:
+        return ""
+    return hint
+
+
 def questions_from_records(records: object) -> tuple[Question, ...]:
     """Собирает вопросы из снимка DOM: контролы одной группы — один вопрос.
 
     Радиокнопки и чекбоксы с общим `name` и одной формулировкой — варианты
     одного вопроса; `select` приходит со списком опций; `textarea` — текстовый
     вопрос. Вопрос без формулировки остаётся в списке: он уйдёт в ручные,
-    а не в отсев.
+    а не в отсев. Подсказка поля заменяет формулировку только когда рядом
+    вопроса нет и сама подсказка осмысленная.
     """
     if not isinstance(records, Sequence) or isinstance(records, (str, bytes)):
         return ()
@@ -283,8 +371,10 @@ def questions_from_records(records: object) -> tuple[Question, ...]:
         if kind not in KINDS:
             continue
         text = clean_text(record.get("question"))
+        if kind == KIND_TEXT and not text:
+            text = _usable_hint(record.get("hint"))
         name = clean_text(record.get("name"))
-        options = _record_options(record)
+        options = _record_options(record, kind)
         key = (text, name)
         if key in index:
             position = index[key]
@@ -311,13 +401,19 @@ def questions_from_records(records: object) -> tuple[Question, ...]:
     return tuple(built)
 
 
-def _record_options(record: Mapping[str, Any]) -> tuple[QuestionOption, ...]:
-    """Варианты ответа: из списка опций `select` или из подписи контрола."""
+def _record_options(record: Mapping[str, Any], kind: str) -> tuple[QuestionOption, ...]:
+    """Варианты ответа: список опций `select` или подпись самого контрола.
+
+    У радиокнопок и чекбоксов снимок приходит с пустым списком `options`:
+    вариант ответа — это подпись контрола, поэтому по виду вопроса берём
+    правильный источник, а не первый попавшийся.
+    """
     custom = bool(record.get("custom"))
     raw = record.get("options")
-    if isinstance(raw, Sequence) and not isinstance(raw, (str, bytes)):
+    labels: list[str] = []
+    if kind == KIND_SELECT and isinstance(raw, Sequence) and not isinstance(raw, (str, bytes)):
         labels = [clean_text(item) for item in raw]
-    else:
+    if not labels:
         labels = [clean_text(record.get("label"))]
     return tuple(
         QuestionOption(label=label, is_custom=custom) for label in labels if label
@@ -333,8 +429,9 @@ def _merge_options(
 
 
 def clean_text(value: object) -> str:
-    """Однострочный текст из значения снимка DOM."""
-    return " ".join(str(value or "").split())
+    """Однострочный текст из значения снимка DOM без невидимых символов."""
+    text = _INVISIBLE_RE.sub("", str(value or ""))
+    return " ".join(text.split())
 
 
 # --- Сопоставление вопроса с профилем -------------------------------------
@@ -373,11 +470,12 @@ VALUE_TOKENS: dict[str, re.Pattern[str]] = {
 NO_OPTION_REASON = "в анкете нет подходящего варианта ответа"
 NOT_FILLED_REASON = "поле профиля не заполнено"
 TEXT_REQUIRED_REASON = "на вопрос нужен текстовый ответ, угадывать не будем"
+UNKNOWN_CLUSTER_REASON = "вопрос субъективен и требует ручного ответа"
 
 # Коды стран, которые считаем «нахожусь в России».
 RUSSIA_CODES = frozenset({"RU", "РФ", "РОССИЯ", "RUSSIA"})
 
-_YEARS_RE = re.compile(r"(\d+(?:[.,]\d+)?)\s*(?:год|года|лет)", re.IGNORECASE)
+_YEARS_RE = re.compile(r"(\d+(?:[.,]\d+)?)\s*(?:-\s*х\s*)?(?:год|года|лет)", re.IGNORECASE)
 # Вопрос про сумму: просят число, а не пожелания.
 _SALARY_AMOUNT_RE = re.compile(r"сумм|₽|\bруб|цифр|числ|сколько", re.IGNORECASE)
 # Вопрос про пожелания: уместен свободный текст из профиля.
@@ -437,18 +535,21 @@ def _manual(question: Question, cluster: str, field: str, reason: str) -> Answer
 def _find_option(question: Question, token: str) -> str | None:
     """Подпись варианта, соответствующего токену.
 
-    «Свой вариант» не выбираем никогда: он требует текстового ввода, а угадывать
-    за пользователя нельзя.
+    Из подходящих вариантов берём самый короткий: «Да» лучше длинной
+    формулировки с «готов(а)», где род зависит от человека. «Свой вариант»
+    не выбираем никогда: он требует текстового ввода, а угадывать нельзя.
     """
     pattern = CONSENT_TOKENS.get(token) or VALUE_TOKENS.get(token)
     if pattern is None:
         return None
-    for option in question.options:
-        if option.is_custom:
-            continue
-        if pattern.search(option.label):
-            return option.label
-    return None
+    matches = [
+        option.label
+        for option in question.options
+        if not option.is_custom and pattern.search(option.label)
+    ]
+    if not matches:
+        return None
+    return min(matches, key=lambda label: (len(clean_text(label)), clean_text(label).casefold()))
 
 
 def _choice(
@@ -551,20 +652,43 @@ def _resolve_work_permit(question: Question, answers: Answers) -> Answer:
     return _choice(question, "work_permit", "work_permit", permit, rejects=not allowed)
 
 
+def _experience_field(question: Question) -> str:
+    """Какое поле стажа использовать: общий стаж или стаж по профилю вакансии."""
+    text = question.text or ""
+    if re.search(
+        r"по\s+(?:данной\s+)?должност|по\s+профил|подтвержденн\w*\s+стаж",
+        text,
+        re.IGNORECASE,
+    ):
+        return "work_experience_profile"
+    return "work_experience_total"
+
+
+def _experience_years(answers: Answers, field: str) -> float | None:
+    """Значение стажа: новое поле, затем старое work_experience, затем общий стаж."""
+    value = getattr(answers, field, None)
+    if value is None:
+        value = getattr(answers, "work_experience", None)
+    if value is None and field == "work_experience_profile":
+        value = getattr(answers, "work_experience_total", None)
+    return float(value) if value is not None else None
+
+
 def _resolve_experience(question: Question, answers: Answers) -> Answer:
-    years = answers.work_experience
+    field = _experience_field(question)
+    years = _experience_years(answers, field)
     if years is None:
-        return _manual(question, "experience", "work_experience", NOT_FILLED_REASON)
+        return _manual(question, "experience", field, NOT_FILLED_REASON)
     required = _threshold(_YEARS_RE, question.text)
     if required is None:
         return _manual(
-            question, "experience", "work_experience", "в вопросе не указан требуемый стаж"
+            question, "experience", field, "в вопросе не указан требуемый стаж"
         )
     satisfied = float(years) >= required
     answer = _choice(
         question,
         "experience",
-        "work_experience",
+        field,
         "yes" if satisfied else "no",
         rejects=not satisfied,
     )
@@ -574,11 +698,150 @@ def _resolve_experience(question: Question, answers: Answers) -> Answer:
         return Answer(
             question=question,
             cluster="experience",
-            field="work_experience",
+            field=field,
             value=_number_text(years),
             rejects=not satisfied,
         )
     return answer
+
+
+def _resolve_labour_code_experience(question: Question, answers: Answers) -> Answer:
+    """Подтверждённый стаж по трудовой книжке: отдельное поле профиля."""
+    field = "russian_labour_code_expirience"
+    value = getattr(answers, field, None)
+    if value is None:
+        value = getattr(answers, "work_experience_profile", None)
+    if value is None:
+        value = getattr(answers, "work_experience", None)
+    if value is None:
+        value = getattr(answers, "work_experience_total", None)
+    if value is None:
+        return _manual(question, "labour_code", field, NOT_FILLED_REASON)
+    years = float(value)
+    required = _threshold(_YEARS_RE, question.text)
+    satisfied = years > 0 and (required is None or years >= required)
+    if question.kind == KIND_TEXT:
+        text = f"Да, {_number_text(years)}" if satisfied else "Нет"
+        return Answer(
+            question=question, cluster="labour_code", field=field, value=text, rejects=not satisfied
+        )
+    answer = _choice(
+        question, "labour_code", field, "yes" if satisfied else "no", rejects=not satisfied
+    )
+    if answer.value:
+        return answer
+    return _manual(question, "labour_code", field, NO_OPTION_REASON)
+
+
+def _resolve_age(question: Question, answers: Answers) -> Answer:
+    age = getattr(answers, "age", None)
+    if age is None:
+        return _manual(question, "age", "age", NOT_FILLED_REASON)
+    if question.kind == KIND_TEXT:
+        return Answer(question=question, cluster="age", field="age", value=str(int(age)))
+    required = _threshold(_YEARS_RE, question.text)
+    satisfied = required is None or float(age) >= required
+    answer = _choice(question, "age", "age", "yes" if satisfied else "no")
+    if answer.value:
+        return answer
+    return _manual(question, "age", "age", NO_OPTION_REASON)
+
+
+def _option_contains(question: Question, needle: str) -> str | None:
+    """Вариант, в подписи которого есть заданный текст."""
+    for option in question.options:
+        if option.is_custom:
+            continue
+        if needle in clean_text(option.label).casefold():
+            return option.label
+    return None
+
+
+def _resolve_self_employed(question: Question, answers: Answers) -> Answer:
+    status = _value(answers, "self_employed")
+    if not status:
+        return _manual(question, "self_employed", "self_employed", NOT_FILLED_REASON)
+    if status == "yes":
+        token, text = "yes", "Да"
+    elif status == "no":
+        token, text = "no", "Нет"
+    else:
+        token, text = "", "Нет, но могу открыть"
+    if question.kind == KIND_TEXT:
+        return Answer(
+            question=question, cluster="self_employed", field="self_employed", value=text
+        )
+    if status == "maybe":
+        label = _option_contains(question, "могу открыть") or _option_contains(
+            question, "готов открыть"
+        )
+        if label is not None:
+            return Answer(
+                question=question,
+                cluster="self_employed",
+                field="self_employed",
+                value=label,
+            )
+        return _manual(question, "self_employed", "self_employed", NO_OPTION_REASON)
+    answer = _choice(question, "self_employed", "self_employed", token)
+    if answer.value:
+        return answer
+    return _manual(question, "self_employed", "self_employed", NO_OPTION_REASON)
+
+
+def _resolve_flag(
+    question: Question,
+    answers: Answers,
+    cluster: str,
+    field: str,
+    yes_text: str,
+    no_text: str,
+) -> Answer:
+    """Ответ по флагу профиля: текст для поля, «Да»/«Нет» для выбора."""
+    value = getattr(answers, field, None)
+    if value is None:
+        return _manual(question, cluster, field, NOT_FILLED_REASON)
+    token = "yes" if value else "no"
+    text = yes_text if value else no_text
+    if question.kind == KIND_TEXT:
+        return Answer(question=question, cluster=cluster, field=field, value=text)
+    answer = _choice(question, cluster, field, token)
+    if answer.value:
+        return answer
+    return _manual(question, cluster, field, NO_OPTION_REASON)
+
+
+def _resolve_project_experience(question: Question, answers: Answers) -> Answer:
+    return _resolve_flag(
+        question,
+        answers,
+        "project_experience",
+        "is_project_based_experience",
+        "Да",
+        "Нет",
+    )
+
+
+def _resolve_payment_per_unit(question: Question, answers: Answers) -> Answer:
+    return _resolve_flag(
+        question,
+        answers,
+        "payment_per_unit",
+        "payment_per_unit_engagement",
+        "Да",
+        "Нет",
+    )
+
+
+def _resolve_remote_workspace(question: Question, answers: Answers) -> Answer:
+    return _resolve_flag(
+        question,
+        answers,
+        "remote_workspace",
+        "has_remote_workspace",
+        "Всё необходимое есть",
+        "Нет",
+    )
 
 
 def _resolve_salary(question: Question, answers: Answers) -> Answer:
@@ -613,7 +876,7 @@ def _salary_message(question: Question, message: str) -> Answer:
     )
 
 
-_SKILL_MISS_REASON = "технология из вопроса не найдена в prefilter.answers.skills"
+_SKILL_MISS_REASON = "технология из вопроса не найдена в pipeline.prefilter.answers.skills"
 _ACHIEVEMENTS_FIELD_REASON = "достижения вписываем только в текстовое поле"
 
 
@@ -818,6 +1081,56 @@ CLUSTER_RULES: tuple[ClusterRule, ...] = (
         _resolve_location,
     ),
     ClusterRule(
+        "labour_code",
+        "russian_labour_code_expirience",
+        re.compile(
+            r"трудов\w*\s+книжк|по\s+ТК|трудового\s+кодекса|подтвержденн\w*\s+стаж",
+            re.IGNORECASE,
+        ),
+        _resolve_labour_code_experience,
+    ),
+    ClusterRule(
+        "age",
+        "age",
+        re.compile(r"возраст|полных\s+лет|сколько\s+вам\s+лет", re.IGNORECASE),
+        _resolve_age,
+    ),
+    ClusterRule(
+        "self_employed",
+        "self_employed",
+        re.compile(
+            r"\bИП\b|индивидуальн\w*\s+предпринимател|самозанят", re.IGNORECASE
+        ),
+        _resolve_self_employed,
+    ),
+    ClusterRule(
+        "project_experience",
+        "is_project_based_experience",
+        re.compile(
+            r"проектн\w*\s+(?:опыт|разработк)|аутсорс|разн\w*\s+(?:продукт|клиент)",
+            re.IGNORECASE,
+        ),
+        _resolve_project_experience,
+    ),
+    ClusterRule(
+        "payment_per_unit",
+        "payment_per_unit_engagement",
+        re.compile(
+            r"оплат\w*\s+за\s+(?:единицу|результат)|закрыт\w*\s+этап|повременн",
+            re.IGNORECASE,
+        ),
+        _resolve_payment_per_unit,
+    ),
+    ClusterRule(
+        "remote_workspace",
+        "has_remote_workspace",
+        re.compile(
+            r"домашн\w*\s+офис|рабоч\w*\s+место|гарнитур|веб-?камер|видеоконференц",
+            re.IGNORECASE,
+        ),
+        _resolve_remote_workspace,
+    ),
+    ClusterRule(
         "experience",
         "work_experience",
         # Только вопросы со стажем в цифрах: «есть ли опыт со Spring» — это навыки.
@@ -827,7 +1140,7 @@ CLUSTER_RULES: tuple[ClusterRule, ...] = (
     ClusterRule(
         "salary",
         "salary_min",
-        re.compile(r"зарплат|оклад|доход|оплат|вознагражд", re.IGNORECASE),
+        re.compile(r"зарплат|оклад|доход|оплат|вознагражд|\bзп\b", re.IGNORECASE),
         _resolve_salary,
     ),
     ClusterRule(
@@ -891,7 +1204,8 @@ def evaluate(questions: Sequence[Question], answers: Answers) -> PrefilterResult
         return PrefilterResult(VERDICT_REJECT, collected, _reject_reason(rejected[0]))
     manual = [answer for answer in collected if not answer.filled]
     if manual:
-        return PrefilterResult(VERDICT_MANUAL, collected, _manual_reason(manual[0]))
+        reason = _manual_reason(manual[0], total=len(collected), unanswered=len(manual))
+        return PrefilterResult(VERDICT_MANUAL, collected, reason)
     return PrefilterResult(VERDICT_AUTO_FILL, collected)
 
 
@@ -903,12 +1217,12 @@ def _answer_question(question: Question, answers: Answers) -> Answer:
     skill = _skill_answer(question, answers)
     if skill is not None:
         return skill
-    return _manual(question, UNKNOWN_CLUSTER, "", "вопрос не сопоставлен с профилем")
+    return _manual(question, UNKNOWN_CLUSTER, "", UNKNOWN_CLUSTER_REASON)
 
 
 def _question_label(question: Question) -> str:
     """Формулировка вопроса для отчёта: без значений профиля и без обрезки глазами."""
-    text = clean_text(question.text) or "без формулировки"
+    text = clean_text(question.text) or NO_QUESTION_LABEL
     if len(text) <= REASON_TEXT_LIMIT:
         return text
     return text[:REASON_TEXT_LIMIT].rstrip() + "…"
@@ -919,6 +1233,11 @@ def question_label(question: Question) -> str:
     return _question_label(question)
 
 
+def question_full_label(question: Question) -> str:
+    """Полная формулировка вопроса без обрезки: для подробного сообщения."""
+    return clean_text(question.text) or NO_QUESTION_LABEL
+
+
 def _reject_reason(answer: Answer) -> str:
     """Причина отсева: сам вопрос, без персональных данных из профиля."""
     return (
@@ -927,10 +1246,43 @@ def _reject_reason(answer: Answer) -> str:
     )
 
 
-def _manual_reason(answer: Answer) -> str:
-    """Причина ручного разбора: вопрос и что именно не удалось вычислить."""
+def _manual_reason(answer: Answer, total: int = 1, unanswered: int = 1) -> str:
+    """Причина ручного разбора: что не удалось выяснить и сколько вопросов осталось.
+
+    Строка попадает в дневной отчёт и журнал, поэтому объясняет причину словами,
+    а не техническими кодами, и не выводит мусор вместо формулировки вопроса.
+    """
     reason = answer.reason or NO_OPTION_REASON
-    return f"Анкета работодателя: вопрос «{_question_label(answer.question)}» — {reason}"
+    label = _question_label(answer.question)
+    if label == NO_QUESTION_LABEL:
+        if reason == UNKNOWN_CLUSTER_REASON:
+            return (
+                "Анкета работодателя: часть вопросов субъективна и требует ручного ответа "
+                f"(без ответа {unanswered} из {total})"
+            )
+        return (
+            "Анкета работодателя: не удалось прочитать формулировки вопросов "
+            f"(без ответа {unanswered} из {total}), ответьте на анкету вручную"
+        )
+    if reason == UNKNOWN_CLUSTER_REASON:
+        return (
+            f"Анкета работодателя: вопрос «{label}» субъективен и требует ручного ответа. "
+            f"Без ответа {unanswered} из {total}"
+        )
+    return (
+        f"Анкета работодателя: вопрос «{label}» — {reason}. "
+        f"Без ответа {unanswered} из {total}, ответьте на анкету вручную"
+    )
+
+
+# В консоли по анкете печатается одна короткая строка: подробности уже есть
+# в дневном отчёте, а разбор каждого вопроса человеку в консоли не нужен.
+MANUAL_HINT = "не удалось заполнить анкету, подробная информация в дневном отчёте"
+
+
+def manual_hint(result: PrefilterResult) -> str:
+    """Короткая строка для консоли вместо разбора причин по каждому вопросу."""
+    return MANUAL_HINT
 
 
 # --- Ответы модели на нерешённые вопросы -----------------------------------
@@ -939,6 +1291,26 @@ def _manual_reason(answer: Answer) -> str:
 # с заявкой на письмо: один вызов — письмо и ответы сразу.
 
 LLM_CLUSTER = "llm"
+
+# Мета-фразы, которые модель иногда добавляет в ответ на анкету. В письме
+# и ответе кандидата их быть не должно: человек не говорит о себе «в профиле».
+_META_ANSWER_RE = re.compile(
+    r"\bпрофил(?:ь|я|ю|е|ем)\b|резюме|ваканси\w*|не\s+указан\w*|"
+    r"нет\s+информации|информаци\w*\s+(?:нет|отсутств\w*)|"
+    r"в\s+описании|в\s+требованиях",
+    re.IGNORECASE,
+)
+_SENTENCE_RE = re.compile(r"(?<=[.!?])\s+")
+
+
+def _sanitize_answer(text: str) -> str:
+    """Убирает из ответа модели мета-фразы о профиле и вакансии."""
+    kept = [
+        sentence
+        for sentence in _SENTENCE_RE.split(text)
+        if not _META_ANSWER_RE.search(sentence)
+    ]
+    return " ".join(kept).strip()
 
 
 def unanswered_questions(result: PrefilterResult) -> tuple[Question, ...]:
@@ -994,7 +1366,7 @@ def _match_answer(question: Question, raw: str) -> str | None:
     if not text:
         return None
     if question.kind == KIND_TEXT:
-        return text
+        return _sanitize_answer(text) or None
     lowered = text.casefold()
     for option in question.options:
         if clean_text(option.label).casefold() == lowered:
@@ -1018,7 +1390,7 @@ def merge_answers(
 ) -> tuple[Answer, ...]:
     """Итоговые ответы для формы: профиль первым, ответы модели — на остальное.
 
-    Модель не переопределяет профиль: ответ из `prefilter.answers` точнее,
+    Модель не переопределяет профиль: ответ из `pipeline.prefilter.answers` точнее,
     а расхождение с ним означало бы выдумку.
     """
     collected = list(result.answers_to_fill())

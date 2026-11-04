@@ -73,7 +73,7 @@ def notify_test(channel: EmailConfig, recipient: str) -> tuple[bool, str]:
     """Тестовое письмо на конкретный адрес: проверка канала без браузера и LLM."""
     text = "\n".join(
         [
-            "Тестовое письмо от hh-agent.",
+            "Тестовое письмо от job-search-assistant.",
             "",
             "Если вы его видите, канал уведомлений настроен.",
         ]

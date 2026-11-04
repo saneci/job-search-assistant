@@ -653,6 +653,14 @@ def test_system_prompt_has_no_threshold_numbers() -> None:
     prompt = load_system_prompt(PROJECT_ROOT / "SYSTEM_PROMPT.md")
 
     assert "70%" not in prompt
+
+
+def test_system_prompt_answers_as_candidate() -> None:
+    """Ответы на анкету пишутся от первого лица и не ссылаются на профиль."""
+    prompt = load_system_prompt(PROJECT_ROOT / "SYSTEM_PROMPT.md")
+
+    assert "от первого лица" in prompt
+    assert "Не ссылайся на профиль" in prompt
     assert "1500" not in prompt
 
 

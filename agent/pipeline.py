@@ -80,13 +80,17 @@ from .models import (
 )
 from .notify import notify_captcha
 from .prefilter import (
+    NO_QUESTION_LABEL,
+    VERDICT_MANUAL,
     VERDICT_REJECT,
     Answer,
     PrefilterResult,
     Question,
     evaluate,
     llm_answers,
+    manual_hint,
     merge_answers,
+    question_full_label,
     question_lines,
     question_label,
     unanswered_questions,
@@ -123,7 +127,7 @@ QUEUE_REASON_TEXTS: dict[str, str] = {
 
     "test": "Для отклика на вакансию необходимо пройти тестирование",
     "questionnaire": "Для отклика на вакансию необходимо заполнить анкету",
-    "prefilter_auto_fill": "Анкета работодателя заполнена автоматически — отклик за человеком",
+    "prefilter_auto_fill_disabled": "Анкета работодателя заполнена автоматически — отклик за человеком",
     "external_form": "Отклик нужно отправить на сайте работодателя",
     "captcha": "hh.ru просит пройти капчу: откликнитесь вручную",
     "no_form": "hh.ru не показал форму отклика — проверьте вакансию вручную",
@@ -131,6 +135,11 @@ QUEUE_REASON_TEXTS: dict[str, str] = {
     "other_resume": "Уже отправлен отклик по другому резюме",
     "interrupted": "Запуск прерван во время обработки вакансии, проверьте вакансию вручную",
 }
+
+# Короткая причина для списка: подробности с формулировкой вопроса — в поле `message`.
+QUESTIONARY_MANUAL_REASON = (
+    "В анкете есть субъективные вопросы от работодателя, на которые требуется ручной ответ"
+)
 
 # Вводная часть обоснования Generation: вердикт и общие слова о совпадении.
 # В отчёт идёт только причина, без этой «шапки».
@@ -314,9 +323,10 @@ def run(
     report_path = processed.path if processed.path.exists() else None
     stats.report_sent = processed.today_summary().get(OUTCOME_SENT, 0)
 
-    report = build_report(stats, report_path)
+    vacancy_title, resume_name = _report_context(config, channel, stats)
+    report = build_report(stats, report_path, vacancy_title, resume_name)
     logger.info("")
-    logger.info_plain(build_report(stats, None))
+    logger.info_plain(build_report(stats, None, vacancy_title, resume_name))
     if report_path is not None:
         logger.info(f"Отчёт сохранён в файле: {report_path}")
 
@@ -827,6 +837,7 @@ def _process_and_remember(
             channel=outcome_channel or channel.name,
             archived=_outcome_archived(skipped),
             questionary=stats.questionary.get(card.url, ()),
+            message=_outcome_message(stats, counters, outcome),
         )
 
 
@@ -1294,7 +1305,7 @@ def _process_vacancy(
     )
     # Анкета работодателя есть только в форме отклика hh.ru: у Habr формы нет.
     questionary: _Questionnaire | None = None
-    if config.prefilter.enabled and channel.name == HH:
+    if config.pipeline.prefilter.enabled and channel.name == HH:
         questionary = _knockout_prefilter(page, config, stats, logger, details, captcha_waiter)
         if questionary is None:
             # Анкета гарантированно ведёт к отказу: Generation не нужен.
@@ -1304,12 +1315,12 @@ def _process_vacancy(
     needs_project_links = requires_project_links(details)
     # Анкета уже решена профилем, а отправлять её нельзя: Generation не нужен.
     if questionary is not None and questionary.result is not None and not pending:
-        if questionary.result.answers_to_fill() and not config.prefilter.submit_auto_fill:
+        if questionary.result.answers_to_fill() and not config.pipeline.prefilter.submit_auto_fill:
             queue(
                 stats,
                 logger,
                 details,
-                "prefilter_auto_fill",
+                "prefilter_auto_fill_disabled",
                 "ответы анкеты вычислены",
                 reason="",
             )
@@ -1387,25 +1398,34 @@ def _process_vacancy(
 
     answers = _questionary_answers(questionary, pending, generation.answers)
     if answers is None:
-        # Модель не ответила на вопрос анкеты: угадывать нельзя, отклик за человеком.
+        # Частичные ответы сохраняем: человек увидит их в отчёте и заполнит остаток.
+        partial = _questionary_partial(questionary, pending, generation.answers)
+        if partial:
+            _remember_questionary(stats, details, partial)
+        short_reason = _pending_reason(pending, generation.answers)
+        full_reason = _pending_reason(pending, generation.answers, full=True)
         queue(
             stats,
             logger,
             details,
             "questionnaire",
             "ответы анкеты",
-            reason=_pending_reason(pending, generation.answers),
+            reason=short_reason,
+            message="" if full_reason == short_reason else full_reason,
         )
         return
 
+    if answers:
+        _remember_questionary(stats, details, answers)
+
     form = None
     if questionary is not None and questionary.result is not None:
-        if answers and not config.prefilter.submit_auto_fill:
+        if answers and not config.pipeline.prefilter.submit_auto_fill:
             queue(
                 stats,
                 logger,
                 details,
-                "prefilter_auto_fill",
+                "prefilter_auto_fill_disabled",
                 "ответы анкеты вычислены",
                 reason="",
             )
@@ -1418,11 +1438,16 @@ def _process_vacancy(
             questionary.form.other_resume,
         )
 
+    after_fill = (
+        (lambda: _snapshot_questionary(page, config, logger, details)) if answers else None
+    )
+
     try:
         if form is not None and questionary is not None and questionary.test:
             # Тест проходим тем же ответами: сначала сам тест, потом отклик.
-            test_result = submit_test(page, form.answers, captcha_waiter)
-            _save_questionary(config, stats, details, channel, answers, test_result.status)
+            test_result = submit_test(
+                page, form.answers, captcha_waiter, after_fill=after_fill
+            )
             answers = ()
             if test_result.status == TEST_PASSED:
                 log.info("тест по вакансии пройден, отправляю отклик")
@@ -1434,7 +1459,12 @@ def _process_vacancy(
         elif form is not None:
             # Префильтр уже открыл форму: отклик уходит вместе с ответами анкеты.
             result = submit_response(
-                page, form, generation.cover_letter, captcha_waiter, form.answers
+                page,
+                form,
+                generation.cover_letter,
+                captcha_waiter,
+                form.answers,
+                after_fill=after_fill,
             )
         else:
             result = channel.respond(
@@ -1454,7 +1484,6 @@ def _process_vacancy(
 
     status = result.status
     log.event("respond", url=details.url, status=status, reason=result.reason)
-    _save_questionary(config, stats, details, channel, answers, status)
 
     if status == STATUS_SENT:
         stats.sent.append(
@@ -1572,6 +1601,17 @@ def _process_vacancy(
     )
 
 
+def _questionary_partial(
+    questionary: _Questionnaire | None,
+    pending: Sequence[Question],
+    values: Mapping[int, str],
+) -> tuple[Answer, ...]:
+    """Ответы, которые уже удалось вычислить: профиль и ответы модели."""
+    if questionary is None or questionary.result is None:
+        return ()
+    return merge_answers(questionary.result, llm_answers(pending, values))
+
+
 def _questionary_answers(
     questionary: _Questionnaire | None,
     pending: Sequence[Question],
@@ -1583,9 +1623,7 @@ def _questionary_answers(
     отправлять нельзя, вакансия уходит в ручные. Модель не переопределяет
     профиль: расхождение означало бы выдумку.
     """
-    if questionary is None or questionary.result is None:
-        return ()
-    answers = merge_answers(questionary.result, llm_answers(pending, values))
+    answers = _questionary_partial(questionary, pending, values)
     answered = {answer.question.name or answer.question.text for answer in answers}
     for question in pending:
         if (question.name or question.text) not in answered:
@@ -1593,39 +1631,83 @@ def _questionary_answers(
     return answers
 
 
-def _pending_reason(pending: Sequence[Question], values: Mapping[int, str]) -> str:
-    """Причина ручного ответа: первый вопрос, на который модель не ответила."""
-    for number, question in enumerate(pending, 1):
-        if not str(values.get(number, "") or "").strip():
-            return f"Анкета работодателя: вопрос «{question_label(question)}» — нет ответа"
-    return "Анкета работодателя: часть вопросов осталась без ответа"
+def _pending_reason(
+    pending: Sequence[Question],
+    values: Mapping[int, str],
+    *,
+    full: bool = False,
+) -> str:
+    """Причина ручного ответа: короткая для списка, подробная для окна деталей.
+
+    `full=True` возвращает полный текст с формулировкой вопроса и числом без
+    ответа. Короткий текст одинаков для субъективных анкет: человеку в списке
+    достаточно понять, что анкету нужно доделать вручную.
+    """
+    unanswered = [
+        question
+        for number, question in enumerate(pending, 1)
+        if not str(values.get(number, "") or "").strip()
+    ]
+    if not unanswered:
+        return "Анкета работодателя: часть вопросов осталась без ответа, ответьте вручную"
+    labels = (
+        [question_full_label(question) for question in unanswered]
+        if full
+        else [question_label(question) for question in unanswered]
+    )
+    readable = [label for label in labels if label != NO_QUESTION_LABEL]
+    if not readable:
+        return (
+            "Анкета работодателя: не удалось прочитать формулировки вопросов. "
+            f"Без ответа {len(unanswered)} из {len(pending)}"
+        )
+    if full:
+        return (
+            f"Анкета работодателя: вопрос «{readable[0]}» субъективен и требует ручного ответа. "
+            f"Без ответа {len(unanswered)} из {len(pending)}"
+        )
+    return QUESTIONARY_MANUAL_REASON
 
 
-def _save_questionary(
-    config: AppConfig,
+def _remember_questionary(
     stats: RunStats,
     details: VacancyDetails,
-    channel: Channel,
     answers: Sequence[Answer],
-    status: str,
 ) -> None:
-    """Сохраняет ответы на анкету: файл вакансии в `data/questionary` и отчёт дня."""
-    entries = [(question_label(answer.question), answer.value) for answer in answers]
-    if not entries:
-        return
-    stats.questionary[details.url] = [
-        {"question": question, "answer": answer} for question, answer in entries
+    """Держит ответы для записи в отчёт дня: блок `questionary` пишет пайплайн.
+
+    Ответы попадают в отчёт и когда отклик остался за человеком: по файлу дня
+    видно, что именно агент собирался отправить работодателю.
+    """
+    entries = [
+        {"question": question_label(answer.question), "answer": answer.value}
+        for answer in answers
+        if answer.filled
     ]
-    questionary_store.save(
-        config.data.paths.questionary_dir,
-        url=details.url,
-        profile=config.pipeline.resume.name if channel.name == HH else "",
-        channel=channel.name,
-        status=status,
-        questionary=entries,
-        title=details.title,
-        company=details.company,
+    if entries:
+        stats.questionary[details.url] = entries
+
+
+def _snapshot_questionary(
+    page: Page,
+    config: AppConfig,
+    logger: RunLogger,
+    details: VacancyDetails,
+) -> None:
+    """Снимает заполненную форму анкеты или теста до отправки.
+
+    Снимок — доказательство того, что ушло работодателю. Сбой съёмки не должен
+    ломать отклик: он только попадает в журнал отдельным событием.
+    """
+    saved = questionary_store.save_screenshot(
+        config.data.paths.questionary_dir, page, url=details.url
     )
+    if saved is None:
+        logger.event("questionary_screenshot_error", url=details.url)
+        return
+    vid = vacancy_id(details.url)
+    extra = {"vacancy_id": vid} if vid else {}
+    logger.event("questionary_screenshot", url=details.url, path=str(saved), **extra)
 
 
 @dataclass(frozen=True)
@@ -1685,7 +1767,7 @@ def _knockout_prefilter(
     if not form.questions:
         return _Questionnaire(form, test=is_test)
 
-    result = evaluate(form.questions, config.prefilter.answers)
+    result = evaluate(form.questions, config.pipeline.prefilter.answers)
     if is_test:
         # В тесте отрицательный ответ не отсечка: он лишь снижает балл.
         result = without_rejects(result)
@@ -1698,7 +1780,11 @@ def _knockout_prefilter(
         unknown=result.unknown,
         reason=result.reason,
     )
-    log.info(f"анкета работодателя: вопросов {len(form.questions)}, вердикт «{result.verdict}»")
+    if result.verdict == VERDICT_MANUAL:
+        # Подробности остаются в дневном отчёте: в консоли достаточно итога.
+        log.info(manual_hint(result))
+    else:
+        log.info(f"анкета работодателя: вопросов {len(form.questions)}, вердикт «{result.verdict}»")
 
     if result.verdict == VERDICT_REJECT:
         stats.skipped.append(
@@ -1722,27 +1808,31 @@ def _queue(
     note: str = "",
     *,
     reason: str = "",
+    message: str = "",
     channel: Channel | None = None,
 ) -> None:
     """Отмечает вакансию как отложенную: отклик нужно отправить вручную.
 
-    `reason` — реальная причина, которую показал сайт. Она важнее общей
-    формулировки для кода: если сайт объяснил отказ, в отчёт идёт его текст.
-    Общие тексты берутся из канала: у hh.ru и Habr они разные.
+    `reason` — короткая причина для списка и журнала. `message` — полный текст
+    с формулировками вопросов: он показывается в окне деталей и не обрезается.
+    Общие тексты причин берутся из канала: у hh.ru и Habr они разные.
     """
     reasons = channel.queue_reasons if channel is not None else QUEUE_REASON_TEXTS
     text = reason.strip() or reasons.get(code, reasons.get("unknown", ""))
+    message_text = message.strip()
     log = _VacancyLog(logger, card.title, card.company, card.url)
-    stats.queued.append(
-        {
-            "url": card.url,
-            "title": card.title,
-            "company": card.company,
-            "reason": text,
-            "queued_at": datetime.now().astimezone().isoformat(timespec="seconds"),
-        }
-    )
-    log.event("queued", url=card.url, title=card.title, code=code, reason=text, note=note)
+    entry: dict[str, object] = {
+        "url": card.url,
+        "title": card.title,
+        "company": card.company,
+        "reason": text,
+        "queued_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+    }
+    if message_text:
+        entry["message"] = message_text
+    stats.queued.append(entry)
+    extra = {"message": message_text} if message_text else {}
+    log.event("queued", url=card.url, title=card.title, code=code, reason=text, note=note, **extra)
     log.info(f"отложено, нужен ручной отклик: {text}")
 
 
@@ -1920,7 +2010,6 @@ def _record_error(
     stats.errors.append(RunError(url=card.url, title=card.title, message=message))
     log.event("vacancy_error", url=card.url, title=card.title, error=message)
     log.info(f"ошибка: {message}")
-
     screenshot = config.data.paths.logs_dir / f"{logger.run_id}-error-{len(stats.errors)}.png"
     if save_screenshot(page, screenshot):
         vid = vacancy_id(card.url)
@@ -1939,6 +2028,43 @@ def _send_report_email(config: AppConfig, report: str, stats: RunStats) -> tuple
         report,
         recipient=settings.target(config.notifications.email),
     )
+
+
+def _single_vacancy_title(stats: RunStats) -> str:
+    """Название вакансии, если запуск обработал ровно одну."""
+    titles: list[str] = []
+    for items in (
+        stats.sent,
+        stats.skipped,
+        stats.excluded,
+        stats.rejected,
+        stats.already_sent,
+    ):
+        titles.extend(str(getattr(item, "title", "")).strip() for item in items)
+    titles.extend(str(item.get("title", "")).strip() for item in stats.queued)
+    titles.extend(str(getattr(item, "title", "")).strip() for item in stats.errors)
+    unique = [title for title in dict.fromkeys(titles) if title]
+    return unique[0] if len(unique) == 1 else ""
+
+
+def _report_context(
+    config: AppConfig,
+    channel: Channel,
+    stats: RunStats,
+) -> tuple[str, str]:
+    """Что назвать в заголовке отчёта: резюме hh или вакансию Habr.
+
+    Запуск по одной вакансии получает контекст. У hh резюме выбирается
+    в отклике, поэтому в заголовке важнее его название. У Habr резюме hh
+    нет: остаётся название вакансии.
+    """
+    title = _single_vacancy_title(stats)
+    if not title:
+        return "", ""
+    resume = _profile_name(config, channel)
+    if resume:
+        return "", resume
+    return title, ""
 
 
 def _final_message(stats: RunStats, config: AppConfig) -> str:
@@ -2021,6 +2147,17 @@ def _outcome_reason(
     return ""
 
 
+def _outcome_message(
+    stats: RunStats,
+    before: tuple[int, int, int, int, int, int, int],
+    outcome: str | None,
+) -> str:
+    """Подробный текст причины для окна деталей: только у отложенных."""
+    if outcome == OUTCOME_QUEUED and len(stats.queued) > before[2]:
+        return str(stats.queued[-1].get("message", ""))
+    return ""
+
+
 def _remember_processing(
     processed: ProcessedStore,
     logger: RunLogger,
@@ -2031,11 +2168,13 @@ def _remember_processing(
     channel: str = "",
     archived: bool = False,
     questionary: Sequence[Mapping[str, str]] = (),
+    message: str = "",
 ) -> None:
     """Записывает вакансию в дневной отчёт, чтобы не проходить её снова.
 
     Для пропусков, отложенных и упавших вакансий пишется причина — по файлу
     дня видно, почему вакансию не взяли и что имеет смысл повторить.
+    `message` — полный текст причины для окна деталей.
     """
     if (
         outcome
@@ -2064,6 +2203,7 @@ def _remember_processing(
             channel=channel,
             archived=archived,
             questionary=questionary,
+            message=message,
         )
     except ProcessedError as exc:
         vid = vacancy_id(card.url)

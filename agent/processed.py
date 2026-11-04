@@ -253,6 +253,7 @@ class ProcessedStore:
         company: str,
         status: str,
         reason: str = "",
+        message: str = "",
         profile: str | None = None,
         channel: str = "",
         archived: bool = False,
@@ -261,6 +262,7 @@ class ProcessedStore:
         """Записывает вакансию в отчёт дня; известную запись обновляет (повтор).
 
         `profile` — название резюме, с которым обрабатывалась вакансия.
+        `message` — полный текст причины для окна деталей.
         `questionary` — ответы на анкету или тест: блок `questionary` в записи.
         Возвращает False, если вакансию нечем опознать при следующем запуске:
         нет ни ссылки, ни названия с компанией.
@@ -274,6 +276,7 @@ class ProcessedStore:
                 known[1],
                 status=status,
                 reason=reason,
+                message=message,
                 profile=profile,
                 channel=channel,
                 archived=archived,
@@ -297,13 +300,14 @@ class ProcessedStore:
             item["run_id"] = self.run_id
         if reason:
             item["reason"] = reason
+        if message:
+            item["message"] = message
         if channel:
             item["channel"] = channel
         if archived:
             # Вакансия в архиве или доступ к ней закрыт: признак виден в UI.
             item["archived"] = True
-        if questionary:
-            item["questionary"] = [dict(entry) for entry in questionary]
+        item["questionary"] = [dict(entry) for entry in (questionary or [])]
 
         try:
             with report_lock(self.directory):
@@ -316,6 +320,7 @@ class ProcessedStore:
                         existing,
                         status=status,
                         reason=reason,
+                        message=message,
                         profile=profile,
                         channel=channel,
                         archived=archived,
@@ -335,6 +340,7 @@ class ProcessedStore:
         *,
         status: str,
         reason: str,
+        message: str = "",
         profile: str | None = None,
         channel: str = "",
         count_attempt: bool = True,
@@ -348,6 +354,7 @@ class ProcessedStore:
                     item,
                     status=status,
                     reason=reason,
+                    message=message,
                     profile=profile,
                     channel=channel,
                     count_attempt=count_attempt,
@@ -363,6 +370,7 @@ class ProcessedStore:
         *,
         status: str,
         reason: str,
+        message: str = "",
         profile: str | None = None,
         channel: str = "",
         count_attempt: bool = True,
@@ -375,8 +383,9 @@ class ProcessedStore:
         удаляется из всех дневных файлов, а обновлённая запись попадает в отчёт
         сегодняшней даты. `count_attempt=False` — правка статуса без обработки
         вакансии: счётчик попыток не растёт. Вызывается только под блокировкой.
+        `message` — полный текст причины; пустая строка удаляет его.
         `questionary=None` оставляет прежние ответы на анкету: правка статуса их
-        не затирает, а пустая последовательность удаляет блок из записи.
+        не затирает. Блок есть в записи всегда: без ответов это пустой список.
         """
         now = _now()
         if channel in ("habr", "external"):
@@ -400,6 +409,10 @@ class ProcessedStore:
             item["reason"] = reason
         else:
             item.pop("reason", None)
+        if message:
+            item["message"] = message
+        else:
+            item.pop("message", None)
         if archived:
             # Вакансия в архиве или доступ к ней закрыт: признак виден в UI.
             item["archived"] = True
@@ -407,10 +420,9 @@ class ProcessedStore:
             # Вакансия снова в работе (например, повтор): архив снимается.
             item.pop("archived", None)
         if questionary is not None:
-            if questionary:
-                item["questionary"] = [dict(entry) for entry in questionary]
-            else:
-                item.pop("questionary", None)
+            item["questionary"] = [dict(entry) for entry in questionary]
+        elif "questionary" not in item:
+            item["questionary"] = []
         for file in self.directory.glob("*.json"):
             if file == self.path:
                 continue
