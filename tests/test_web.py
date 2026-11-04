@@ -804,6 +804,17 @@ def test_report_page_has_archived_filter_and_warning(client: TestClient) -> None
     assert "confirm: 'Зафиксировать архив'" in html
 
 
+def test_report_page_has_invite_status_filter(client: TestClient) -> None:
+    """«Приглашение» в фильтре статуса пользуется ключом записи `invite`, а не подписью пункта."""
+    response = client.get("/report")
+
+    assert response.status_code == 200
+    html = response.text
+    assert 'data-status="invite"' in html
+    assert 'data-status="invited"' not in html
+    assert "Приглашение" in html
+
+
 def test_archived_vacancy_shows_archive_reason(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

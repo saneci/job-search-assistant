@@ -44,9 +44,10 @@
                     <div class="dropdown-menu" id="datePanel" hidden>
                         <div class="dropdown-scroll">
                             <button class="dropdown-option" type="button" id="dateAll"
-                                    role="menuitemcheckbox" aria-checked="true"><span class="option-check"
-                                                                                   aria-hidden="true">✓</span><span
-                                class="option-label">Выбрать всё</span></button>
+                                    role="menuitemcheckbox" aria-checked="true">
+                                <span class="option-check" aria-hidden="true">✓</span>
+                                <span class="option-label">Выбрать всё</span>
+                            </button>
                             <div id="dateList"></div>
                         </div>
                     </div>
@@ -62,44 +63,59 @@
                     <div class="dropdown-menu" id="statusMenu" role="menu" hidden>
                         <div class="dropdown-scroll">
                             <button class="dropdown-option checked" type="button" data-status="all"
-                                    role="menuitemradio" aria-checked="true"><span class="option-check"
-                                                                                   aria-hidden="true">✓</span><span
-                                class="option-label">Все</span></button>
-                            <button class="dropdown-option" type="button" data-status="sent"
-                                    role="menuitemradio" aria-checked="false"><span class="option-check"
-                                                                                    aria-hidden="true">✓</span><span
-                                class="option-label">Отправлено</span></button>
-                            <button class="dropdown-option" type="button" data-status="queued"
-                                    role="menuitemradio" aria-checked="false"><span class="option-check"
-                                                                                    aria-hidden="true">✓</span><span
-                                class="option-label">В очереди</span></button>
+                                    role="menuitemradio" aria-checked="true">
+                                <span class="option-check" aria-hidden="true">✓</span>
+                                <span class="option-label">Все</span>
+                            </button>
                             <button class="dropdown-option" type="button" data-status="excluded"
-                                    role="menuitemradio" aria-checked="false"><span class="option-check"
-                                                                                    aria-hidden="true">✓</span><span
-                                class="option-label">Исключено</span></button>
+                                    role="menuitemradio" aria-checked="false">
+                                <span class="option-check" aria-hidden="true">✓</span>
+                                <span class="option-label">Исключено</span>
+                            </button>
+                            <button class="dropdown-option" type="button" data-status="queued"
+                                    role="menuitemradio" aria-checked="false">
+                                <span class="option-check" aria-hidden="true">✓</span>
+                                <span class="option-label">В очереди</span>
+                            </button>
                             <button class="dropdown-option" type="button" data-status="skipped"
-                                    role="menuitemradio" aria-checked="false"><span class="option-check"
-                                                                                    aria-hidden="true">✓</span><span
-                                class="option-label">Не подходит</span></button>
-                            <button class="dropdown-option" type="button" data-status="rejected"
-                                    role="menuitemradio" aria-checked="false"><span class="option-check"
-                                                                                    aria-hidden="true">✓</span><span
-                                class="option-label">Отказ</span></button>
+                                    role="menuitemradio" aria-checked="false">
+                                <span class="option-check" aria-hidden="true">✓</span>
+                                <span class="option-label">Не подходит</span>
+                            </button>
+                            <button class="dropdown-option" type="button" data-status="sent"
+                                    role="menuitemradio" aria-checked="false">
+                                <span class="option-check" aria-hidden="true">✓</span>
+                                <span class="option-label">Отправлено</span>
+                            </button>
+                            <button class="dropdown-option" type="button" data-status="invite"
+                                    role="menuitemradio" aria-checked="false">
+                                <span class="option-check" aria-hidden="true">✓</span>
+                                <span class="option-label">Приглашение</span>
+                            </button>
                             <button class="dropdown-option" type="button" data-status="offer"
-                                    role="menuitemradio" aria-checked="false"><span class="option-check"
-                                                                                    aria-hidden="true">✓</span><span
-                                class="option-label">Оффер</span></button>
+                                    role="menuitemradio" aria-checked="false">
+                                <span class="option-check" aria-hidden="true">✓</span>
+                                <span class="option-label">Оффер</span>
+                            </button>
+                            <button class="dropdown-option" type="button" data-status="rejected"
+                                    role="menuitemradio" aria-checked="false">
+                                <span class="option-check" aria-hidden="true">✓</span>
+                                <span class="option-label">Отказ</span>
+                            </button>
                             <button class="dropdown-option" type="button" data-status="error"
-                                    role="menuitemradio" aria-checked="false"><span class="option-check"
-                                                                                    aria-hidden="true">✓</span><span
-                                class="option-label">Ошибки</span></button>
+                                    role="menuitemradio" aria-checked="false">
+                                <span class="option-check" aria-hidden="true">✓</span>
+                                <span class="option-label">Ошибки</span>
+                            </button>
                             <button class="dropdown-option" type="button" data-status="archived"
-                                    role="menuitemradio" aria-checked="false"><span class="option-check"
-                                                                                   aria-hidden="true">✓</span><span
-                                class="option-label">В архиве</span></button>
+                                    role="menuitemradio" aria-checked="false">
+                                <span class="option-check" aria-hidden="true">✓</span>
+                                <span class="option-label">В архиве</span>
+                            </button>
                         </div>
                     </div>
                 </div>
+
                 <div class="dropdown" id="channelFilter">
                     <button class="dropdown-toggle" id="channelToggle" type="button"
                             aria-haspopup="true" aria-expanded="false" aria-controls="channelMenu">
@@ -110,25 +126,30 @@
                     <div class="dropdown-menu" id="channelMenu" role="menu" hidden>
                         <div class="dropdown-scroll">
                             <button class="dropdown-option checked" type="button" data-channel="all"
-                                    role="menuitemradio" aria-checked="true"><span class="option-check"
-                                                                                   aria-hidden="true">✓</span><span
-                                class="option-label">Все</span></button>
+                                    role="menuitemradio" aria-checked="true">
+                                <span class="option-check" aria-hidden="true">✓</span>
+                                <span class="option-label">Все</span>
+                            </button>
                             <button class="dropdown-option" type="button" data-channel="hh"
-                                    role="menuitemradio" aria-checked="false"><span class="option-check"
-                                                                                    aria-hidden="true">✓</span><span
-                                class="option-label">hh.ru</span></button>
+                                    role="menuitemradio" aria-checked="false">
+                                <span class="option-check" aria-hidden="true">✓</span>
+                                <span class="option-label">hh.ru</span>
+                            </button>
                             <button class="dropdown-option" type="button" data-channel="habr"
-                                    role="menuitemradio" aria-checked="false"><span class="option-check"
-                                                                                    aria-hidden="true">✓</span><span
-                                class="option-label">Habr Career</span></button>
+                                    role="menuitemradio" aria-checked="false">
+                                <span class="option-check" aria-hidden="true">✓</span>
+                                <span class="option-label">Habr Career</span>
+                            </button>
                             <button class="dropdown-option" type="button" data-channel="external"
-                                    role="menuitemradio" aria-checked="false"><span class="option-check"
-                                                                                    aria-hidden="true">✓</span><span
-                                class="option-label">Сайт компании</span></button>
+                                    role="menuitemradio" aria-checked="false">
+                                <span class="option-check" aria-hidden="true">✓</span>
+                                <span class="option-label">Сайт компании</span>
+                            </button>
                             <button class="dropdown-option" type="button" data-channel="unknown"
-                                    role="menuitemradio" aria-checked="false"><span class="option-check"
-                                                                                    aria-hidden="true">✓</span><span
-                                class="option-label">Без канала</span></button>
+                                    role="menuitemradio" aria-checked="false">
+                                <span class="option-check" aria-hidden="true">✓</span>
+                                <span class="option-label">Без канала</span>
+                            </button>
                         </div>
                     </div>
                 </div>
@@ -140,37 +161,33 @@
             </div>
 
             <div class="summary-grid" id="summaryGrid">
-                <div class="summary-card card-sent">
-                    <div class="label">Отправлено</div>
-                    <div class="value" id="sumSent">—</div>
+                <div class="summary-card card-excluded">
+                    <div class="label">Исключено</div>
+                    <div class="value" id="sumExcluded">0</div>
                 </div>
                 <div class="summary-card card-queued">
                     <div class="label">В очереди</div>
-                    <div class="value" id="sumQueued">—</div>
+                    <div class="value" id="sumQueued">4</div>
                 </div>
-                <div class="summary-card card-excluded">
-                    <div class="label">Исключено</div>
-                    <div class="value" id="sumExcluded">—</div>
-                </div>
-                <div class="summary-card card-skipped">
-                    <div class="label">Не подходит</div>
-                    <div class="value" id="sumSkipped">—</div>
+                <div class="summary-card card-sent">
+                    <div class="label">Отправлено</div>
+                    <div class="value" id="sumSent">5</div>
                 </div>
                 <div class="summary-card card-invite">
                     <div class="label">Приглашения</div>
-                    <div class="value" id="sumInvited">—</div>
+                    <div class="value" id="sumInvited">0</div>
                 </div>
                 <div class="summary-card card-offer">
                     <div class="label">Офферы</div>
-                    <div class="value" id="sumOffered">—</div>
+                    <div class="value" id="sumOffered">0</div>
                 </div>
                 <div class="summary-card card-rejected">
                     <div class="label">Отказы</div>
-                    <div class="value" id="sumRejected">—</div>
+                    <div class="value" id="sumRejected">3</div>
                 </div>
                 <div class="summary-card card-error">
                     <div class="label">Ошибки</div>
-                    <div class="value" id="sumError">—</div>
+                    <div class="value" id="sumError">0</div>
                 </div>
             </div>
 
@@ -288,7 +305,6 @@
                 headerMeta: document.getElementById('headerMeta'),
                 sumSent: document.getElementById('sumSent'),
                 sumInvited: document.getElementById('sumInvited'),
-                sumSkipped: document.getElementById('sumSkipped'),
                 sumQueued: document.getElementById('sumQueued'),
                 sumExcluded: document.getElementById('sumExcluded'),
                 sumError: document.getElementById('sumError'),
@@ -381,7 +397,6 @@
                 const s = summary || {};
                 els.sumSent.textContent = s.sent ?? 0;
                 els.sumInvited.textContent = s.invite ?? 0;
-                els.sumSkipped.textContent = s.skipped ?? 0;
                 els.sumQueued.textContent = s.queued ?? 0;
                 els.sumExcluded.textContent = s.excluded ?? 0;
                 els.sumError.textContent = s.error ?? 0;
@@ -985,6 +1000,7 @@
                 els.dateAll.setAttribute('aria-checked', String(everyDate));
                 els.dateLabel.textContent = dateLabelText(state);
             }
+
             /* Отметки после клика обновляются на месте: перерисовка списка
                обнуляет наведение мыши, и меню закрывается раньше времени. */
             function applyDateDraft() {
@@ -999,8 +1015,6 @@
                 els.dateAll.setAttribute('aria-checked', String(everyDate));
                 els.dateLabel.textContent = dateLabelText(dateDraft);
             }
-
-
 
             /* ---------- Загрузка данных с сервера ---------- */
             async function loadReports() {

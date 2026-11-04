@@ -1935,7 +1935,7 @@ def _send_report_email(config: AppConfig, report: str, stats: RunStats) -> tuple
         return False, "письма с отчётом отключены (notifications.report.enabled: false)"
     return send_email(
         config.notifications.email,
-        f"Отчёт за {stats.started_at:%Y-%m-%d %H:%M} по запросу {config.pipeline.resume.name}",
+        f"Отчёт за {stats.started_at:%Y-%m-%d %H:%M}",
         report,
         recipient=settings.target(config.notifications.email),
     )
