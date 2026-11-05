@@ -58,11 +58,14 @@ from .logging_setup import RunLogger, prune_logs
 from .models import (
     ALREADY_RESPONDED_REASON,
     ARCHIVE_REASON,
+    ERROR_REPORT_REASON,
     INVITE_REASON,
     INVITED_OTHER_RESUME_REASON,
+    NOT_FIT_REPORT_REASON,
     OFFER_REASON,
     OTHER_RESUME_REASON,
     REJECTED_REASON,
+    SENT_REPORT_REASON,
     UNAVAILABLE_REASON,
     STATUS_ERROR as OUTCOME_ERROR,
     STATUS_EXCLUDED as OUTCOME_EXCLUDED,
@@ -249,6 +252,16 @@ class _VacancyLog:
         text = f"{self.label}: {message}"
         console = f"[{self.id}] {text}" if self.id else text
         self._logger.info(text, console_message=console, vacancy=self.label, **extra)
+
+    def console(self, message: str) -> None:
+        """Печатает подробность в консоль, не повторяя её в JSONL.
+
+        Нужно для текстов, которые уже есть в отдельном событии (полный вердикт
+        LLM): журнал не раздувается, а человек видит ту же строку.
+        """
+        text = f"{self.label}: {message}"
+        console = f"[{self.id}] {text}" if self.id else text
+        self._logger.console(console)
 
     def event(self, name: str, **fields: object) -> None:
         extra = {"vacancy_id": self.id} if self.id else {}
@@ -832,7 +845,7 @@ def _process_and_remember(
             logger,
             card,
             outcome,
-            _outcome_reason(stats, counters, outcome),
+            _outcome_short_reason(stats, counters, outcome),
             _profile_name(config, channel),
             channel=outcome_channel or channel.name,
             archived=_outcome_archived(skipped),
@@ -1128,7 +1141,7 @@ def _process_vacancy(
     try:
         details = channel.open_vacancy(page, card)
     except CaptchaError as exc:
-        _save_problem_screenshot(page, config, logger, "captcha")
+        _save_problem_screenshot(page, config, logger, "captcha", url=card.url)
         queue(stats, logger, card, "captcha", f"капча: {exc}")
         stats.stop_reason = "капча на странице вакансии"
         _notify_captcha(
@@ -1271,7 +1284,7 @@ def _process_vacancy(
         f"LLM-решение: «{verdict}» ({probabilities}, порог {decision.threshold:.2f})"
     )
     if llm_reason and config.llm.decision.explain_rejections:
-        log.info(f"LLM-вердикт: {llm_reason}")
+        log.console(f"LLM-вердикт: {llm_reason}")
 
     if not fits:
         stats.skipped.append(
@@ -1281,6 +1294,8 @@ def _process_vacancy(
                 url=details.url,
                 reason=llm_reason,
                 probability=decision.probability,
+                report_reason=NOT_FIT_REPORT_REASON,
+                report_message=llm_reason,
             )
         )
         log.info(f"вакансия не подошла: {llm_reason}")
@@ -1382,7 +1397,7 @@ def _process_vacancy(
         greeting_added=generation.greeting_added,
         required_opening=generation.required_opening,
     )
-    log.info(f"LLM-вердикт: {generation.reason or '—'}")
+    log.console(f"LLM-вердикт: {generation.reason or '—'}")
     if generation.greeting_added:
         if generation.required_opening:
             log.info(
@@ -1493,6 +1508,8 @@ def _process_vacancy(
                 url=details.url,
                 probability=decision.probability,
                 reason=generation.reason,
+                report_reason=SENT_REPORT_REASON,
+                report_message=generation.reason,
             )
         )
         log.info(f"отклик отправлен (всего {stats.sent_count} из {config.pipeline.limit_per_run})")
@@ -1536,7 +1553,7 @@ def _process_vacancy(
         return
 
     if status == STATUS_CAPTCHA:
-        _save_problem_screenshot(page, config, logger, "captcha")
+        _save_problem_screenshot(page, config, logger, "captcha", url=details.url)
         queue(stats, logger, details, "captcha", "капча в форме отклика")
         stats.stop_reason = "Капча при отправке отклика — откликнитесь вручную"
         _notify_captcha_stop(
@@ -1561,13 +1578,15 @@ def _process_vacancy(
         return
 
     if status == STATUS_NO_FORM:
-        _save_problem_screenshot(page, config, logger, "respond-no-form")
+        _save_problem_screenshot(page, config, logger, "respond-no-form", url=details.url)
+        diagnostic = _respond_diagnostic(result.steps)
         logger.event(
             "respond_state",
             url=details.url,
             vacancy_id=vacancy_id(details.url),
             status=status,
             reason=result.reason,
+            steps=dict(result.steps),
             **channel.response_state(page),
         )
         queue(
@@ -1577,18 +1596,21 @@ def _process_vacancy(
             "no_form",
             "не найдена форма отклика",
             reason=result.reason,
+            message=diagnostic,
         )
         return
 
     if status == STATUS_UNKNOWN:
-        _save_problem_screenshot(page, config, logger, "respond-unknown")
-        # Что именно показал сайт — без письма и персональных данных.
+        _save_problem_screenshot(page, config, logger, "respond-unknown", url=details.url)
+        # Что именно показал сайт и на каком шаге встал отклик — без письма
+        # и персональных данных.
         logger.event(
             "respond_state",
             url=details.url,
             vacancy_id=vacancy_id(details.url),
             status=status,
             reason=result.reason,
+            steps=dict(result.steps),
             **channel.response_state(page),
         )
     queue(
@@ -1598,6 +1620,7 @@ def _process_vacancy(
         "unknown",
         f"статус отклика: {status or STATUS_UNKNOWN}",
         reason=result.reason,
+        message=_respond_diagnostic(result.steps),
     )
 
 
@@ -1976,25 +1999,45 @@ def _notify_captcha(
         logger.info(text, console_message=console, **extra)
 
 
+def _respond_diagnostic(steps: Mapping[str, str]) -> str:
+    """Пошаговое описание попытки отклика для окна деталей отчёта.
+
+    В таблице отчёта остаётся короткая причина, а здесь видно, на каком шаге
+    встал отклик: форма, резюме, анкета, письмо, кнопка отправки, ожидание
+    подтверждения. По этому тексту понятно, что именно сломалось.
+    """
+    parts = [f"{name}: {value}" for name, value in steps.items()]
+    if not parts:
+        return ""
+    text = "; ".join(parts)
+    return text[:1].upper() + text[1:] + "."
+
+
 def _save_problem_screenshot(
     page: Page,
     config: AppConfig,
     logger: RunLogger,
     kind: str,
+    *,
+    url: str = "",
 ) -> None:
     """Сохраняет скриншот проблемного состояния — по нему видно, что показал сайт.
 
-    Диагностика не должна ронять запуск: любые сбои здесь только логируются.
+    `url` привязывает снимок к вакансии: без `vacancy_id` непонятно, к какой
+    карточке он относится. Диагностика не должна ронять запуск: любые сбои
+    здесь только логируются.
     """
+    vid = vacancy_id(url)
+    extra = {"vacancy_id": vid} if vid else {}
     path = config.data.paths.logs_dir / f"{logger.run_id}-{kind}.png"
     try:
         saved = save_screenshot(page, path)
         if saved:
-            logger.event("screenshot", path=str(saved), kind=kind)
+            logger.event("screenshot", path=str(saved), kind=kind, **extra)
         else:
-            logger.event("screenshot_error", kind=kind)
+            logger.event("screenshot_error", kind=kind, **extra)
     except Exception as exc:  # noqa: BLE001 - отчёт важнее скриншота
-        logger.info(f"Не удалось сохранить скриншот ({kind}): {exc}")
+        logger.info(f"Не удалось сохранить скриншот ({kind}): {exc}", **extra)
 
 
 def _record_error(
@@ -2147,12 +2190,39 @@ def _outcome_reason(
     return ""
 
 
+def _outcome_short_reason(
+    stats: RunStats,
+    before: tuple[int, int, int, int, int, int, int],
+    outcome: str,
+) -> str:
+    """Короткая причина для таблицы отчёта.
+
+    Полный текст (ответ LLM, описание сбоя) уходит в `message` и открывается
+    в окне деталей: колонка «Причина» остаётся плотной и сравнимой.
+    """
+    if outcome == OUTCOME_SENT and len(stats.sent) > before[0]:
+        item = stats.sent[-1]
+        return item.report_reason or item.reason
+    if outcome == OUTCOME_SKIPPED and len(stats.skipped) > before[1]:
+        item = stats.skipped[-1]
+        return item.report_reason or item.reason
+    if outcome == OUTCOME_ERROR and len(stats.errors) > before[3]:
+        return ERROR_REPORT_REASON
+    return _outcome_reason(stats, before, outcome)
+
+
 def _outcome_message(
     stats: RunStats,
     before: tuple[int, int, int, int, int, int, int],
     outcome: str | None,
 ) -> str:
-    """Подробный текст причины для окна деталей: только у отложенных."""
+    """Подробный текст причины для окна деталей: полный, без обрезки."""
+    if outcome == OUTCOME_SENT and len(stats.sent) > before[0]:
+        return stats.sent[-1].report_message
+    if outcome == OUTCOME_SKIPPED and len(stats.skipped) > before[1]:
+        return stats.skipped[-1].report_message
+    if outcome == OUTCOME_ERROR and len(stats.errors) > before[3]:
+        return stats.errors[-1].message
     if outcome == OUTCOME_QUEUED and len(stats.queued) > before[2]:
         return str(stats.queued[-1].get("message", ""))
     return ""

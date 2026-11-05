@@ -59,7 +59,7 @@ node --test tests/js/charts.test.mjs    # графики метрик: разм�
 разъезжается:
 
 ```bash
-./.venv/Scripts/uvicorn.exe web.main:app --reload
+./.venv/Scripts/uvicorn.exe web.main:app --reload --log-config web/uvicorn-log.json
 ```
 
 - `/` — главная: ссылки на отчёт и метрики, переключение темы

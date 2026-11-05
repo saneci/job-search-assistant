@@ -213,7 +213,9 @@ def test_respond_clicks_other_resume_button(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr(hh_vacancy, "_wait_for_response_ui", lambda page, waiter: "ready")
     monkeypatch.setattr(hh_vacancy, "_response_scope", lambda page: modal)
     monkeypatch.setattr(hh_vacancy, "detect_response_blocker", lambda scope: None)
-    monkeypatch.setattr(hh_vacancy, "_fill_letter", lambda page, scope, letter: False)
+    monkeypatch.setattr(
+        hh_vacancy, "_fill_letter", lambda page, scope, letter: (False, "")
+    )
     monkeypatch.setattr(hh_vacancy, "_wait_for_response_result", lambda page, waiter: STATUS_SENT)
 
     result = respond(page, "Здравствуйте!")  # type: ignore[arg-type]

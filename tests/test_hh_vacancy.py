@@ -7,9 +7,11 @@ from typing import Any
 import pytest
 
 from agent.hh_vacancy import (
+    STATUS_UNKNOWN,
     ResumeNotFoundError,
     ResponseResult,
     _has_success,
+    _result,
     detect_page_blocker,
     detect_response_blocker,
     match_resume,
@@ -21,7 +23,7 @@ from agent.hh_vacancy import (
     select_resume,
     set_resume_name,
 )
-from agent.models import VacancyCard
+from agent.models import SEND_FAILED_REASON, VacancyCard
 
 
 class FakeElement:
@@ -445,31 +447,19 @@ class FakeNoticePage:
         return FakeTextList([])
 
 
-def test_response_notice_reads_visibility_hint() -> None:
-    """Текст в модалке — реальная причина, её пишем в отчёт вместо заглушки."""
+def test_response_notice_never_returns_visibility_hint() -> None:
+    """Подсказка о видимости резюме не попадает в причину никогда."""
     notice = (
         "Чтобы откликнуться на эту вакансию, поменяйте видимость резюме на "
         "«Видно всем работодателям, зарегистрированным на hh.ru»"
     )
     page = FakeNoticePage(FakeNoticeModal({"p": [FakeElement(notice)]}))
 
-    assert response_notice(page) == notice  # type: ignore[arg-type]
-
-
-def test_response_notice_skips_hidden_resume_warning_when_form_ready() -> None:
-    """При открытом резюме hh.ru показывает подсказку о видимости: это не причина."""
-    notice = (
-        "Чтобы откликнуться на эту вакансию, поменяйте видимость резюме на "
-        "«Видно всем работодателям, зарегистрированным на hh.ru»"
-    )
-    page = FakeNoticePage(FakeNoticeModal({"p": [FakeElement(notice)]}))
-
-    assert response_notice(page, include_hidden_warning=False) == ""  # type: ignore[arg-type]
-    assert response_notice(page) == notice  # type: ignore[arg-type]
+    assert response_notice(page) == ""  # type: ignore[arg-type]
 
 
 def test_response_notice_skips_visibility_hint_in_explicit_block() -> None:
-    """Подсказка о видимости в явном блоке notice при готовой форме — не причина."""
+    """Подсказка о видимости в явном блоке notice тоже не причина."""
     notice = (
         "Чтобы откликнуться на эту вакансию, поменяйте видимость резюме на "
         "«Видно всем работодателям, зарегистрированным на hh.ru»"
@@ -478,8 +468,47 @@ def test_response_notice_skips_visibility_hint_in_explicit_block() -> None:
         FakeNoticeModal({"[data-qa='vacancy-response-popup-form-notice']": [FakeElement(notice)]})
     )
 
-    assert response_notice(page, include_hidden_warning=False) == ""  # type: ignore[arg-type]
-    assert response_notice(page) == notice  # type: ignore[arg-type]
+    assert response_notice(page) == ""  # type: ignore[arg-type]
+
+
+def test_response_notice_hides_visibility_hint_outside_modal() -> None:
+    """Подсказка на странице после закрытия модалки тоже не причина."""
+    notice = (
+        "Чтобы откликнуться на эту вакансию, поменяйте видимость резюме на "
+        "«Видно всем работодателям, зарегистрированным на hh.ru»"
+    )
+
+    class Page:
+        url = "https://hh.ru/vacancy/1"
+
+        def locator(self, selector: str) -> FakeNoticeList:
+            if "notice" in selector:
+                return FakeNoticeList([FakeElement(notice)])
+            return FakeNoticeList([])
+
+        def get_by_text(self, text: str, exact: bool = False) -> FakeTextList:
+            return FakeTextList([])
+
+        def get_by_role(self, role: str, name: Any = None) -> FakeTextList:
+            return FakeTextList([])
+
+    assert response_notice(Page()) == ""  # type: ignore[arg-type]
+
+
+def test_result_uses_generic_reason_for_failed_send() -> None:
+    """Если сайт молчит, отчёт не остаётся без причины."""
+    assert _result(STATUS_UNKNOWN).reason == SEND_FAILED_REASON
+    assert _result(STATUS_UNKNOWN, reason="Причина сайта").reason == "Причина сайта"
+
+
+def test_result_keeps_failed_steps() -> None:
+    """Шаги диагностики остаются в итоге: по ним видно, где встал отклик."""
+    steps = {"письмо": "не добавлено: поле письма не появилось"}
+
+    result = _result(STATUS_UNKNOWN, steps=steps)
+
+    assert result.status == STATUS_UNKNOWN
+    assert dict(result.steps) == steps
 
 
 def test_response_notice_skips_ui_labels() -> None:

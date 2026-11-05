@@ -705,6 +705,35 @@ def test_llm_answer_with_only_meta_is_unanswered() -> None:
     assert llm_answers((question,), {1: "В профиле нет информации"}) == ()
 
 
+def test_llm_answer_removes_uncertainty_and_typography() -> None:
+    """Оговорки и длинные тире в ответе модели не отправляются."""
+    question = text_question("Работали с Camunda?")
+    answers = llm_answers(
+        (question,),
+        {
+            1: (
+                "Да, работал с Camunda в проекте розничного кредитного конвейера. "
+                "Версию и конкретные задачи уточнить не могу."
+            )
+        },
+    )
+
+    assert answers[0].value == (
+        "Да, работал с Camunda в проекте розничного кредитного конвейера."
+    )
+
+
+def test_llm_answer_uses_hyphen_and_no_semicolon() -> None:
+    """В ответе нет длинного тире и точки с запятой."""
+    question = text_question("Объясните разницу между зомби и сиротой")
+    answers = llm_answers(
+        (question,),
+        {1: "Зомби — завершившийся процесс; сирота - процесс."},
+    )
+
+    assert answers[0].value == "Зомби - завершившийся процесс. сирота - процесс."
+
+
 def test_choice_prefers_short_yes_over_long_option() -> None:
     """Если есть короткое «Да», не выбираем длинную формулировку с «готов(а)»."""
     question = radio(

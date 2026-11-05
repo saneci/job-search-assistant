@@ -241,7 +241,8 @@
                 <div class="details-body" id="detailsBody"></div>
                 <div class="modal-actions details-actions">
                     <button class="modal-btn modal-btn-cancel" id="detailsStatus" type="button"
-                            aria-haspopup="menu" aria-expanded="false">Сменить статус</button>
+                            aria-haspopup="menu" aria-expanded="false">Сменить статус
+                    </button>
                     <button class="modal-btn modal-btn-confirm" id="detailsOk" type="button">Закрыть</button>
                 </div>
             </div>
@@ -775,7 +776,11 @@
                 control.dataset.status = currentStatus;
                 control.textContent = STATUS_LABELS[currentStatus] || currentStatus;
                 control.setAttribute('aria-expanded', 'false');
-                if (currentStatus === 'queued' || currentStatus === 'skipped') {
+                if (currentStatus === 'skipped'
+                    || currentStatus === 'queued'
+                    || currentStatus === 'sent'
+                    || currentStatus === 'rejected'
+                ) {
                     // У очереди и пропусков клик открывает детали: по ним видно, что заполнено.
                     control.classList.add('is-details');
                     control.title = 'Открыть детали отчёта';

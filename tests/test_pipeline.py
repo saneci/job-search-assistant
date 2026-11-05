@@ -21,7 +21,11 @@ from agent.llm import DecisionResult, GenerationResult
 from agent.logging_setup import RunLogger
 from agent.models import (
     ARCHIVE_REASON,
+    ERROR_REPORT_REASON,
+    NOT_FIT_REPORT_REASON,
     REJECTED_REASON,
+    SENT_REPORT_REASON,
+    RunError,
     SentVacancy,
     SkippedVacancy,
     VacancyCard,
@@ -48,7 +52,9 @@ from agent.pipeline import (
     _notify_captcha,
     _notify_captcha_stop,
     _outcome,
+    _outcome_message,
     _outcome_reason,
+    _outcome_short_reason,
     _pending_reason,
     _plural,
     _process_and_remember,
@@ -60,6 +66,7 @@ from agent.pipeline import (
     _remember_processing,
     _report_context,
     _require_resume_name,
+    _respond_diagnostic,
     _retry_statuses,
     _retry_vacancies,
     _save_problem_screenshot,
@@ -1580,6 +1587,104 @@ def test_problem_screenshot_is_saved_and_logged(tmp_path: Path) -> None:
     assert screenshot["kind"] == "captcha"
 
 
+def test_problem_screenshot_is_linked_to_vacancy(tmp_path: Path) -> None:
+    """Скриншот пишется с `vacancy_id`: видно, к какой вакансии он относится."""
+    config = make_config(tmp_path)
+    paths = config.data.paths.model_copy(update={"logs_dir": tmp_path / "logs"})
+    config = config.model_copy(update={"data": config.data.model_copy(update={"paths": paths})})
+    logger = RunLogger(config.data.paths.logs_dir, run_id="linked")
+
+    _save_problem_screenshot(
+        _ShotPage(),
+        config,
+        logger,
+        "respond-unknown",
+        url="https://hh.ru/vacancy/138498954",
+    )
+    logger.close()
+
+    events = [
+        json.loads(line)
+        for line in logger.events_path.read_text(encoding="utf-8").splitlines()
+    ]
+    screenshot = [item for item in events if item["event"] == "screenshot"][0]
+    assert screenshot["kind"] == "respond-unknown"
+    assert screenshot["vacancy_id"] == "138498954"
+
+
+def test_outcome_short_reason_for_sent_keeps_llm_verdict_in_message() -> None:
+    """В таблицу идёт короткая метка, полный вердикт LLM — в подробности."""
+    stats = RunStats(started_at=datetime(2026, 11, 5, 19, 0))
+    verdict = "Основные требования совпадают с опытом: Java, Spring Boot, REST, Kafka."
+    stats.sent.append(
+        SentVacancy(
+            title="Java-разработчик",
+            company="ООО Цифролаб",
+            url="https://hh.ru/vacancy/138498954",
+            probability=0.99,
+            reason=verdict,
+            report_reason=SENT_REPORT_REASON,
+            report_message=verdict,
+        )
+    )
+
+    counters = (0, 0, 0, 0, 0, 0, 0)
+    assert _outcome_short_reason(stats, counters, OUTCOME_SENT) == SENT_REPORT_REASON
+    assert _outcome_message(stats, counters, OUTCOME_SENT) == verdict
+
+
+def test_outcome_short_reason_for_llm_skip() -> None:
+    """Пропуск по оценке LLM: метка в таблице, полный текст — в подробностях."""
+    stats = RunStats(started_at=datetime(2026, 11, 5, 19, 0))
+    verdict = "Требуется опыт работы с Kafka и Camunda, в профиле его нет."
+    stats.skipped.append(
+        SkippedVacancy(
+            title="Java-разработчик",
+            company="ООО Цифролаб",
+            url="https://hh.ru/vacancy/138498954",
+            reason=verdict,
+            report_reason=NOT_FIT_REPORT_REASON,
+            report_message=verdict,
+        )
+    )
+
+    counters = (0, 0, 0, 0, 0, 0, 0)
+    assert _outcome_short_reason(stats, counters, OUTCOME_SKIPPED) == NOT_FIT_REPORT_REASON
+    assert _outcome_message(stats, counters, OUTCOME_SKIPPED) == verdict
+
+
+def test_outcome_short_reason_for_error_keeps_text_in_message() -> None:
+    """Сбой обработки: короткая метка в таблице, текст ошибки — в подробностях."""
+    stats = RunStats(started_at=datetime(2026, 11, 5, 19, 0))
+    stats.errors.append(
+        RunError(
+            url="https://hh.ru/vacancy/138498954",
+            title="Java-разработчик",
+            message="PlaywrightTimeoutError: страница не ответила за 30 с",
+        )
+    )
+
+    counters = (0, 0, 0, 0, 0, 0, 0)
+    assert _outcome_short_reason(stats, counters, OUTCOME_ERROR) == ERROR_REPORT_REASON
+    assert _outcome_message(stats, counters, OUTCOME_ERROR) == (
+        "PlaywrightTimeoutError: страница не ответила за 30 с"
+    )
+
+
+def test_respond_diagnostic_describes_failed_step() -> None:
+    """Диагностика отклика перечисляет шаги: по ней видно, где встал отклик."""
+    steps = {
+        "форма": "открыта",
+        "письмо": "не добавлено: поле письма не появилось",
+        "результат": "форма осталась открытой, подтверждения нет за 15 с",
+    }
+
+    assert _respond_diagnostic(steps) == (
+        "Форма: открыта; письмо: не добавлено: поле письма не появилось; "
+        "результат: форма осталась открытой, подтверждения нет за 15 с."
+    )
+
+
 class _ShotPage:
     """Заглушка страницы: пишет файл вместо реального скриншота."""
 
@@ -1635,10 +1740,7 @@ def test_queue_uses_reason_from_site(tmp_path: Path) -> None:
     stats = make_stats()
     card = VacancyCard(title="Java", company="Финтех", url="https://hh.ru/vacancy/137974891")
     logger = RunLogger(tmp_path / "logs", run_id="queued-notice")
-    notice = (
-        "Чтобы откликнуться на эту вакансию, поменяйте видимость резюме на "
-        "«Видно всем работодателям, зарегистрированным на hh.ru»"
-    )
+    notice = "hh.ru не принял отклик: попробуйте позже"
 
     _queue(stats, logger, card, "no_form", reason=notice)
     logger.close()

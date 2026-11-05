@@ -40,6 +40,9 @@ Options:
   -r, --retry, --re [STATUS]  повторить обработку вакансий, без поиска
   --excluded                  повторить обработку только исключённых вакансий, синоним --retry excluded
   --notify-test               отправить тестовое оповещение о завершении работы по включённым видам уведомлений
+  --start                     запустить веб-сервер отчётов в фоне и выйти
+  --stop                      остановить веб-сервер отчётов и выйти
+  --status                    показать, запущен ли веб-сервер отчётов, и выйти
 
 Для получения справки по конкретной опции нужно после опции ввести --help или -h, если документация есть она будет показана, пример: ./run.sh --retry -h
 
@@ -49,7 +52,10 @@ Examples:
   ./run.sh --channel habr --retry
   ./run.sh --channel habr --re
   ./run.sh --retry queued
-  ./run.sh --login --ch habr"""
+  ./run.sh --login --ch habr
+  ./run.sh --start
+  ./run.sh --status
+  ./run.sh --stop"""
 
 RETRY_HELP_TEXT = """Повторение обработки вакансий по списку прямых ссылок из отчётов, без поиска
 
@@ -145,6 +151,32 @@ def test_parser_channel_flag_and_aliases() -> None:
     assert parser.parse_args([]).channel is None
     assert parser.parse_args(["--channel", "habr"]).channel == "habr"
     assert parser.parse_args(["--ch", "hh"]).channel == "hh"
+
+
+def test_parser_server_flags() -> None:
+    """Служебные команды сервера — отдельные флаги, взаимоисключающие."""
+    parser = build_parser()
+
+    assert parser.parse_args([]).start is False
+    assert parser.parse_args([]).stop is False
+    assert parser.parse_args([]).status is False
+    assert parser.parse_args(["--start"]).start is True
+    assert parser.parse_args(["--stop"]).stop is True
+    assert parser.parse_args(["--status"]).status is True
+    with pytest.raises(CliUsageError):
+        parser.parse_args(["--start", "--stop"])
+
+
+def test_general_help_lists_server_commands() -> None:
+    """В общей справке есть все служебные команды сервера."""
+    text = general_help(color=False)
+
+    assert "--start" in text
+    assert "--stop" in text
+    assert "--status" in text
+    assert "./run.sh --start" in text
+    assert "./run.sh --status" in text
+    assert "./run.sh --stop" in text
 
 
 def test_no_ops_option_is_removed() -> None:
@@ -473,7 +505,95 @@ def test_main_stops_on_resume_not_found(tmp_path: Path, monkeypatch, capsys) -> 
     assert "Traceback" not in err
 
 
+def test_main_start_runs_server_without_pipeline(tmp_path: Path, monkeypatch) -> None:
+    """`--start` запускает только веб-сервер и не запускает поиск."""
+    make_config(tmp_path)
+    calls: list[str] = []
+
+    class FakeLogger:
+        def __enter__(self) -> "FakeLogger":
+            return self
+
+        def __exit__(self, *exc_info: object) -> bool:
+            return False
+
+    def fake_start(config, logger):
+        del config, logger
+        calls.append("start")
+        return True
+
+    monkeypatch.setattr("agent.cli.RunLogger", lambda *args, **kwargs: FakeLogger())
+    monkeypatch.setattr("agent.cli.ensure_web_server", fake_start)
+
+    assert main(["--config", str(tmp_path / "config.yaml"), "--start"]) == 0
+    assert calls == ["start"]
+
+
+def test_main_stop_runs_server_stop(tmp_path: Path, monkeypatch) -> None:
+    """`--stop` останавливает сервер и возвращает код остановки."""
+    make_config(tmp_path)
+    calls: list[str] = []
+
+    class FakeLogger:
+        def __enter__(self) -> "FakeLogger":
+            return self
+
+        def __exit__(self, *exc_info: object) -> bool:
+            return False
+
+    def fake_stop(logger):
+        del logger
+        calls.append("stop")
+        return 0
+
+    monkeypatch.setattr("agent.cli.RunLogger", lambda *args, **kwargs: FakeLogger())
+    monkeypatch.setattr("agent.cli.stop_web_server", fake_stop)
+
+    assert main(["--config", str(tmp_path / "config.yaml"), "--stop"]) == 0
+    assert calls == ["stop"]
+
+
+def test_main_status_returns_server_status(tmp_path: Path, monkeypatch) -> None:
+    """`--status` передаёт код состояния сервера."""
+    make_config(tmp_path)
+    calls: list[str] = []
+
+    class FakeLogger:
+        def __enter__(self) -> "FakeLogger":
+            return self
+
+        def __exit__(self, *exc_info: object) -> bool:
+            return False
+
+    def fake_status(logger):
+        del logger
+        calls.append("status")
+        return 1
+
+    monkeypatch.setattr("agent.cli.RunLogger", lambda *args, **kwargs: FakeLogger())
+    monkeypatch.setattr("agent.cli.server_status", fake_status)
+
+    assert main(["--config", str(tmp_path / "config.yaml"), "--status"]) == 1
+    assert calls == ["status"]
+
+
+def test_main_rejects_two_server_commands(capsys) -> None:
+    """`--start` и `--stop` вместе запрещены до чтения конфигурации."""
+    assert main(["--start", "--stop"]) == 2
+    assert "взаимоисключающие" in capsys.readouterr().err
+
+
+def test_main_rejects_server_command_with_other_action(capsys) -> None:
+
+    """Служебная команда сервера не сочетается с поиском или повтором."""
+    assert main(["--start", "--retry"]) == 2
+    err = capsys.readouterr().err
+    assert "не сочетается" in err
+    assert "--start" in err
+
+
 def test_notify_test_sends_to_each_enabled_kind(tmp_path: Path, monkeypatch, capsys) -> None:
+
     """Раздельные адреса отчёта и капчи — по тестовому письму на каждый."""
     notifications = {
         "email": {

@@ -961,6 +961,52 @@ def test_archived_vacancy_shows_archive_reason(
     assert stored["vacancies"][0]["reason"] == "VacancyParseError: старая ошибка разбора"
 
 
+def test_old_visibility_hint_is_shown_as_generic_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Старая подсказка о видимости не попадает в интерфейс отчёта."""
+    monkeypatch.setattr(web_main, "REPORTS_DIR", tmp_path)
+    notice = (
+        "Чтобы откликнуться на эту вакансию, поменяйте видимость резюме на "
+        "«Видно всем работодателям, зарегистрированным на hh.ru»"
+    )
+    item = vacancy("1", "skipped")
+    item["reason"] = notice
+    item["message"] = notice
+    write_report(tmp_path, "2026-10-24.json", [item])
+    client = TestClient(web_main.app)
+
+    row = client.get("/api/v1/vacancies").json()["vacancies"][0]
+
+    assert row["reason"] == web_main.SEND_FAILED_REASON
+    assert row["message"] == web_main.SEND_FAILED_REASON
+    stored = json.loads((tmp_path / "2026-10-24.json").read_text(encoding="utf-8"))
+    assert stored["vacancies"][0]["reason"] == notice
+
+
+def test_old_questionary_answers_are_cleaned(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Старые ответы анкеты показываются без оговорок и длинных тире."""
+    monkeypatch.setattr(web_main, "REPORTS_DIR", tmp_path)
+    item = vacancy("1", "queued")
+    item["questionary"] = [
+        {
+            "question": "Работали с Camunda?",
+            "answer": "Да, работал с Camunda. Версию уточнить не могу.",
+        },
+        {
+            "question": "Зомби и сирота",
+            "answer": "Зомби — процесс; сирота - процесс.",
+        },
+    ]
+    write_report(tmp_path, "2026-10-24.json", [item])
+    client = TestClient(web_main.app)
+
+    row = client.get("/api/v1/vacancies").json()["vacancies"][0]
+
+    assert row["questionary"][0]["answer"] == "Да, работал с Camunda."
+    assert row["questionary"][1]["answer"] == "Зомби - процесс. сирота - процесс."
+
+
 def test_archive_warning_explains_status_and_reason(client: TestClient) -> None:
     """Подтверждение архива объясняет, что меняется, а что остаётся прежним."""
     response = client.get("/report")
@@ -1206,6 +1252,28 @@ def test_update_status_writes_ui_event_to_journal(
     assert events[-1]["new_status"] == "rejected"
     assert "profile" not in events[-1]
     assert "company" not in events[-1]
+
+
+def test_status_update_journal_time_has_no_separator(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Событие правки статуса пишет время без разделителя `T`, как журнал агента."""
+    monkeypatch.setattr(web_main, "LOGS_DIR", tmp_path)
+
+    web_main.log_status_update(
+        report_name="2026-10-24.json",
+        url="https://hh.ru/vacancy/1",
+        old_status="sent",
+        new_status="rejected",
+        archived=False,
+    )
+
+    journal = tmp_path / f"{date.today().isoformat()}.jsonl"
+    event = json.loads(journal.read_text(encoding="utf-8").splitlines()[-1])
+    assert "T" not in event["ts"]
+    assert re.fullmatch(
+        r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}", event["ts"]
+    )
 
 
 def test_web_journal_is_written_to_project_logs_dir(

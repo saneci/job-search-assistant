@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "disable_existing_loggers": false,
+  "handlers": {
+    "server": {
+      "()": "web.server_logging.daily_handler"
+    }
+  },
+  "loggers": {
+    "uvicorn": {
+      "handlers": [
+        "server"
+      ],
+      "level": "INFO",
+      "propagate": false
+    },
+    "uvicorn.error": {
+      "handlers": [
+        "server"
+      ],
+      "level": "INFO",
+      "propagate": false
+    },
+    "uvicorn.access": {
+      "handlers": [
+        "server"
+      ],
+      "level": "INFO",
+      "propagate": false
+    }
+  },
+  "root": {
+    "handlers": [
+      "server"
+    ],
+    "level": "INFO"
+  }
+}

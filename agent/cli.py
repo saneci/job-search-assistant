@@ -29,7 +29,7 @@ from .models import (
 )
 from .notify import notify_test as send_test_notification
 from .notify import notify_test_targets
-from .web_server import ensure_web_server
+from .web_server import ensure_web_server, server_status, stop_web_server
 from .pipeline import (
     RETRY_ALL,
     ResumeNameError,
@@ -51,6 +51,7 @@ RETRY_FLAGS = ("-r", "--retry", "--re")
 EXCLUDED_FLAGS = ("--excluded",)
 LOGIN_FLAGS = ("--login",)
 CHANNEL_FLAGS = ("--channel", "--ch")
+SERVER_ACTION_NAMES = ("start", "stop", "status")
 HELP_FLAGS = ("-h", "--help")
 
 # Цвета повторяют тему argparse в Python 3.14+: пользователь видит один
@@ -194,6 +195,9 @@ GENERAL_OPTIONS = (
         "отправить тестовое оповещение о завершении работы по включённым "
         "видам уведомлений",
     ),
+    ("--start", "запустить веб-сервер отчётов в фоне и выйти"),
+    ("--stop", "остановить веб-сервер отчётов и выйти"),
+    ("--status", "показать, запущен ли веб-сервер отчётов, и выйти"),
 )
 
 
@@ -218,7 +222,10 @@ def general_help(color: bool | None = None) -> str:
         "  ./run.sh --channel habr --retry\n"
         "  ./run.sh --channel habr --re\n"
         "  ./run.sh --retry queued\n"
-        "  ./run.sh --login --ch habr"
+        "  ./run.sh --login --ch habr\n"
+        "  ./run.sh --start\n"
+        "  ./run.sh --status\n"
+        "  ./run.sh --stop"
     )
 
 
@@ -426,7 +433,29 @@ def _translate_parser_error(message: str) -> CliUsageError:
             "опция --config требует значение",
             usage="./run.sh --config <FILE>",
         )
+    if "not allowed with argument" in message:
+        return CliUsageError(
+            "опции сервера взаимоисключающие",
+            usage="./run.sh (--start | --stop | --status)",
+            hint="Выберите одну из опций: --start, --stop или --status",
+        )
     return CliUsageError(message)
+
+
+def _server_action_name(args: argparse.Namespace) -> str | None:
+    """Какая служебная команда сервера выбрана, если она есть."""
+    return next((name for name in SERVER_ACTION_NAMES if getattr(args, name)), None)
+
+
+def _server_action_conflicts(args: argparse.Namespace) -> bool:
+    """Сочетается ли служебная команда сервера с запуском, входом или повтором."""
+    return bool(
+        args.install_browser
+        or args.login
+        or args.notify_test
+        or args.retry is not None
+        or args.excluded
+    )
 
 
 class _CliArgumentParser(argparse.ArgumentParser):
@@ -512,6 +541,22 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="отправить тестовое письмо-уведомление и выйти (проверка SMTP-канала)",
     )
+    server_group = parser.add_mutually_exclusive_group()
+    server_group.add_argument(
+        "--start",
+        action="store_true",
+        help="запустить веб-сервер отчётов в фоне и выйти",
+    )
+    server_group.add_argument(
+        "--stop",
+        action="store_true",
+        help="остановить веб-сервер отчётов и выйти",
+    )
+    server_group.add_argument(
+        "--status",
+        action="store_true",
+        help="показать, запущен ли веб-сервер отчётов, и выйти",
+    )
     parser.add_argument(
         "-r",
         "--retry",
@@ -544,6 +589,15 @@ def main(argv: list[str] | None = None) -> int:
     except CliUsageError as exc:
         print(error_text(exc), file=sys.stderr)
         return 2
+    server_action = _server_action_name(args)
+    if server_action and _server_action_conflicts(args):
+        conflict = CliUsageError(
+            f"опция --{server_action} не сочетается с другими действиями",
+            usage=f"./run.sh --{server_action}",
+            hint="Служебная команда сервера выполняется отдельно от поиска, повтора и входа",
+        )
+        print(error_text(conflict), file=sys.stderr)
+        return 2
 
     try:
         # Канал из `--ch` передаём в конфиг сразу: иначе у Habr потребуются
@@ -554,6 +608,15 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     with RunLogger(config.data.paths.logs_dir) as logger:
+        if args.start:
+            return 0 if ensure_web_server(config, logger) else 1
+
+        if args.stop:
+            return stop_web_server(logger)
+
+        if args.status:
+            return server_status(logger)
+
         if args.install_browser:
             return _install_browser(config)
 

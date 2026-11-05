@@ -280,10 +280,10 @@ def test_respond_selects_resume_before_letter(monkeypatch: pytest.MonkeyPatch) -
     def fake_select(scope: Any, name: str) -> None:
         order.append(("resume", name))
 
-    def fake_letter(page: Any, scope: Any, letter: str) -> bool:
+    def fake_letter(page: Any, scope: Any, letter: str) -> tuple[bool, str]:
         del page, scope, letter
         order.append(("letter", ""))
-        return False
+        return False, ""
 
     monkeypatch.setattr(hh_vacancy, "detect_captcha", lambda page: False)
     monkeypatch.setattr(hh_vacancy, "detect_response_blocker", lambda scope: None)

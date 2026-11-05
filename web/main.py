@@ -22,7 +22,9 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
 from agent.config import DEFAULT_LOGS_DIR, DEFAULT_REPORT_DIR
-from agent.logging_setup import new_run_id
+from agent.logging_setup import log_timestamp, new_run_id
+from agent.models import SEND_FAILED_REASON
+from agent.prefilter import sanitize_answer
 from agent.report_io import report_lock, write_report_file
 
 from .metrics import (
@@ -235,18 +237,35 @@ def asset_url(name: str) -> str:
 templates.env.globals["asset_url"] = asset_url
 
 
+def _without_visibility_hint(value: str) -> str:
+    """Не показывает подсказку hh.ru о видимости резюме вместо причины."""
+    if "поменяйте видимость резюме" in value.casefold():
+        return SEND_FAILED_REASON
+    return value
+
+
 def all_vacancies(paths: list[Path]) -> list[dict[str, Any]]:
     """Вакансии из выбранных файлов: в записи видно, из какого она файла.
 
     У архивной записи причина всегда архивная: старые отчёты могли сохранить
     причину прежнего статуса, например ошибку разбора. Файл не переписываем,
-    архивную причину подставляем при чтении.
+    архивную причину подставляем при чтении. Так же скрываем подсказку hh.ru о
+    видимости резюме: она не объясняет неудачу и только путает. Старые ответы
+    анкеты очищаются теми же правилами, что и новые.
     """
     items: list[dict[str, Any]] = []
     for path in paths:
         for vacancy in read_report(path)["vacancies"]:
             if isinstance(vacancy, dict):
                 item = {**vacancy, "report_name": path.name}
+                item["reason"] = _without_visibility_hint(str(item.get("reason", "")))
+                item["message"] = _without_visibility_hint(str(item.get("message", "")))
+                if isinstance(item.get("questionary"), list):
+                    item["questionary"] = [
+                        {**entry, "answer": sanitize_answer(str(entry.get("answer", "")))}
+                        for entry in item["questionary"]
+                        if isinstance(entry, dict)
+                    ]
                 if vacancy.get("archived"):
                     item["reason"] = ARCHIVE_REASON
                     item.pop("message", None)
@@ -509,7 +528,7 @@ def log_status_update(
     Ошибки записи не мешают правке статуса.
     """
     event = {
-        "ts": now(),
+        "ts": log_timestamp(),
         "run_id": WEB_RUN_ID,
         "event": "ui_status_update",
         "report": report_name,
