@@ -269,7 +269,8 @@ def test_custom_list_is_used_when_other_select_has_no_target() -> None:
 class FakeButton:
     """Кнопка формы: клик не требует браузера."""
 
-    def click(self) -> None:
+    def click(self, timeout: int | None = None) -> None:
+        del timeout
         return
 
 
@@ -289,7 +290,7 @@ def test_respond_selects_resume_before_letter(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(hh_vacancy, "detect_response_blocker", lambda scope: None)
     monkeypatch.setattr(hh_vacancy, "_response_scope", lambda page: page)
     monkeypatch.setattr(hh_vacancy, "_wait_for_response_ui", lambda page, waiter: "ready")
-    monkeypatch.setattr(hh_vacancy, "_find_action", lambda scope, selectors, pattern: FakeButton())
+    monkeypatch.setattr(hh_vacancy, "_find_action", lambda scope, selectors, pattern, **kwargs: FakeButton())
     monkeypatch.setattr(hh_vacancy, "_is_enabled", lambda button: True)
     monkeypatch.setattr(hh_vacancy, "_wait_for_response_result", lambda page, waiter: "sent")
     monkeypatch.setattr(hh_vacancy, "select_resume", fake_select)

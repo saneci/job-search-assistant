@@ -9,6 +9,7 @@ import pytest
 from agent.hh_vacancy import (
     STATUS_UNKNOWN,
     ResumeNotFoundError,
+    ResponseForm,
     ResponseResult,
     _has_success,
     _result,
@@ -22,6 +23,7 @@ from agent.hh_vacancy import (
     resume_options,
     select_resume,
     set_resume_name,
+    submit_response,
 )
 from agent.models import SEND_FAILED_REASON, VacancyCard
 
@@ -509,6 +511,27 @@ def test_result_keeps_failed_steps() -> None:
 
     assert result.status == STATUS_UNKNOWN
     assert dict(result.steps) == steps
+
+
+def test_not_ready_form_keeps_steps_in_result() -> None:
+    """Форма не открылась: шаги открытия попадают в итог, а не теряются.
+
+    Пустые `steps` в журнале означали, что непонятно, нажалась ли кнопка
+    и что ответил сайт.
+    """
+    form = ResponseForm(
+        STATUS_UNKNOWN,
+        steps={"кнопка": "«Откликнуться»", "клик": "не удался: element is not stable"},
+    )
+
+    result = submit_response(object(), form, "Здравствуйте!")  # type: ignore[arg-type]
+
+    assert result.status == STATUS_UNKNOWN
+    assert result.reason == SEND_FAILED_REASON
+    assert dict(result.steps) == {
+        "кнопка": "«Откликнуться»",
+        "клик": "не удался: element is not stable",
+    }
 
 
 def test_response_notice_skips_ui_labels() -> None:
