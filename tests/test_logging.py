@@ -5,10 +5,10 @@ from __future__ import annotations
 import json
 import os
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-from agent.logging_setup import RunLogger, new_run_id, prune_logs
+from agent.logging_setup import RunLogger, log_timestamp, new_run_id, prune_logs
 
 
 def read_events(path: Path) -> list[dict]:
@@ -33,6 +33,40 @@ def test_info_adds_timestamp(tmp_path: Path, capsys) -> None:
     events = read_events(logger.events_path)
     assert events[0]["message"] == "Работа приложения завершена"
     assert events[0]["run_id"] == "stamp"
+
+
+def test_event_time_has_no_separator(tmp_path: Path) -> None:
+    """Время события журнала пишется без разделителя `T`: «2026-11-05 19:23:23+03:00»."""
+    logger = RunLogger(tmp_path, run_id="stamp")
+
+    logger.event("info", message="проверка")
+    logger.close()
+
+    stamp = read_events(logger.events_path)[0]["ts"]
+    assert "T" not in stamp
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}", stamp)
+    assert datetime.fromisoformat(stamp).tzinfo is not None
+
+
+def test_log_timestamp_keeps_zone_offset() -> None:
+    """Метка времени журнала сохраняет смещение зоны и локальное время."""
+    moment = datetime(2026, 11, 5, 19, 23, 23, tzinfo=timezone(timedelta(hours=3)))
+
+    assert log_timestamp(moment) == "2026-11-05 19:23:23+03:00"
+
+
+def test_console_prints_without_event(tmp_path: Path, capsys) -> None:
+    """Подробность видна в консоли, но в JSONL не дублируется."""
+    logger = RunLogger(tmp_path, run_id="stamp")
+
+    logger.console("LLM-вердикт: подходит")
+    logger.close()
+
+    out = capsys.readouterr().out.strip()
+    assert re.fullmatch(
+        r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] LLM-вердикт: подходит", out
+    )
+    assert read_events(logger.events_path) == []
 
 
 def test_info_plain_has_no_timestamp(tmp_path: Path, capsys) -> None:
@@ -116,6 +150,21 @@ def test_prune_logs_removes_old_files_only(tmp_path: Path) -> None:
 
     assert removed == ["2026-09-01.jsonl", "2026-09-01-101500-captcha.png"]
     assert fresh_log.exists()
+
+
+def test_prune_logs_removes_old_server_logs(tmp_path: Path) -> None:
+    """Логи веб-сервера чистятся по тому же сроку, что журналы агента."""
+    server_dir = tmp_path / "uvicorn"
+    server_dir.mkdir()
+    old = server_dir / "2026-09-01.log"
+    fresh = server_dir / "2026-10-20.log"
+    old.write_text("x", encoding="utf-8")
+    fresh.write_text("x", encoding="utf-8")
+
+    removed = prune_logs(tmp_path, days=7, today=date(2026, 10, 21))
+
+    assert removed == ["2026-09-01.log"]
+    assert fresh.exists()
 
 
 def test_prune_logs_keeps_current_file(tmp_path: Path) -> None:

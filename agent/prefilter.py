@@ -1297,14 +1297,18 @@ LLM_CLUSTER = "llm"
 _META_ANSWER_RE = re.compile(
     r"\bпрофил(?:ь|я|ю|е|ем)\b|резюме|ваканси\w*|не\s+указан\w*|"
     r"нет\s+информации|информаци\w*\s+(?:нет|отсутств\w*)|"
-    r"в\s+описании|в\s+требованиях",
+    r"в\s+описании|в\s+требованиях|уточнить\s+не\s+могу|"
+    r"не\s+могу\s+уточнить|не\s+помню|не\s+знаю|"
+    r"не\s+могу\s+сказать|не\s+уверен\w*|"
+    r"затрудняюсь|нет\s+данных|не\s+располагаю",
     re.IGNORECASE,
 )
 _SENTENCE_RE = re.compile(r"(?<=[.!?])\s+")
 
 
-def _sanitize_answer(text: str) -> str:
-    """Убирает из ответа модели мета-фразы о профиле и вакансии."""
+def sanitize_answer(text: str) -> str:
+    """Убирает мета-фразы и приводит пунктуацию ответа к безопасному виду."""
+    text = text.replace("—", "-").replace("–", "-").replace(";", ".")
     kept = [
         sentence
         for sentence in _SENTENCE_RE.split(text)
@@ -1366,7 +1370,7 @@ def _match_answer(question: Question, raw: str) -> str | None:
     if not text:
         return None
     if question.kind == KIND_TEXT:
-        return _sanitize_answer(text) or None
+        return sanitize_answer(text) or None
     lowered = text.casefold()
     for option in question.options:
         if clean_text(option.label).casefold() == lowered:

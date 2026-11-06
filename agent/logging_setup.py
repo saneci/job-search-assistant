@@ -8,17 +8,34 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterable, TextIO
 
-# Что чистим по сроку хранения: журналы событий и скриншоты проблемных состояний.
-LOG_FILE_PATTERNS = ("*.jsonl", "*.json", "*.png")
+# Что чистим по сроку хранения: журналы событий, скриншоты и логи веб-сервера.
+SERVER_LOG_DIRNAME = "uvicorn"
+LOG_FILE_PATTERNS = ("*.jsonl", "*.json", "*.png", f"{SERVER_LOG_DIRNAME}/*.log")
 
 _FILE_DATE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})")
 
 RUN_ID_FORMAT = "%Y%m%d%H%M%S"
+# Метка времени в консоли агента и в каждой строке журнала веб-сервера.
+CONSOLE_TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S"
+# Путь и срок хранения журнала веб-сервера передаются дочернему процессу uvicorn.
+SERVER_LOG_DIR_ENV = "JOB_SEARCH_SERVER_LOG_DIR"
+SERVER_LOG_RETENTION_ENV = "JOB_SEARCH_SERVER_LOG_RETENTION_DAYS"
 
 
 def new_run_id(now: datetime | None = None) -> str:
     """Идентификатор запуска в едином формате агента и веб-интерфейса."""
     return (now or datetime.now()).strftime(RUN_ID_FORMAT)
+
+
+def log_timestamp(moment: datetime | None = None) -> str:
+    """Время события для журнала: ISO без разделителя `T`.
+
+    Формат «2026-11-05 19:23:23+03:00» человек читает без расшифровки, а
+    смещение зоны остаётся, поэтому `datetime.fromisoformat` разбирает
+    значение наравне с обычным ISO.
+    """
+    moment = datetime.now().astimezone() if moment is None else moment
+    return moment.isoformat(timespec="seconds").replace("T", " ")
 
 
 def prune_logs(
@@ -27,7 +44,7 @@ def prune_logs(
     today: date | None = None,
     keep: Iterable[Path] = (),
 ) -> list[str]:
-    """Удаляет журналы и скриншоты старше days дней. Возвращает имена файлов.
+    """Удаляет журналы, скриншоты и логи сервера старше days дней. Возвращает имена файлов.
 
     Дату файла берём из имени (``2026-10-21.jsonl``), а если её там нет —
     из времени изменения файла. `keep` — файлы, которые трогать нельзя:
@@ -86,7 +103,7 @@ class RunLogger:
     def event(self, name: str, **fields: Any) -> None:
         """Записывает одно событие в лог."""
         record: dict[str, Any] = {
-            "ts": datetime.now().astimezone().isoformat(timespec="seconds"),
+            "ts": log_timestamp(),
             "run_id": self.run_id,
             "event": name,
         }
@@ -111,11 +128,19 @@ class RunLogger:
         self.event("info", message=message)
         print(message, flush=True)
 
+    def console(self, message: str) -> None:
+        """Печатает подробность пользователю, не дублируя её в журнале.
+
+        Нужно для текстов, которые уже есть в отдельном событии (например,
+        полный вердикт LLM): в JSONL они не повторяются, а в консоли видны.
+        """
+        print(self._stamped(message), flush=True)
+
     @staticmethod
     def _stamped(message: str) -> str:
         if not message:
             return message
-        stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        stamp = datetime.now().strftime(CONSOLE_TIMESTAMP_FORMAT)
         return f"[{stamp}] {message}"
 
     def switch_day(self, day: str) -> bool:

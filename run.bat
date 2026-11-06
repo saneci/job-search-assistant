@@ -46,4 +46,4 @@ if not exist ".venv\Scripts\python.exe" (
 )
 
 ".venv\Scripts\python.exe" run.py %*
-exit /b 0
+exit /b %errorlevel%

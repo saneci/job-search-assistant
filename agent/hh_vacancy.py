@@ -4,15 +4,15 @@ from __future__ import annotations
 
 import re
 import time
-from dataclasses import dataclass
-from typing import Callable, Sequence
+from dataclasses import dataclass, field
+from typing import Callable, Mapping, Sequence
 from urllib.parse import urlparse
 
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import Locator, Page, TimeoutError as PlaywrightTimeoutError
 
 from .browser import NAVIGATION_TIMEOUT_MS, CaptchaError, PageLoadError, detect_captcha
-from .models import REJECTED_REASON, VacancyCard, VacancyDetails
+from .models import REJECTED_REASON, SEND_FAILED_REASON, VacancyCard, VacancyDetails
 from .prefilter import KIND_SELECT, KIND_TEXT, Answer, Question, read_questions
 
 TITLE_SELECTORS = ("h1[data-qa='vacancy-title']", "h1.bloko-header-1", "h1")
@@ -94,10 +94,8 @@ CAUSE_TEXT_RE = re.compile(
     re.IGNORECASE,
 )
 # hh.ru держит в форме отклика предупреждение о видимости резюме даже тогда,
-# когда выбранное резюме открыто всем работодателям, а кнопка отправки активна.
-# Это подсказка интерфейса, а не причина неудачи: после клика по «Откликнуться»
-# её в отчёт не пишем. Когда кнопка заблокирована, предупреждение остаётся
-# настоящей причиной.
+# когда выбранное резюме открыто всем работодателям. Это подсказка интерфейса,
+# а не причина неудачи: в отчёт и журнал она не попадает никогда.
 HIDDEN_RESUME_WARNING_RE = re.compile(r"поменяйте видимость резюме", re.IGNORECASE)
 # Текст контейнера формы: если он попал целиком, это обёртка, а не причина.
 CONTAINER_TEXT_RE = re.compile(
@@ -542,15 +540,18 @@ class VacancyParseError(RuntimeError):
 
 @dataclass(frozen=True)
 class ResponseResult:
-    """Итог попытки отклика: статус и причина, которую показал hh.ru.
+    """Итог попытки отклика: статус, причина и пошаговая диагностика.
 
-    `reason` — дословный текст информационного сообщения hh.ru (например,
-    требование изменить видимость резюме). Пустая строка значит, что сайт
-    причину не объяснил, и в отчёт идёт общий текст для статуса.
+    `reason` — дословный текст информационного сообщения hh.ru. Если сайт
+    причину не объяснил, для неудачной отправки используется общий текст.
+    `steps` — что получилось на каждом шаге отклика: форма, резюме, анкета,
+    письмо, кнопка отправки, ожидание подтверждения. По ним видно, где именно
+    сломалось, без ручного разбора DOM и скриншота.
     """
 
     status: str
     reason: str = ""
+    steps: Mapping[str, str] = field(default_factory=dict)
 
 
 def open_vacancy(page: Page, card: VacancyCard) -> VacancyDetails:
@@ -883,15 +884,17 @@ def submit_response(
     по нему снимается снимок того, что именно уйдёт работодателю.
     """
     if not form.ready:
-        return ResponseResult(status=form.status, reason=form.reason)
+        return _result(form.status, reason=form.reason)
 
+    steps: dict[str, str] = {"форма": "открыта"}
     scope = _response_scope(page)
     # Вопросы уже прочитаны префильтром: форма — анкета, блокер ей не нужен.
     blocker = None if form.questions else detect_response_blocker(scope)
     if blocker:
+        steps["форма"] = f"сайт показал «{blocker}»"
         reason = response_notice(page)
         _dismiss(page)
-        return _result(blocker, reason=reason)
+        return _result(blocker, reason=reason, steps=steps)
 
     # Резюме выбираем до письма: hh.ru привязывает отклик к выбранному резюме.
     if _resume_name:
@@ -902,12 +905,17 @@ def submit_response(
                 raise
             # Форму открыли кнопкой «Отклик другим резюме», а текущего резюме в
             # списке нет: им уже откликались, значит по нему пришёл отказ.
+            steps["резюме"] = f"«{_resume_name}» нет в форме повторного отклика"
             _dismiss(page)
-            return _result(STATUS_REJECTED, reason=REJECTED_REASON)
+            return _result(STATUS_REJECTED, reason=REJECTED_REASON, steps=steps)
+        steps["резюме"] = f"выбрано «{_resume_name}»"
+    else:
+        steps["резюме"] = "не выбиралось: название резюме не задано"
 
     if answers:
         expected = sum(1 for answer in answers if answer.filled)
         applied = apply_answers(scope, answers)
+        steps["анкета"] = f"ответов {applied} из {expected}"
         if applied < expected:
             # Часть ответов не проставилась: отправлять такую форму нельзя —
             # пустой обязательный вопрос всё равно вернётся ошибкой.
@@ -915,10 +923,13 @@ def submit_response(
             return _result(
                 "questionnaire",
                 reason="hh.ru не дал заполнить все вопросы анкеты — нужен ручной отклик",
+                steps=steps,
             )
 
     # Письмо вставляем, если форма позволяет (по ТЗ).
-    if _fill_letter(page, scope, letter):
+    letter_filled, letter_reason = _fill_letter(page, scope, letter)
+    steps["письмо"] = "добавлено" if letter_filled else f"не добавлено: {letter_reason}"
+    if letter_filled:
         page.wait_for_timeout(LETTER_SETTLE_MS)
 
     if after_fill is not None:
@@ -926,22 +937,27 @@ def submit_response(
 
     submit = _find_action(scope, SUBMIT_SELECTORS, RESPOND_RE)
     if submit is None:
+        steps["отправка"] = "кнопка отправки не найдена"
         blocker = detect_response_blocker(scope)
         reason = response_notice(page)
         _dismiss(page)
-        return _result(blocker or STATUS_NO_FORM, reason=reason)
+        return _result(blocker or STATUS_NO_FORM, reason=reason, steps=steps)
     if not _is_enabled(submit):
         # Кнопка заблокирована (например, резюме скрыто): жать её бессмысленно,
         # а причину hh.ru пишет информационным сообщением в самой форме.
+        steps["отправка"] = "кнопка отправки неактивна"
         blocker = detect_response_blocker(scope)
         reason = response_notice(page)
         _dismiss(page)
-        return _result(blocker or STATUS_NO_FORM, reason=reason)
+        return _result(blocker or STATUS_NO_FORM, reason=reason, steps=steps)
 
+    steps["отправка"] = "кнопка найдена и нажата"
+    started = time.monotonic()
     try:
         submit.click()
-    except PlaywrightError:
-        return _result(STATUS_UNKNOWN, page)
+    except PlaywrightError as exc:
+        steps["отправка"] = f"клик по кнопке не удался: {exc}"
+        return _result(STATUS_UNKNOWN, page, steps=steps)
 
     result = _wait_for_response_result(page, captcha_waiter)
 
@@ -950,21 +966,32 @@ def submit_response(
         _close_resume_dropdown(scope)
         retry = _find_action(scope, SUBMIT_SELECTORS, RESPOND_RE)
         if retry is not None and _is_enabled(retry):
+            steps["повтор"] = "кнопка отправки нажата второй раз"
             try:
                 retry.click()
-            except PlaywrightError:
-                pass
+            except PlaywrightError as exc:
+                steps["повтор"] = f"клик по кнопке не удался: {exc}"
             else:
                 result = _wait_for_response_result(page, captcha_waiter)
+        else:
+            steps["повтор"] = "кнопка отправки для повтора недоступна"
+
+    waited = round(time.monotonic() - started)
+    if result == STATUS_SENT:
+        steps["результат"] = f"hh.ru подтвердил отправку за {waited} с"
+    elif _modal_hidden(page):
+        steps["результат"] = f"форма закрылась без подтверждения за {waited} с"
+    else:
+        steps["результат"] = f"форма осталась открытой, подтверждения нет за {waited} с"
 
     reason = (
-        response_notice(page, include_hidden_warning=False)
+        response_notice(page)
         if result != STATUS_SENT
         else ""
     )
     if result in ("test", "questionnaire", "external_form"):
         _dismiss(page)
-    return _result(result, reason=reason)
+    return _result(result, reason=reason, steps=steps)
 
 
 def start_test(
@@ -1107,43 +1134,48 @@ def _question_field(scope: Locator | Page, name: str) -> Locator | None:
     return locator if _is_visible(locator) else None
 
 
-def _result(status: str, page: Page | None = None, *, reason: str = "") -> ResponseResult:
-    """Собирает итог отклика: статус и причину со страницы, если она есть."""
+def _result(
+    status: str,
+    page: Page | None = None,
+    *,
+    reason: str = "",
+    steps: Mapping[str, str] | None = None,
+) -> ResponseResult:
+    """Собирает итог отклика: статус, причину со страницы и шаги диагностики.
+
+    Если сайт не дал понятной причины, для неудачной отправки пишется общий
+    текст: подсказки интерфейса в отчёт не попадают.
+    """
     if not reason and page is not None:
         reason = response_notice(page)
-    return ResponseResult(status=status, reason=reason)
+    if not reason and status in (STATUS_NO_FORM, STATUS_UNKNOWN):
+        reason = SEND_FAILED_REASON
+    return ResponseResult(status=status, reason=reason, steps=dict(steps or {}))
 
 
-def response_notice(page: Page, *, include_hidden_warning: bool = True) -> str:
+def response_notice(page: Page) -> str:
     """Возвращает информационное сообщение формы отклика — реальную причину.
 
     Сначала смотрим явные подсказки/уведомления, затем абзацы внутри модалки.
     Текст описания вакансии и подписи интерфейса не попадают: нужен только
     текст, которым hh.ru объясняет, почему отклик недоступен или не ушёл.
-
-    `include_hidden_warning=False` — форма готова и кнопка отправки была
-    активна. Предупреждение «поменяйте видимость резюме» hh.ru показывает и
-    при открытом резюме, поэтому причиной неудачи оно не считается.
+    Предупреждение «поменяйте видимость резюме» не считается причиной никогда:
+    hh.ru показывает его и при открытом резюме.
     """
     scope = _response_scope(page)
     if _modal_hidden(page):
         raw = _first_text(page, PAGE_NOTICE_SELECTORS)
-        return _clean_notice(raw) if len(raw) <= NOTICE_MAX_LENGTH else ""
+        text = _clean_notice(raw) if len(raw) <= NOTICE_MAX_LENGTH else ""
+        return "" if HIDDEN_RESUME_WARNING_RE.search(text) else text
     raw = _first_text(scope, NOTICE_SELECTORS)
     if raw and len(raw) <= NOTICE_MAX_LENGTH:
         text = _clean_notice(raw)
-        if _looks_like_notice(text) and (
-            include_hidden_warning or not HIDDEN_RESUME_WARNING_RE.search(text)
-        ):
+        if _looks_like_notice(text) and not HIDDEN_RESUME_WARNING_RE.search(text):
             return text
-    return _notice_from_text_blocks(scope, include_hidden_warning=include_hidden_warning)
+    return _notice_from_text_blocks(scope)
 
 
-def _notice_from_text_blocks(
-    scope: Locator | Page,
-    *,
-    include_hidden_warning: bool = True,
-) -> str:
+def _notice_from_text_blocks(scope: Locator | Page) -> str:
     """Ищет абзац-объяснение в модалке, пропуская кнопки, подписи и заголовки."""
     for selector in ("p", "div", "span"):
         try:
@@ -1164,7 +1196,7 @@ def _notice_from_text_blocks(
             if len(raw) > NOTICE_MAX_LENGTH:
                 continue
             text = _clean_notice(raw)
-            if not include_hidden_warning and HIDDEN_RESUME_WARNING_RE.search(text):
+            if HIDDEN_RESUME_WARNING_RE.search(text):
                 continue
             if not _looks_like_notice(text):
                 continue
@@ -1298,27 +1330,34 @@ def _has_response_form(page: Page, scope: Locator | Page) -> bool:
     return _find_action(scope, LETTER_TOGGLE_SELECTORS, LETTER_TOGGLE_RE) is not None
 
 
-def _fill_letter(page: Page, scope: Locator | Page, letter: str) -> bool:
+def _fill_letter(page: Page, scope: Locator | Page, letter: str) -> tuple[bool, str]:
+    """Вставляет сопроводительное письмо. Возвращает (вставлено, причина).
+
+    Молчаливый отказ здесь недопустим: без письма отклик уходит половиной
+    заявки, а по журналу не видно, что именно не нашлось — поле, кнопка
+    «Добавить сопроводительное» или сама вставка текста.
+    """
     textarea = _first_visible(scope, LETTER_TEXTAREA_SELECTORS)
     if textarea is None:
         toggle = _find_action(scope, LETTER_TOGGLE_SELECTORS, LETTER_TOGGLE_RE)
-        if toggle is not None:
-            try:
-                toggle.click()
-                page.wait_for_timeout(1000)
-            except PlaywrightError:
-                pass
-            textarea = _first_visible(scope, LETTER_TEXTAREA_SELECTORS)
+        if toggle is None:
+            return False, "не найдены поле письма и кнопка «Добавить сопроводительное»"
+        try:
+            toggle.click()
+            page.wait_for_timeout(1000)
+        except PlaywrightError as exc:
+            return False, f"кнопка «Добавить сопроводительное» не нажалась: {exc}"
+        textarea = _first_visible(scope, LETTER_TEXTAREA_SELECTORS)
     if textarea is None:
-        return False
+        return False, "после нажатия «Добавить сопроводительное» поле письма не появилось"
     try:
         textarea.click()
         textarea.fill(letter)
         textarea.dispatch_event("input")
         textarea.dispatch_event("change")
-        return True
-    except PlaywrightError:
-        return False
+        return True, ""
+    except PlaywrightError as exc:
+        return False, f"поле письма не приняло текст: {exc}"
 
 
 def _response_scope(page: Page) -> Locator | Page:
@@ -1368,16 +1407,21 @@ def _has_success(page: Page) -> bool:
 
 
 def response_state(page: Page) -> dict[str, object]:
-    """Состояние формы отклика для лога: адрес, текст формы, длина письма.
+    """Состояние формы отклика для лога: адрес, заголовки, текст формы, длина письма.
 
     Сопроводительное письмо в лог не пишется — только его длина. Если модалки
-    нет, текст страницы не собираем: это шум, а не диагностика.
+    нет, текст страницы не собираем: это шум, а не диагностика. Заголовки
+    нужны, чтобы отличить форму нужной вакансии от чужой: по ним видно, для
+    какой карточки открылся отклик.
     """
     state: dict[str, object] = {"page_url": page.url}
     if _modal_hidden(page):
         return state
 
     scope = _response_scope(page)
+    headings = _modal_headings(scope)
+    if headings:
+        state["form_headings"] = headings
     form_text = _response_text(scope)
     if form_text:
         state["form_text"] = form_text[:400]
@@ -1388,6 +1432,28 @@ def response_state(page: Page) -> dict[str, object]:
         except PlaywrightError:
             pass
     return state
+
+
+def _modal_headings(scope: Locator | Page) -> str:
+    """Заголовки открытой модалки через разделитель — для журнала."""
+    parts: list[str] = []
+    for selector in ("h1", "h2", "h3"):
+        locator = scope.locator(selector)
+        try:
+            total = min(locator.count(), 3)
+        except (PlaywrightError, AttributeError):
+            continue
+        for index in range(total):
+            item = locator.nth(index)
+            if not _is_visible(item):
+                continue
+            try:
+                text = " ".join((item.inner_text() or "").split())
+            except (PlaywrightError, AttributeError):
+                continue
+            if text and text not in parts:
+                parts.append(text)
+    return " / ".join(parts)[:200]
 
 
 def _is_already_responded(page: Page) -> bool:
