@@ -28,175 +28,196 @@
             </div>
 
             {% if metrics.period %}
-            <div class="filters">
-                {% if metrics.profiles and metrics.profiles.options %}
-                <div class="profile-filter" id="profileFilter">
-                    <span class="filter-label" id="profileFilterLabel">Профиль:</span>
-                    <div class="profile-dropdown">
-                        <button class="profile-toggle" id="profileToggle" type="button"
-                                aria-haspopup="true" aria-expanded="false"
-                                aria-labelledby="profileFilterLabel"><span
-                                class="profile-toggle-text">{{ metrics.profiles.value_text }}</span><span
-                                class="profile-caret" aria-hidden="true"></span></button>
-                        <div class="profile-menu" id="profileMenu" hidden>
-                            <button class="profile-option{% if metrics.profiles.all_active %} checked{% endif %}"
-                                    type="button" data-profile-all="true"
-                                    aria-checked="{{ 'true' if metrics.profiles.all_active else 'false' }}"
-                                    role="menuitemcheckbox"><span class="profile-check"
-                                    aria-hidden="true">✓</span><span
-                                    class="profile-option-label">Все</span></button>
-                            {% for option in metrics.profiles.options %}
-                            <button class="profile-option{% if option.active %} checked{% endif %}"
-                                    type="button" data-profile="{{ option.key }}"
-                                    aria-checked="{{ 'true' if option.active else 'false' }}"
-                                    role="menuitemcheckbox"><span class="profile-check"
-                                    aria-hidden="true">✓</span><span
-                                    class="profile-option-label">{{ option.label }}</span></button>
-                            {% endfor %}
+                <div class="filters">
+                    {% if metrics.profiles and metrics.profiles.options %}
+                        <div class="profile-filter" id="profileFilter">
+                            <span class="filter-label" id="profileFilterLabel">Профиль:</span>
+                            <div class="profile-dropdown">
+                                <button class="profile-toggle" id="profileToggle" type="button"
+                                        aria-haspopup="true" aria-expanded="false"
+                                        aria-labelledby="profileFilterLabel"><span
+                                    class="profile-toggle-text">{{ metrics.profiles.value_text }}</span><span
+                                    class="profile-caret" aria-hidden="true"></span></button>
+                                <div class="profile-menu" id="profileMenu" hidden>
+                                    <button
+                                        class="profile-option{% if metrics.profiles.all_active %} checked{% endif %}"
+                                        type="button" data-profile-all="true"
+                                        aria-checked="{{ 'true' if metrics.profiles.all_active else 'false' }}"
+                                        role="menuitemcheckbox"><span class="profile-check"
+                                                                      aria-hidden="true">✓</span><span
+                                        class="profile-option-label">Все</span></button>
+                                    {% for option in metrics.profiles.options %}
+                                        <button class="profile-option{% if option.active %} checked{% endif %}"
+                                                type="button" data-profile="{{ option.key }}"
+                                                aria-checked="{{ 'true' if option.active else 'false' }}"
+                                                role="menuitemcheckbox"><span class="profile-check"
+                                                                              aria-hidden="true">✓</span><span
+                                            class="profile-option-label">{{ option.label }}</span></button>
+                                    {% endfor %}
+                                </div>
+                            </div>
                         </div>
+                    {% endif %}
+                    <label>Период:</label>
+                    <div class="filter-group">
+                        {% for option in metrics.period.options %}
+                            <a class="filter-btn{% if option.active %} active{% endif %}"
+                               href="/metrics?period={{ option.key }}{{ metrics.profiles.query }}"
+                               {% if option.active %}aria-current="true"{% endif %}>{{ option.label }}</a>
+                        {% endfor %}
                     </div>
+                    <span class="count-badge">{{ metrics.period.label }}</span>
                 </div>
-                {% endif %}
-                <label>Период:</label>
-                <div class="filter-group">
-                    {% for option in metrics.period.options %}
-                    <a class="filter-btn{% if option.active %} active{% endif %}"
-                       href="/metrics?period={{ option.key }}{{ metrics.profiles.query }}"
-                       {% if option.active %}aria-current="true"{% endif %}>{{ option.label }}</a>
-                    {% endfor %}
-                </div>
-                <span class="count-badge">{{ metrics.period.label }}</span>
-            </div>
             {% endif %}
 
             {% if metrics.empty %}
-            <div class="main-panel">
-                <div class="empty-note">
-                    {% if metrics.reports_count %}
-                    За выбранный период ({{ metrics.period.label }}) данных нет. Выберите другой период.
-                    {% else %}
-                    В data/report пока нет данных. Запустите агент — здесь появится воронка.
-                    {% endif %}
+                <div class="main-panel">
+                    <div class="empty-note">
+                        {% if metrics.reports_count %}
+                            За выбранный период ({{ metrics.period.label }}) данных нет. Выберите другой период.
+                        {% else %}
+                            В data/report пока нет данных. Запустите агент — здесь появится воронка.
+                        {% endif %}
+                    </div>
                 </div>
-            </div>
             {% else %}
 
-            <!-- Ключевые метрики -->
-            <div class="metrics-grid">
-                <div class="metric-card card-response">
-                    <div class="label">Конверсия в отклик</div>
-                    <div class="value">{{ metrics.rate_text.response }}</div>
-                    <div class="sub">{{ metrics.responses }} {{ metrics.words.responses }} из {{ metrics.total }} {{ metrics.words.vacancies_genitive }}</div>
-                </div>
-                <div class="metric-card card-offer">
-                    <div class="label">Конверсия в оффер</div>
-                    <div class="value">{{ metrics.rate_text.offer }}</div>
-                    <div class="sub">{{ metrics.offers }} {{ metrics.words.offers }} из {{ metrics.responses }}</div>
-                </div>
-                <div class="metric-card card-rejected">
-                    <div class="label">Доля отказов</div>
-                    <div class="value">{{ metrics.rate_text.rejected }}</div>
-                    <div class="sub">{{ metrics.rejected }} {{ metrics.words.rejected }} из {{ metrics.responses }}</div>
-                </div>
-                <div class="metric-card card-ignore">
-                    <div class="label">Игнор (молчание)</div>
-                    <div class="value">{{ metrics.rate_text.ignore }}</div>
-                    <div class="sub">{{ metrics.sent }} {{ metrics.words.sent }} без ответа</div>
-                </div>
-            </div>
-
-            <!-- Единый блок с графиками -->
-            <div class="main-panel">
-
-                <!-- Левая колонка: Воронка в виде пайчарта -->
-                <div class="chart-section">
-                    <h2>Воронка найма (от просмотра до оффера)</h2>
-                    <div class="pie-wrapper">
-
-                        <div class="pie-chart"
-                             style="background-image: {{ metrics.pie_css }};"></div>
-
-                        <div class="pie-legend">
-                            {% for item in metrics.pie_legend %}
-                            <div class="legend-item">
-                                <div class="legend-color" style="background: {{ item.color }};"></div>
-                                <span>{{ item.label }} (<strong>{{ item.count }}</strong>)</span>
-                            </div>
-                            {% endfor %}
-                        </div>
+                <!-- Ключевые метрики -->
+                <div class="metrics-grid">
+                    <div class="metric-card card-response">
+                        <div class="label">Конверсия в отклик</div>
+                        <div class="value">{{ metrics.rate_text.response }}</div>
+                        <div class="sub">{{ metrics.responses }} {{ metrics.words.responses }}
+                            из {{ metrics.total }} {{ metrics.words.vacancies_genitive }}</div>
+                    </div>
+                    <div class="metric-card card-offer">
+                        <div class="label">Конверсия в оффер</div>
+                        <div class="value">{{ metrics.rate_text.offer }}</div>
+                        <div class="sub">{{ metrics.offers }} {{ metrics.words.offers }}
+                            из {{ metrics.responses }}</div>
+                    </div>
+                    <div class="metric-card card-rejected">
+                        <div class="label">Доля отказов</div>
+                        <div class="value">{{ metrics.rate_text.rejected }}</div>
+                        <div class="sub">{{ metrics.rejected }} {{ metrics.words.rejected }}
+                            из {{ metrics.responses }}</div>
+                    </div>
+                    <div class="metric-card card-ignore">
+                        <div class="label">Игнор (молчание)</div>
+                        <div class="value">{{ metrics.rate_text.ignore }}</div>
+                        <div class="sub">{{ metrics.sent }} {{ metrics.words.sent }} без ответа</div>
                     </div>
                 </div>
 
-                <!-- Правая колонка: Два горизонтальных графика -->
-                <div class="right-column">
+                <!-- Единый блок с графиками -->
+                <div class="main-panel">
 
-                    <!-- График 1 -->
+                    <!-- Левая колонка: Воронка в виде пайчарта -->
                     <div class="chart-section">
-                        <h2>Распределение обработанных вакансий ({{ metrics.total }})</h2>
-                        <div class="stack-group">
-                            <div class="stack-bar">
-                                {% for item in metrics.distribution if item.count %}
-                                <div class="stack-segment" style="width: {{ item.percent }}%; background: {{ item.color }};" title="{{ item.label }}: {{ item.count }}">
-                                    {% if item.percent >= 7 %}<span>{{ item.percent_text }}</span>{% endif %}
-                                </div>
-                                {% endfor %}
-                            </div>
-                            <div class="pie-legend pie-legend--start">
-                                {% for item in metrics.distribution %}
-                                <div class="legend-item"><div class="legend-color" style="background: {{ item.color }};"></div>{{ item.label }} ({{ item.count }})</div>
+                        <h2>Воронка найма (от просмотра до оффера)</h2>
+                        <div class="pie-wrapper">
+
+                            <div class="pie-chart"
+                                 style="background-image: {{ metrics.pie_css }};"></div>
+
+                            <div class="pie-legend">
+                                {% for item in metrics.pie_legend %}
+                                    <div class="legend-item">
+                                        <div class="legend-color" style="background: {{ item.color }};"></div>
+                                        <span>{{ item.label }} (<strong>{{ item.count }}</strong>)</span>
+                                    </div>
                                 {% endfor %}
                             </div>
                         </div>
                     </div>
 
-                    <!-- График 2 -->
-                    <div class="chart-section">
-                        <h2>Судьба отправленных откликов ({{ metrics.responses }})</h2>
-                        <div class="stack-group">
-                            {% if metrics.has_responses %}
-                            <div class="stack-bar">
-                                {% for item in metrics.fate if item.count %}
-                                <div class="stack-segment" style="width: {{ item.percent }}%; background: {{ item.color }};" title="{{ item.label }}: {{ item.count }}">
-                                    {% if item.percent >= 10 %}<span>{{ item.percent_text }}</span>{% endif %}
+                    <!-- Правая колонка: Два горизонтальных графика -->
+                    <div class="right-column">
+
+                        <!-- График 1 -->
+                        <div class="chart-section">
+                            <h2>Распределение обработанных вакансий ({{ metrics.total }})</h2>
+                            <div class="stack-group">
+                                <div class="stack-bar">
+                                    {% for item in metrics.distribution if item.count %}
+                                        <div class="stack-segment"
+                                             style="width: {{ item.percent }}%; background: {{ item.color }};"
+                                             title="{{ item.label }}: {{ item.count }}">
+                                            {% if item.percent >= 7 %}<span>{{ item.percent_text }}</span>{% endif %}
+                                        </div>
+                                    {% endfor %}
                                 </div>
-                                {% endfor %}
-                            </div>
-                            {% else %}
-                            <div class="empty-note">Отправленных откликов пока нет.</div>
-                            {% endif %}
-                            <div class="pie-legend pie-legend--start">
-                                {% for item in metrics.fate %}
-                                <div class="legend-item"><div class="legend-color" style="background: {{ item.color }};"></div>{{ item.label }} ({{ item.count }})</div>
-                                {% endfor %}
+                                <div class="pie-legend pie-legend--start">
+                                    {% for item in metrics.distribution %}
+                                        <div class="legend-item">
+                                            <div class="legend-color" style="background: {{ item.color }};"></div>
+                                            {{ item.label }} ({{ item.count }})
+                                        </div>
+                                    {% endfor %}
+                                </div>
                             </div>
                         </div>
-                    </div>
 
-                    <!-- График 3: каналы поиска -->
-                    <div class="chart-section">
-                        <h2>Каналы поиска ({{ metrics.total }})</h2>
-                        <div class="stack-group">
-                            {% if metrics.channels %}
-                            <div class="stack-bar">
-                                {% for item in metrics.channels %}
-                                <div class="stack-segment" style="width: {{ item.percent }}%; background: {{ item.color }};" title="{{ item.label }}: {{ item.count }}">
-                                    {% if item.percent >= 10 %}<span>{{ item.percent_text }}</span>{% endif %}
+                        <!-- График 2 -->
+                        <div class="chart-section">
+                            <h2>Судьба отправленных откликов ({{ metrics.responses }})</h2>
+                            <div class="stack-group">
+                                {% if metrics.has_responses %}
+                                    <div class="stack-bar">
+                                        {% for item in metrics.fate if item.count %}
+                                            <div class="stack-segment"
+                                                 style="width: {{ item.percent }}%; background: {{ item.color }};"
+                                                 title="{{ item.label }}: {{ item.count }}">
+                                                {% if item.percent >= 10 %}
+                                                    <span>{{ item.percent_text }}</span>{% endif %}
+                                            </div>
+                                        {% endfor %}
+                                    </div>
+                                {% else %}
+                                    <div class="empty-note">Отправленных откликов пока нет.</div>
+                                {% endif %}
+                                <div class="pie-legend pie-legend--start">
+                                    {% for item in metrics.fate %}
+                                        <div class="legend-item">
+                                            <div class="legend-color" style="background: {{ item.color }};"></div>
+                                            {{ item.label }} ({{ item.count }})
+                                        </div>
+                                    {% endfor %}
                                 </div>
-                                {% endfor %}
-                            </div>
-                            {% else %}
-                            <div class="empty-note">В отчётах пока нет данных о канале.</div>
-                            {% endif %}
-                            <div class="pie-legend pie-legend--start">
-                                {% for item in metrics.channels %}
-                                <div class="legend-item"><div class="legend-color" style="background: {{ item.color }};"></div>{{ item.label }} ({{ item.count }})</div>
-                                {% endfor %}
                             </div>
                         </div>
-                    </div>
 
+                        <!-- График 3: каналы поиска -->
+                        <div class="chart-section">
+                            <h2>Каналы поиска ({{ metrics.total }})</h2>
+                            <div class="stack-group">
+                                {% if metrics.channels %}
+                                    <div class="stack-bar">
+                                        {% for item in metrics.channels %}
+                                            <div class="stack-segment"
+                                                 style="width: {{ item.percent }}%; background: {{ item.color }};"
+                                                 title="{{ item.label }}: {{ item.count }}">
+                                                {% if item.percent >= 10 %}
+                                                    <span>{{ item.percent_text }}</span>{% endif %}
+                                            </div>
+                                        {% endfor %}
+                                    </div>
+                                {% else %}
+                                    <div class="empty-note">В отчётах пока нет данных о канале.</div>
+                                {% endif %}
+                                <div class="pie-legend pie-legend--start">
+                                    {% for item in metrics.channels %}
+                                        <div class="legend-item">
+                                            <div class="legend-color" style="background: {{ item.color }};"></div>
+                                            {{ item.label }} ({{ item.count }})
+                                        </div>
+                                    {% endfor %}
+                                </div>
+                            </div>
+                        </div>
+
+                    </div>
                 </div>
-            </div>
             {% endif %}
         </div>
 

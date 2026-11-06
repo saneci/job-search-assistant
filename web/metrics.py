@@ -71,18 +71,31 @@ def profile_key(record: Mapping[str, Any]) -> str:
     return profile_value(record.get("profile", ""))
 
 
+def _invited_at(record: Mapping[str, Any]) -> str:
+    """Дата приглашения из записи или пустая строка.
+
+    `null` в JSON считается отсутствием даты: `str(None)` дал бы строку «None»,
+    и запись без приглашения попала бы в счётчик.
+    """
+    return str(record.get("invited_at") or "").strip()
+
+
 def effective_status(record: Mapping[str, Any]) -> str:
     """Статус записи для графиков с учётом факта приглашения.
 
     `invited_at` ставится один раз и не сбрасывается. Поэтому запись, у которой
     статус позже откатили в `sent` или `skipped`, всё равно считается дошедшей
     до приглашения. Оффер и отказ — финальные исходы, их не перекрываем.
+    Статус `invite` без даты приглашения считается отправленным откликом: дата —
+    единственный признак, что приглашение было на самом деле.
     """
     status = str(record.get("status", "") or "unknown")
     if status in FINAL_STATUSES:
         return status
-    if str(record.get("invited_at", "")).strip():
+    if _invited_at(record):
         return "invite"
+    if status == "invite":
+        return "sent"
     return status
 
 
@@ -110,7 +123,7 @@ def _vacancy_key(
             if not profile
             else ("title", title, company, "profile", profile)
         )
-    return ("row", str(index))
+    return "row", str(index)
 
 
 def _legacy_profiles(records: Iterable[Mapping[str, Any]]) -> dict[str, str]:
@@ -298,7 +311,7 @@ def build_metrics(
     others = total - responses
     # «Дошло до приглашения»: факт хранится в `invited_at`, поэтому счётчик не
     # уменьшается, когда запись переходит из `invite` в `offer` или `rejected`.
-    invited_total = sum(1 for row in rows if str(row.get("invited_at", "")).strip())
+    invited_total = sum(1 for row in rows if _invited_at(row))
 
     pie_segments = [
         (responses - offers - invites, "var(--color-sent)"),

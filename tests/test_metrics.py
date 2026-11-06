@@ -116,6 +116,7 @@ def test_invite_is_a_response_and_survives_status_change() -> None:
         row("2", "invite"),
         row("3", "offer"),
     ]
+    rows[1]["invited_at"] = "2026-10-25T10:00:00+03:00"
     rows[2]["invited_at"] = "2026-10-25T10:00:00+03:00"
 
     metrics = build_metrics(rows)
@@ -123,7 +124,7 @@ def test_invite_is_a_response_and_survives_status_change() -> None:
     assert metrics["invites"] == 1
     assert metrics["responses"] == 3
     # Оффер пришёл после приглашения: текущий статус уже не invite, но факт виден.
-    assert metrics["invited_total"] == 1
+    assert metrics["invited_total"] == 2
     assert metrics["rates"]["invite"] == 33.3
     labels = {item["key"]: item["label"] for item in metrics["pie_legend"]}
     assert labels["invite"] == "Приглашения"
@@ -323,3 +324,29 @@ def test_dedupe_prefers_archived_copy() -> None:
     assert unique[0]["archived"] is True
 
 
+def test_invite_status_without_date_counts_as_sent() -> None:
+    """Статус `invite` без даты приглашения — отправленный отклик, а не приглашение."""
+    rows = [row("1", "sent"), row("2", "invite")]
+
+    metrics = build_metrics(rows)
+
+    assert metrics["counts"]["invite"] == 0
+    assert metrics["counts"]["sent"] == 2
+    assert metrics["invites"] == 0
+    assert metrics["invited_total"] == 0
+    assert metrics["responses"] == 2
+    assert metrics["rates"]["invite"] == 0.0
+    fate = {item["key"]: item["count"] for item in metrics["fate"]}
+    assert fate == {"sent": 2, "invite": 0, "rejected": 0, "offer": 0}
+
+
+def test_null_invited_at_is_not_an_invitation() -> None:
+    """`null` вместо даты приглашения — приглашения нет, строку «None» не считаем."""
+    rows = [row("1", "sent")]
+    rows[0]["invited_at"] = None
+
+    metrics = build_metrics(rows)
+
+    assert metrics["counts"]["sent"] == 1
+    assert metrics["invites"] == 0
+    assert metrics["invited_total"] == 0
