@@ -1736,7 +1736,7 @@ def test_queue_no_form_gets_specific_reason(tmp_path: Path) -> None:
 
 
 def test_queue_uses_reason_from_site(tmp_path: Path) -> None:
-    """Реальная причина от hh.ru важнее общей формулировки для кода."""
+    """Реальная причина от hh.ru важнее общей формулировки и не дублируется."""
     stats = make_stats()
     card = VacancyCard(title="Java", company="Финтех", url="https://hh.ru/vacancy/137974891")
     logger = RunLogger(tmp_path / "logs", run_id="queued-notice")
@@ -1752,9 +1752,8 @@ def test_queue_uses_reason_from_site(tmp_path: Path) -> None:
     queued = [item for item in events if item["event"] == "queued"][0]
     assert queued["reason"] == notice
     assert queued["vacancy_id"] == "137974891"
-    info = [item for item in events if item["event"] == "info"][0]
-    assert info["vacancy_id"] == "137974891"
-    assert notice in info["message"]
+    # Строка для человека печатается в консоль, в JSONL второй раз не пишется.
+    assert [item for item in events if item["event"] == "info"] == []
 
 
 def test_remember_processing_writes_reason_to_day_report(tmp_path: Path) -> None:

@@ -153,6 +153,7 @@ RESPOND_RE = re.compile(r"^\s*откликнуться\s*$", re.IGNORECASE)
 OTHER_RESUME_RE = re.compile(r"^\s*отклик другим резюме\s*$", re.IGNORECASE)
 OTHER_RESUME_SELECTORS = (
     "[data-qa='vacancy-response-link-other-resume']",
+    "[data-qa='vacancy-response-link-top-again']",
     "[data-qa*='other-resume']",
     "[data-qa*='different-resume']",
 )
@@ -210,6 +211,9 @@ SUCCESS_TEXTS = (
 
 RESPONSE_UI_WAIT_SECONDS = 10
 RESPONSE_RESULT_WAIT_SECONDS = 15
+# Сколько ждём клик по кнопке. Стандартный таймаут Playwright (30 с) заставлял
+# страницу «дёргаться» автопрокруткой, а отклик простаивал без пользы.
+CLICK_TIMEOUT_MS = 10_000
 
 # Сколько ждём готовность страницы вакансии: заголовок или экран-состояние.
 PAGE_READY_WAIT_SECONDS = 15
@@ -788,9 +792,8 @@ class ResponseForm:
     reason: str = ""
     questions: tuple[Question, ...] = ()
     answers: tuple[Answer, ...] = ()
-    # Форму открыли кнопкой «Отклик другим резюме»: текущего резюме может
-    # не быть в списке, и тогда по нему уже пришёл отказ.
     other_resume: bool = False
+    steps: Mapping[str, str] = field(default_factory=dict)
 
     @property
     def ready(self) -> bool:
@@ -812,22 +815,38 @@ def open_response_form(
     if detect_captcha(page) and not _solve_captcha(captcha_waiter):
         return ResponseForm(STATUS_CAPTCHA)
 
-    button = _find_action(page, RESPOND_BUTTON_SELECTORS, RESPOND_RE)
+    steps: dict[str, str] = {}
+    button = _find_action(
+        page, RESPOND_BUTTON_SELECTORS, RESPOND_RE, only_current_vacancy=True
+    )
     other_resume = False
-    if button is None:
-        # Кнопка «Отклик другим резюме»: по вакансии уже есть отклик другого
-        # резюме. Открываем форму и смотрим список резюме — есть ли текущее.
-        button = _find_action(page, OTHER_RESUME_SELECTORS, OTHER_RESUME_RE)
+    if button is not None:
+        steps["кнопка"] = _action_label(button)
+    else:
+        button = _find_action(
+            page, OTHER_RESUME_SELECTORS, OTHER_RESUME_RE, only_current_vacancy=True
+        )
         other_resume = button is not None
+        if other_resume:
+            steps["кнопка"] = _action_label(button)
     if button is None:
+        steps["кнопка"] = "у этой вакансии нет кнопки отклика, карточки рекомендаций пропущены"
         if _is_already_responded(page):
-            return ResponseForm(STATUS_ALREADY_RESPONDED)
-        return ResponseForm(STATUS_NO_FORM, response_notice(page))
+            return ResponseForm(STATUS_ALREADY_RESPONDED, steps=steps)
+        return ResponseForm(STATUS_NO_FORM, response_notice(page), steps=steps)
 
-    try:
-        button.click()
-    except PlaywrightError:
-        return ResponseForm(STATUS_UNKNOWN, response_notice(page))
+    for attempt in (1, 2):
+        try:
+            button.click(timeout=CLICK_TIMEOUT_MS)
+        except PlaywrightError as exc:
+            click_error = _short_error(exc)
+            if attempt == 1:
+                page.wait_for_timeout(500)
+            continue
+        click_error = ""
+        break
+    if click_error:
+        steps["клик"] = f"не удался: {click_error}"
 
     # Флаг нужен только префильтру: для обычного отклика вызов остаётся прежним.
     if ignore_questionnaire:
@@ -835,21 +854,24 @@ def open_response_form(
     else:
         ui = _wait_for_response_ui(page, captcha_waiter)
     if ui == STATUS_CAPTCHA:
-        return ResponseForm(STATUS_CAPTCHA)
+        return ResponseForm(STATUS_CAPTCHA, steps=steps)
     if ui in ("test", "questionnaire", "external_form"):
         reason = response_notice(page)
         _dismiss(page)
-        return ResponseForm(ui, reason)
+        steps["форма"] = f"сайт показал «{ui}»"
+        return ResponseForm(ui, reason, steps=steps)
     if ui != FORM_READY:
         reason = response_notice(page)
         _dismiss(page)
-        return ResponseForm(STATUS_NO_FORM, reason)
+        steps["форма"] = "не открылась за отведённое время"
+        return ResponseForm(STATUS_NO_FORM, reason, steps=steps)
 
+    steps["форма"] = "открыта"
     scope = _response_scope(page)
-    # Вопросы читает только префильтр: обычному отклику они не нужны, а форма
-    # без анкеты не должна лишний раз дёргать DOM.
     questions = read_questions(scope) if ignore_questionnaire else ()
-    return ResponseForm(FORM_READY, "", questions, other_resume=other_resume)
+    return ResponseForm(
+        FORM_READY, "", questions, other_resume=other_resume, steps=steps
+    )
 
 
 def respond(
@@ -884,11 +906,11 @@ def submit_response(
     по нему снимается снимок того, что именно уйдёт работодателю.
     """
     if not form.ready:
-        return _result(form.status, reason=form.reason)
+        return _result(form.status, reason=form.reason, steps=form.steps)
 
-    steps: dict[str, str] = {"форма": "открыта"}
+    steps: dict[str, str] = dict(form.steps)
+    steps.setdefault("форма", "открыта")
     scope = _response_scope(page)
-    # Вопросы уже прочитаны префильтром: форма — анкета, блокер ей не нужен.
     blocker = None if form.questions else detect_response_blocker(scope)
     if blocker:
         steps["форма"] = f"сайт показал «{blocker}»"
@@ -896,16 +918,25 @@ def submit_response(
         _dismiss(page)
         return _result(blocker, reason=reason, steps=steps)
 
-    # Резюме выбираем до письма: hh.ru привязывает отклик к выбранному резюме.
     if _resume_name:
         try:
             select_resume(scope, _resume_name)
-        except ResumeNotFoundError:
+        except ResumeNotFoundError as exc:
+            has_options = bool(exc.options)
+            steps["резюме"] = (
+                f"«{_resume_name}» нет в списке: {', '.join(exc.options)[:200]}"
+                if has_options
+                else "список резюме не открылся"
+            )
             if not form.other_resume:
                 raise
-            # Форму открыли кнопкой «Отклик другим резюме», а текущего резюме в
-            # списке нет: им уже откликались, значит по нему пришёл отказ.
-            steps["резюме"] = f"«{_resume_name}» нет в форме повторного отклика"
+            if not has_options:
+                _dismiss(page)
+                return _result(
+                    STATUS_UNKNOWN,
+                    reason="hh.ru не открыл список резюме — нужен ручной отклик",
+                    steps=steps,
+                )
             _dismiss(page)
             return _result(STATUS_REJECTED, reason=REJECTED_REASON, steps=steps)
         steps["резюме"] = f"выбрано «{_resume_name}»"
@@ -917,8 +948,6 @@ def submit_response(
         applied = apply_answers(scope, answers)
         steps["анкета"] = f"ответов {applied} из {expected}"
         if applied < expected:
-            # Часть ответов не проставилась: отправлять такую форму нельзя —
-            # пустой обязательный вопрос всё равно вернётся ошибкой.
             _dismiss(page)
             return _result(
                 "questionnaire",
@@ -926,7 +955,6 @@ def submit_response(
                 steps=steps,
             )
 
-    # Письмо вставляем, если форма позволяет (по ТЗ).
     letter_filled, letter_reason = _fill_letter(page, scope, letter)
     steps["письмо"] = "добавлено" if letter_filled else f"не добавлено: {letter_reason}"
     if letter_filled:
@@ -943,8 +971,6 @@ def submit_response(
         _dismiss(page)
         return _result(blocker or STATUS_NO_FORM, reason=reason, steps=steps)
     if not _is_enabled(submit):
-        # Кнопка заблокирована (например, резюме скрыто): жать её бессмысленно,
-        # а причину hh.ru пишет информационным сообщением в самой форме.
         steps["отправка"] = "кнопка отправки неактивна"
         blocker = detect_response_blocker(scope)
         reason = response_notice(page)
@@ -954,23 +980,22 @@ def submit_response(
     steps["отправка"] = "кнопка найдена и нажата"
     started = time.monotonic()
     try:
-        submit.click()
+        submit.click(timeout=CLICK_TIMEOUT_MS)
     except PlaywrightError as exc:
-        steps["отправка"] = f"клик по кнопке не удался: {exc}"
+        steps["отправка"] = f"клик по кнопке не удался: {_short_error(exc)}"
         return _result(STATUS_UNKNOWN, page, steps=steps)
 
     result = _wait_for_response_result(page, captcha_waiter)
 
     if result == STATUS_UNKNOWN and not _modal_hidden(page):
-        # Форма осталась открытой — клик не сработал, пробуем ещё раз.
         _close_resume_dropdown(scope)
         retry = _find_action(scope, SUBMIT_SELECTORS, RESPOND_RE)
         if retry is not None and _is_enabled(retry):
             steps["повтор"] = "кнопка отправки нажата второй раз"
             try:
-                retry.click()
+                retry.click(timeout=CLICK_TIMEOUT_MS)
             except PlaywrightError as exc:
-                steps["повтор"] = f"клик по кнопке не удался: {exc}"
+                steps["повтор"] = f"клик по кнопке не удался: {_short_error(exc)}"
             else:
                 result = _wait_for_response_result(page, captcha_waiter)
         else:
@@ -1192,7 +1217,6 @@ def _notice_from_text_blocks(scope: Locator | Page) -> str:
                 raw = " ".join(raw.split())
             except PlaywrightError:
                 continue
-            # Длинный блок — это обёртка со всем содержимым формы, а не причина.
             if len(raw) > NOTICE_MAX_LENGTH:
                 continue
             text = _clean_notice(raw)
@@ -1279,7 +1303,6 @@ def _wait_for_response_ui(
         if ignore_questionnaire and blocker == "questionnaire":
             blocker = None
         if ignore_questionnaire and blocker == "test" and form_visible:
-            # Форма открыта: это анкета с вопросами про тесты, а не экран теста.
             blocker = None
         if blocker:
             return blocker
@@ -1305,10 +1328,6 @@ def _wait_for_response_result(
             continue
 
         scope = _response_scope(page)
-        # Сначала проверяем явный успех: заголовки описания вакансии не должны
-        # давать ложное срабатывание на словах «тест»/«анкета». Старый текст об
-        # отклике другого резюме подтверждением не считается, пока открыта форма:
-        # ждём её закрытия до конца таймаута, hh.ru отвечает медленно.
         stale = _has_other_resume_action(page) and not _modal_hidden(page)
         if _has_success(page) and not stale:
             return STATUS_SENT
@@ -1328,6 +1347,12 @@ def _has_response_form(page: Page, scope: Locator | Page) -> bool:
     if _first_visible(scope, LETTER_TEXTAREA_SELECTORS) is not None:
         return True
     return _find_action(scope, LETTER_TOGGLE_SELECTORS, LETTER_TOGGLE_RE) is not None
+
+
+def _short_error(exc: BaseException) -> str:
+    """Короткий текст ошибки Playwright без многострочного стека вызовов."""
+    text = " ".join(str(exc).split())
+    return text[:200]
 
 
 def _fill_letter(page: Page, scope: Locator | Page, letter: str) -> tuple[bool, str]:
@@ -1506,19 +1531,113 @@ def _find_action(
     scope: Locator | Page,
     selectors: Sequence[str],
     name_pattern: re.Pattern[str],
+    *,
+    only_current_vacancy: bool = False,
 ) -> Locator | None:
+    """Находит кнопку действия, при необходимости только у открытой вакансии.
+
+    hh.ru на странице вакансии показывает блок «Вам подойдут эти вакансии»:
+    кнопка «Откликнуться» в такой карточке открывает форму чужой вакансии.
+    Клик по ней отправил бы отклик не туда, поэтому при
+    `only_current_vacancy` такие кнопки отбрасываются.
+    """
     for selector in selectors:
-        locator = scope.locator(selector).first
-        if _is_visible(locator):
-            return locator
+        locator = scope.locator(selector)
+        try:
+            total = min(locator.count(), VISIBLE_SCAN_LIMIT)
+        except (PlaywrightError, AttributeError):
+            continue
+        for index in range(total):
+            item = locator.nth(index)
+            if not _is_visible(item):
+                continue
+            if only_current_vacancy and not _belongs_to_current_vacancy(item):
+                continue
+            return item
     for role in ("button", "link"):
         try:
-            locator = scope.get_by_role(role, name=name_pattern).first
-        except PlaywrightError:
+            items = scope.get_by_role(role, name=name_pattern)
+            total = min(items.count(), VISIBLE_SCAN_LIMIT)
+        except (PlaywrightError, AttributeError):
             continue
-        if _is_visible(locator):
-            return locator
+        for index in range(total):
+            item = items.nth(index)
+            if not _is_visible(item):
+                continue
+            if only_current_vacancy and not _belongs_to_current_vacancy(item):
+                continue
+            return item
     return None
+
+
+_VACANCY_TITLE_SELECTOR = "h1[data-qa='vacancy-title'], h1.bloko-header-1, h1"
+_VACANCY_TITLE_DEPTH = 6
+
+_OTHER_VACANCY_SCRIPT = r"""
+(element) => {
+  const current = location.pathname.match(/\/vacancy\/(\d+)/);
+  const currentId = current ? current[1] : "";
+  let node = element;
+  for (let depth = 0; depth < __DEPTH__ && node; depth += 1, node = node.parentElement) {
+    if (node.querySelector("__TITLE__")) {
+      return true;
+    }
+    const links = node.querySelectorAll('a[href*="/vacancy/"]');
+    for (const link of links) {
+      const found = link.getAttribute("href").match(/\/vacancy\/(\d+)/);
+      if (found && found[1] !== currentId) {
+        return false;
+      }
+    }
+  }
+  return false;
+}
+"""
+
+
+def _belongs_to_current_vacancy(locator: Locator) -> bool:
+    """Относится ли кнопка к открытой вакансии, а не к карточке рекомендаций.
+
+    hh.ru помечает кнопки самой вакансии и её формы префиксом `vacancy-response`,
+    а кнопки карточек поиска и блока «Вам подойдут эти вакансии» — префиксом
+    `vacancy-serp`. Для кнопок без `data-qa` остаётся проверка по заголовку
+    вакансии: если раньше встречается ссылка на другую вакансию, это чужая
+    карточка. Ошибка проверки трактуется как «чужая»: лучше отложить вакансию,
+    чем отправить отклик по чужой карточке.
+    """
+    try:
+        qa = locator.get_attribute("data-qa") or ""
+    except (PlaywrightError, AttributeError):
+        qa = ""
+    if qa.startswith("vacancy-response"):
+        return True
+    if qa.startswith("vacancy-serp"):
+        return False
+    script = (
+        _OTHER_VACANCY_SCRIPT.replace("__DEPTH__", str(_VACANCY_TITLE_DEPTH))
+        .replace("__TITLE__", _VACANCY_TITLE_SELECTOR)
+    )
+    try:
+        return bool(locator.evaluate(script))
+    except (PlaywrightError, AttributeError):
+        return False
+
+
+def _action_label(button: Locator) -> str:
+    """Подпись кнопки и её `data-qa`: по ним видно, что именно нажали."""
+    try:
+        text = " ".join((button.inner_text() or "").split())[:60]
+    except (PlaywrightError, AttributeError):
+        text = ""
+    try:
+        qa = button.get_attribute("data-qa") or ""
+    except (PlaywrightError, AttributeError):
+        qa = ""
+    if text and qa:
+        return f"«{text}» ({qa})"
+    if text:
+        return f"«{text}»"
+    return qa or "без подписи"
 
 
 def _first_visible(scope: Locator | Page, selectors: Sequence[str]) -> Locator | None:

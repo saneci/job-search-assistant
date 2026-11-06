@@ -1243,8 +1243,6 @@ def _process_vacancy(
 
     llm_reason = ""
     llm_reason_source = ""
-    # Вердикт приложения: Decide API даёт вероятности, порог применяем мы.
-    # Ровно порог — не «выше порога»: такая вакансия пропускается.
     fits = meets_threshold(decision.probability, decision.threshold)
     verdict = FIT_LABEL if fits else NOT_FIT_LABEL
     if not fits:
@@ -1302,8 +1300,6 @@ def _process_vacancy(
         return
 
     if other_resume:
-        # Вакансия подходит, но отклик по ней уже ушёл другим резюме. Не спамим
-        # работодателя: ждём ответа по другому резюме, поэтому статус queued.
         queue(
             stats,
             logger,
@@ -1318,13 +1314,11 @@ def _process_vacancy(
     captcha_waiter = _captcha_waiter(
         page, config, logger, details, site=channel.site_label
     )
-    # Анкета работодателя есть только в форме отклика hh.ru: у Habr формы нет.
     questionary: _Questionnaire | None = None
     if config.pipeline.prefilter.enabled and channel.name == HH:
         questionary = _knockout_prefilter(page, config, stats, logger, details, captcha_waiter)
         if questionary is None:
-            # Анкета гарантированно ведёт к отказу: Generation не нужен.
-            return
+            return None
 
     pending = questionary.pending if questionary is not None else ()
     needs_project_links = requires_project_links(details)
@@ -1339,8 +1333,7 @@ def _process_vacancy(
                 "ответы анкеты вычислены",
                 reason="",
             )
-            return
-    # Запрос к LLM меняется только когда есть вопросы для модели.
+            return None
     questions = {"questionnaire": question_lines(pending)} if pending else {}
 
     try:
@@ -1356,7 +1349,6 @@ def _process_vacancy(
         return
 
     if generation.verdict != "подходит":
-        # Приоритет у Decision-вызова, расхождение только фиксируем в логе.
         logger.event(
             "generation_verdict_mismatch",
             url=details.url,
@@ -1368,7 +1360,7 @@ def _process_vacancy(
     if not generation.cover_letter:
         cause = _generation_reason_text(generation.reason)
         queue(stats, logger, details, "empty_cover_letter", generation.reason, reason=cause)
-        return
+        return None
 
 
     if needs_project_links and not _letter_has_project_link(
@@ -1385,7 +1377,7 @@ def _process_vacancy(
                 "но llm.cover_letter.pet-projects не задан"
             )
         queue(stats, logger, details, "project_links", generation.reason, reason=reason)
-        return
+        return None
 
     log.event(
         "generation",
@@ -1407,13 +1399,9 @@ def _process_vacancy(
         else:
             log.info("в письме не было приветствия, добавил «Здравствуйте!»")
 
-    # Пауза перед действием на сайте: только перед отправкой отклика. Вакансии,
-    # которые не подошли по оценке LLM, её не ждут.
     _pause(config, logger, "перед отправкой отклика")
-
     answers = _questionary_answers(questionary, pending, generation.answers)
     if answers is None:
-        # Частичные ответы сохраняем: человек увидит их в отчёте и заполнит остаток.
         partial = _questionary_partial(questionary, pending, generation.answers)
         if partial:
             _remember_questionary(stats, details, partial)
@@ -1428,7 +1416,7 @@ def _process_vacancy(
             reason=short_reason,
             message="" if full_reason == short_reason else full_reason,
         )
-        return
+        return None
 
     if answers:
         _remember_questionary(stats, details, answers)
@@ -1444,13 +1432,14 @@ def _process_vacancy(
                 "ответы анкеты вычислены",
                 reason="",
             )
-            return
+            return None
         form = ResponseForm(
             questionary.form.status,
             questionary.form.reason,
             questionary.form.questions,
             answers,
             questionary.form.other_resume,
+            questionary.form.steps,
         )
 
     after_fill = (
@@ -1459,11 +1448,9 @@ def _process_vacancy(
 
     try:
         if form is not None and questionary is not None and questionary.test:
-            # Тест проходим тем же ответами: сначала сам тест, потом отклик.
             test_result = submit_test(
                 page, form.answers, captcha_waiter, after_fill=after_fill
             )
-            answers = ()
             if test_result.status == TEST_PASSED:
                 log.info("тест по вакансии пройден, отправляю отклик")
                 result = channel.respond(
@@ -1472,7 +1459,6 @@ def _process_vacancy(
             else:
                 result = test_result
         elif form is not None:
-            # Префильтр уже открыл форму: отклик уходит вместе с ответами анкеты.
             result = submit_response(
                 page,
                 form,
@@ -1495,10 +1481,10 @@ def _process_vacancy(
         raise
     except PlaywrightError as exc:
         _record_error(stats, logger, page, config, details, exc)
-        return
+        return None
 
     status = result.status
-    log.event("respond", url=details.url, status=status, reason=result.reason)
+    log.event("respond", url=details.url, status=status)
 
     if status == STATUS_SENT:
         stats.sent.append(
@@ -1514,11 +1500,9 @@ def _process_vacancy(
         )
         log.info(f"отклик отправлен (всего {stats.sent_count} из {config.pipeline.limit_per_run})")
         _pause(config, logger, "после отправки отклика")
-        return
+        return None
 
     if status == STATUS_REJECTED:
-        # Текущего резюме нет в форме отклика: им уже откликались, значит по
-        # вакансии пришёл отказ. Лимит откликов не тратим.
         log.event(
             "already_rejected",
             url=details.url,
@@ -1535,11 +1519,9 @@ def _process_vacancy(
             )
         )
         log.info("по вакансии уже есть отказ по текущему резюме, вакансия пройдена")
-        return
+        return None
 
     if status == STATUS_ALREADY_RESPONDED:
-        # Форма отклика уже закрыта: отклик ушёл раньше (нашим прошлым запуском
-        # или руками). В файл дня — статус sent с причиной, лимит не тратим.
         stats.already_sent.append(
             SkippedVacancy(
                 title=details.title,
@@ -1550,7 +1532,7 @@ def _process_vacancy(
             )
         )
         log.info(f"{channel.site_label} уже принял отклик, помечаю вакансию отправленной")
-        return
+        return None
 
     if status == STATUS_CAPTCHA:
         _save_problem_screenshot(page, config, logger, "captcha", url=details.url)
@@ -1560,7 +1542,7 @@ def _process_vacancy(
             config, logger, details, captcha_waiter, site=channel.site_label
         )
         log.info(f"{channel.site_label} показал капчу при отправке отклика, запуск остановлен.")
-        return
+        return None
 
     if status == TEST_FAILED:
         queue(
@@ -1571,11 +1553,11 @@ def _process_vacancy(
             "тест по вакансии",
             reason="Тест по вакансии не пройден — откликнитесь вручную",
         )
-        return
+        return None
 
     if status in ("test", "questionnaire", "external_form"):
         queue(stats, logger, details, status, "в форме отклика")
-        return
+        return None
 
     if status == STATUS_NO_FORM:
         _save_problem_screenshot(page, config, logger, "respond-no-form", url=details.url)
@@ -1585,7 +1567,6 @@ def _process_vacancy(
             url=details.url,
             vacancy_id=vacancy_id(details.url),
             status=status,
-            reason=result.reason,
             steps=dict(result.steps),
             **channel.response_state(page),
         )
@@ -1598,18 +1579,15 @@ def _process_vacancy(
             reason=result.reason,
             message=diagnostic,
         )
-        return
+        return None
 
     if status == STATUS_UNKNOWN:
         _save_problem_screenshot(page, config, logger, "respond-unknown", url=details.url)
-        # Что именно показал сайт и на каком шаге встал отклик — без письма
-        # и персональных данных.
         logger.event(
             "respond_state",
             url=details.url,
             vacancy_id=vacancy_id(details.url),
             status=status,
-            reason=result.reason,
             steps=dict(result.steps),
             **channel.response_state(page),
         )
@@ -1856,7 +1834,7 @@ def _queue(
     stats.queued.append(entry)
     extra = {"message": message_text} if message_text else {}
     log.event("queued", url=card.url, title=card.title, code=code, reason=text, note=note, **extra)
-    log.info(f"отложено, нужен ручной отклик: {text}")
+    log.console(f"отложено, нужен ручной отклик: {text}")
 
 
 class _CaptchaWaiter:
@@ -2052,7 +2030,7 @@ def _record_error(
     log = _VacancyLog(logger, card.title, card.company, card.url)
     stats.errors.append(RunError(url=card.url, title=card.title, message=message))
     log.event("vacancy_error", url=card.url, title=card.title, error=message)
-    log.info(f"ошибка: {message}")
+    log.console(f"ошибка: {message}")
     screenshot = config.data.paths.logs_dir / f"{logger.run_id}-error-{len(stats.errors)}.png"
     if save_screenshot(page, screenshot):
         vid = vacancy_id(card.url)

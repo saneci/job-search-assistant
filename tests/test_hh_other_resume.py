@@ -6,9 +6,11 @@ import re
 from typing import Any
 
 import pytest
+from playwright.sync_api import Error as PlaywrightError
 
 import agent.hh_vacancy as hh_vacancy
 from agent.hh_vacancy import (
+    STATUS_NO_FORM,
     STATUS_REJECTED,
     STATUS_SENT,
     STATUS_UNKNOWN,
@@ -16,9 +18,11 @@ from agent.hh_vacancy import (
     _is_already_responded,
     _wait_for_response_result,
     detect_page_blocker,
+    open_response_form,
     respond,
+    submit_response,
 )
-from agent.models import REJECTED_REASON
+from agent.models import REJECTED_REASON, SEND_FAILED_REASON
 
 
 @pytest.fixture(autouse=True)
@@ -56,7 +60,8 @@ class FakeItem:
     def inner_text(self) -> str:
         return self._text
 
-    def click(self) -> None:
+    def click(self, timeout: int | None = None) -> None:
+        del timeout
         self.clicks += 1
 
     def get_attribute(self, name: str) -> str:
@@ -201,7 +206,7 @@ def test_respond_clicks_other_resume_button(monkeypatch: pytest.MonkeyPatch) -> 
     other = FakeItem("Отклик другим резюме")
     submit = FakeItem("Откликнуться")
 
-    def fake_find(scope: Any, selectors: Any, pattern: Any) -> Any:
+    def fake_find(scope: Any, selectors: Any, pattern: Any, **kwargs: Any) -> Any:
         if scope is modal:
             return submit
         if pattern is hh_vacancy.OTHER_RESUME_RE:
@@ -233,7 +238,7 @@ def test_absent_resume_after_other_resume_means_rejection(
     modal = FakePage()
     other = FakeItem("Отклик другим резюме")
 
-    def fake_find(scope: Any, selectors: Any, pattern: Any) -> Any:
+    def fake_find(scope: Any, selectors: Any, pattern: Any, **kwargs: Any) -> Any:
         del scope, selectors
         if pattern is hh_vacancy.OTHER_RESUME_RE:
             return other
@@ -241,7 +246,7 @@ def test_absent_resume_after_other_resume_means_rejection(
 
     def fake_select(scope: Any, name: str) -> None:
         del scope
-        raise hh_vacancy.ResumeNotFoundError(name)
+        raise hh_vacancy.ResumeNotFoundError(name, ("Java Developer", "Team Lead"))
 
     monkeypatch.setattr(hh_vacancy, "detect_captcha", lambda page: False)
     monkeypatch.setattr(hh_vacancy, "_find_action", fake_find)
@@ -259,6 +264,41 @@ def test_absent_resume_after_other_resume_means_rejection(
     assert other.clicks == 1
     assert result.status == STATUS_REJECTED
     assert result.reason == REJECTED_REASON
+
+
+def test_missing_resume_list_is_queued_not_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Список резюме не открылся: это сбой сайта, а не отказ работодателя."""
+    page = FakePage()
+    modal = FakePage()
+    other = FakeItem("Отклик другим резюме")
+
+    def fake_find(scope: Any, selectors: Any, pattern: Any, **kwargs: Any) -> Any:
+        del scope, selectors
+        if pattern is hh_vacancy.OTHER_RESUME_RE:
+            return other
+        return None
+
+    def fake_select(scope: Any, name: str) -> None:
+        del scope
+        raise hh_vacancy.ResumeNotFoundError(name)
+
+    monkeypatch.setattr(hh_vacancy, "detect_captcha", lambda page: False)
+    monkeypatch.setattr(hh_vacancy, "_find_action", fake_find)
+    monkeypatch.setattr(hh_vacancy, "_wait_for_response_ui", lambda page, waiter: "ready")
+    monkeypatch.setattr(hh_vacancy, "_response_scope", lambda page: modal)
+    monkeypatch.setattr(hh_vacancy, "detect_response_blocker", lambda scope: None)
+    monkeypatch.setattr(hh_vacancy, "select_resume", fake_select)
+    monkeypatch.setattr(hh_vacancy, "_dismiss", lambda page: None)
+    hh_vacancy.set_resume_name("Java Developer")
+    try:
+        result = respond(page, "Здравствуйте!")  # type: ignore[arg-type]
+    finally:
+        hh_vacancy.set_resume_name("")
+
+    assert result.status == STATUS_UNKNOWN
+    assert result.steps["резюме"] == "список резюме не открылся"
 
 
 def test_stale_success_does_not_confirm_our_response(
@@ -321,4 +361,134 @@ def test_fresh_success_is_confirmed(monkeypatch: pytest.MonkeyPatch) -> None:
     result = _wait_for_response_result(page, None, seconds=0)
 
     assert result == STATUS_SENT
+
+
+class OtherVacancyItem(FakeItem):
+    """Кнопка карточки другой вакансии из блока «Вам подойдут эти вакансии»."""
+
+    def evaluate(self, script: str) -> Any:
+        del script
+        return False
+
+
+class OwnVacancyItem(FakeItem):
+    """Кнопка открытой вакансии: рядом есть её заголовок."""
+
+    def evaluate(self, script: str) -> Any:
+        del script
+        return True
+
+
+def test_find_action_skips_other_vacancy_cards() -> None:
+    """Кнопка «Откликнуться» из рекомендаций отбрасывается: отклик был бы чужим."""
+    foreign = OtherVacancyItem("Откликнуться")
+    own = OwnVacancyItem("Откликнуться")
+    page = FakePage(roles={"button": [foreign, own]})
+
+    action = hh_vacancy._find_action(  # type: ignore[arg-type]
+        page, (), hh_vacancy.RESPOND_RE, only_current_vacancy=True
+    )
+
+    assert action is own
+
+
+def test_find_action_without_own_button_returns_none() -> None:
+    """Только чужие карточки: кликать не по чему, вакансия уходит в ручные."""
+    page = FakePage(roles={"button": [OtherVacancyItem("Откликнуться")]})
+
+    action = hh_vacancy._find_action(  # type: ignore[arg-type]
+        page, (), hh_vacancy.RESPOND_RE, only_current_vacancy=True
+    )
+
+    assert action is None
+
+
+class QaItem(FakeItem):
+    """Кнопка с `data-qa`: по префиксу видно, чья это карточка."""
+
+    def __init__(self, text: str, qa: str) -> None:
+        super().__init__(text)
+        self.qa = qa
+
+    def get_attribute(self, name: str) -> str:
+        return self.qa if name == "data-qa" else ""
+
+
+def test_own_respond_button_kept_by_data_qa() -> None:
+    """Кнопка вакансии с префиксом `vacancy-response` не отбрасывается."""
+    own = QaItem("Откликнуться", "vacancy-response-link-top-again")
+    page = FakePage(roles={"button": [own]})
+
+    action = hh_vacancy._find_action(  # type: ignore[arg-type]
+        page, (), hh_vacancy.RESPOND_RE, only_current_vacancy=True
+    )
+
+    assert action is own
+
+
+def test_serp_respond_button_is_skipped() -> None:
+    """Кнопка карточки выдачи и рекомендаций с префиксом `vacancy-serp` отбрасывается."""
+    foreign = QaItem("Откликнуться", "vacancy-serp__vacancy_response")
+    page = FakePage(roles={"button": [foreign]})
+
+    action = hh_vacancy._find_action(  # type: ignore[arg-type]
+        page, (), hh_vacancy.RESPOND_RE, only_current_vacancy=True
+    )
+
+    assert action is None
+
+
+class BrokenClickItem(FakeItem):
+    """Кнопка, клик по которой падает: hh.ru перерисовывает разметку."""
+
+    def __init__(self, text: str = "", error: str = "element is not stable") -> None:
+        super().__init__(text)
+        self.error = error
+
+    def click(self, timeout: int | None = None) -> None:
+        del timeout
+        self.clicks += 1
+        raise PlaywrightError(self.error)
+
+
+def test_failed_click_does_not_cancel_opened_form(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Клик упал, но форма открылась: отклик продолжается, ошибка попадает в шаги."""
+    page = FakePage()
+    button = BrokenClickItem("Откликнуться", error="element is not stable")
+
+    monkeypatch.setattr(hh_vacancy, "detect_captcha", lambda page: False)
+    monkeypatch.setattr(hh_vacancy, "_find_action", lambda scope, selectors, pattern, **kwargs: button)
+    monkeypatch.setattr(hh_vacancy, "_wait_for_response_ui", lambda page, waiter: "ready")
+    monkeypatch.setattr(hh_vacancy, "_response_scope", lambda page: page)
+
+    form = open_response_form(page)  # type: ignore[arg-type]
+
+    assert form.ready
+    assert button.clicks == 2
+    assert form.steps["кнопка"] == "«Откликнуться»"
+    assert "element is not stable" in form.steps["клик"]
+
+
+def test_failed_click_without_form_explains_why(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Клик упал и форма не открылась: причина и шаги не теряются."""
+    page = FakePage()
+    button = BrokenClickItem("Откликнуться", error="element is not attached")
+
+    monkeypatch.setattr(hh_vacancy, "detect_captcha", lambda page: False)
+    monkeypatch.setattr(hh_vacancy, "_find_action", lambda scope, selectors, pattern, **kwargs: button)
+    monkeypatch.setattr(hh_vacancy, "_wait_for_response_ui", lambda page, waiter: "none")
+    monkeypatch.setattr(hh_vacancy, "response_notice", lambda page: "")
+    monkeypatch.setattr(hh_vacancy, "_dismiss", lambda page: None)
+
+    form = open_response_form(page)  # type: ignore[arg-type]
+    result = submit_response(page, form, "Здравствуйте!")  # type: ignore[arg-type]
+
+    assert result.status == STATUS_NO_FORM
+    assert result.reason == SEND_FAILED_REASON
+    assert result.steps["форма"] == "не открылась за отведённое время"
+    assert "element is not attached" in result.steps["клик"]
 
