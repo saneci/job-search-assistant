@@ -75,6 +75,10 @@ def value_of(config: Any, field: str) -> Any:
         ("llm.decision.threshold", 0.8),
         ("llm.decision.model", "gpt-6-luna-decisions"),
         ("llm.generation.model", "gpt-6-luna-pro"),
+        ("llm.ocr.enabled", True),
+        ("llm.ocr.model", ""),
+        ("llm.ocr.max_images", 3),
+        ("llm.ocr.max_image_mb", 5.0),
         ("llm.decision.explain_rejections", False),
         ("llm.cover_letter.max_length", 1500),
         ("llm.cover_letter.pet_projects", ()),
@@ -104,6 +108,7 @@ def test_defaults(tmp_path: Path, field: str, expected: Any) -> None:
         ({"pipeline": {"retry": {"statuses": ["sent"]}}}, "pipeline.retry.statuses"),
         ({"llm": {"decision": {"threshold": 1.5}}}, "llm.decision.threshold"),
         ({"llm": {"decision": {"explain_rejections": "да"}}}, "explain_rejections"),
+        ({"llm": {"ocr": {"enabled": "да"}}}, "llm.ocr.enabled"),
         (
             {"notifications": {"captcha": {"enabled": "да"}}},
             "notifications.captcha.enabled",
@@ -273,6 +278,30 @@ def test_pet_projects_must_be_list(tmp_path: Path) -> None:
         load_config(
             write_config(tmp_path, {"llm": {"cover_letter": {"pet-projects": 42}}})
         )
+
+
+def test_ocr_section_is_read_from_config(tmp_path: Path) -> None:
+    """Раздел llm.ocr настраивается в конфиге: выключатель, модель и лимиты картинок."""
+    config = load_config(
+        write_config(
+            tmp_path,
+            {
+                "llm": {
+                    "ocr": {
+                        "enabled": False,
+                        "model": "gpt-6.1-terra",
+                        "max_images": 5,
+                        "max_image_mb": 2,
+                    }
+                }
+            },
+        )
+    )
+
+    assert config.llm.ocr.enabled is False
+    assert config.llm.ocr.model == "gpt-6.1-terra"
+    assert config.llm.ocr.max_images == 5
+    assert config.llm.ocr.max_image_mb == 2.0
 
 
 def test_pet_projects_are_not_read_from_environment(

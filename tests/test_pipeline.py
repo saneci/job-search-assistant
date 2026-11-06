@@ -17,7 +17,7 @@ from agent.hh_vacancy import (
     STATUS_SENT,
 )
 from agent.habr_search import HabrResponse
-from agent.llm import DecisionResult, GenerationResult
+from agent.llm import DecisionResult, GenerationResult, LLMError
 from agent.logging_setup import RunLogger
 from agent.models import (
     ARCHIVE_REASON,
@@ -3165,3 +3165,190 @@ def test_retry_profile_mismatch_has_message(tmp_path: Path, monkeypatch) -> None
     assert found[0]["url"] == "https://hh.ru/vacancy/1"
     assert "другим резюме" in found[0]["message"]
 
+
+def test_image_only_description_is_transcribed_before_decision(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Описание картинками: Decision получает текст, переписанный с изображений."""
+    config = make_config(tmp_path)
+    card = VacancyCard(
+        title="Middle+ Java Backend Developer",
+        company="IRLIX",
+        url="https://career.habr.com/vacancies/1000164618",
+    )
+    fallback = (
+        "Текст описания на сайте недоступен, доступны только требования и условия. "
+        "Требования: Бэкенд разработчик Middle Java"
+    )
+    details = VacancyDetails(
+        url=card.url,
+        title=card.title,
+        company=card.company,
+        salary="",
+        description=fallback,
+        blocker="other_resume",
+        description_images=("https://habrastorage.org/a.png",),
+    )
+    monkeypatch.setattr("agent.pipeline.open_vacancy", lambda page, vacancy: details)
+    monkeypatch.setattr(
+        "agent.pipeline._download_images", lambda urls, ocr, timeout: [b"\x89PNG\r\n\x1a\n"]
+    )
+    seen: list[str] = []
+
+    class FakeLLM:
+        def transcribe_images(self, images: list[bytes]) -> str:
+            assert len(images) == 1
+            return "Что нужно делать: разработка сервисов на Java."
+
+        def decide(self, profile, vacancy):
+            seen.append(vacancy.description)
+            return DecisionResult(
+                fits=True,
+                probability=0.87,
+                threshold=0.8,
+                probabilities={"подходит": 0.87, "не подходит": 0.13},
+                chosen="подходит",
+            )
+
+    logger = RunLogger(tmp_path / "logs", run_id="ocr-transcribed")
+    _process_vacancy(
+        None,  # type: ignore[arg-type]
+        config,
+        Profile(text="Java", examples="", style_rules=""),
+        FakeLLM(),  # type: ignore[arg-type]
+        make_stats(),
+        logger,
+        card,
+    )
+    logger.close()
+
+    assert seen == ["Что нужно делать: разработка сервисов на Java."]
+
+
+def test_image_transcription_failure_keeps_page_description(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Не удалось распознать картинки: остаётся описание со страницы, запуск продолжается."""
+    config = make_config(tmp_path)
+    card = VacancyCard(
+        title="Middle+ Java Backend Developer",
+        company="IRLIX",
+        url="https://career.habr.com/vacancies/1000164618",
+    )
+    fallback = (
+        "Текст описания на сайте недоступен, доступны только требования и условия. "
+        "Требования: Бэкенд разработчик Middle Java"
+    )
+    details = VacancyDetails(
+        url=card.url,
+        title=card.title,
+        company=card.company,
+        salary="",
+        description=fallback,
+        blocker="other_resume",
+        description_images=("https://habrastorage.org/a.png",),
+    )
+    monkeypatch.setattr("agent.pipeline.open_vacancy", lambda page, vacancy: details)
+    monkeypatch.setattr(
+        "agent.pipeline._download_images", lambda urls, ocr, timeout: [b"\x89PNG\r\n\x1a\n"]
+    )
+    seen: list[str] = []
+
+    class FakeLLM:
+        def transcribe_images(self, images: list[bytes]) -> str:
+            raise LLMError("Chat API: HTTP 500")
+
+        def decide(self, profile, vacancy):
+            seen.append(vacancy.description)
+            return DecisionResult(
+                fits=False,
+                probability=0.1,
+                threshold=0.8,
+                probabilities={"подходит": 0.1, "не подходит": 0.9},
+                chosen="не подходит",
+            )
+
+    logger = RunLogger(tmp_path / "logs", run_id="ocr-failed")
+    _process_vacancy(
+        None,  # type: ignore[arg-type]
+        config,
+        Profile(text="Java", examples="", style_rules=""),
+        FakeLLM(),  # type: ignore[arg-type]
+        make_stats(),
+        logger,
+        card,
+    )
+    logger.close()
+
+    assert seen == [fallback]
+
+
+def test_image_only_description_with_disabled_ocr_is_not_transcribed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """llm.ocr.enabled: false — картинки не скачиваются, описание остаётся со страницы."""
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        json.dumps(
+            {
+                "search": {"queries": "Java", "area": "Москва"},
+                "pipeline": {
+                    "limit_per_run": 2,
+                    "delay_between_actions": {"from": 0, "to": 0},
+                },
+                "llm": {"ocr": {"enabled": False}},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    config = load_config(path)
+    card = VacancyCard(
+        title="Middle+ Java Backend Developer",
+        company="IRLIX",
+        url="https://career.habr.com/vacancies/1000164618",
+    )
+    details = VacancyDetails(
+        url=card.url,
+        title=card.title,
+        company=card.company,
+        salary="",
+        description="Требования: Бэкенд разработчик Middle Java",
+        blocker="other_resume",
+        description_images=("https://habrastorage.org/a.png",),
+    )
+    monkeypatch.setattr("agent.pipeline.open_vacancy", lambda page, vacancy: details)
+
+    def fail_download(urls, ocr, timeout):
+        raise AssertionError("картинки не скачиваются при выключенном llm.ocr")
+
+    monkeypatch.setattr("agent.pipeline._download_images", fail_download)
+    seen: list[str] = []
+
+    class FakeLLM:
+        def transcribe_images(self, images: list[bytes]) -> str:
+            raise AssertionError("транскрипция выключена")
+
+        def decide(self, profile, vacancy):
+            seen.append(vacancy.description)
+            return DecisionResult(
+                fits=False,
+                probability=0.1,
+                threshold=0.8,
+                probabilities={"подходит": 0.1, "не подходит": 0.9},
+                chosen="не подходит",
+            )
+
+    logger = RunLogger(tmp_path / "logs", run_id="ocr-disabled")
+    _process_vacancy(
+        None,  # type: ignore[arg-type]
+        config,
+        Profile(text="Java", examples="", style_rules=""),
+        FakeLLM(),  # type: ignore[arg-type]
+        make_stats(),
+        logger,
+        card,
+    )
+    logger.close()
+
+    assert seen == ["Требования: Бэкенд разработчик Middle Java"]

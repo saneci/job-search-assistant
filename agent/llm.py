@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import re
 import time
@@ -15,6 +16,8 @@ from .config import FIT_LABEL, LLMConfig, NOT_FIT_LABEL, default_decision_criter
 from .models import VacancyDetails
 from .profile import Profile
 from .prompts import (
+    DESCRIPTION_IMAGES_MAX_TOKENS,
+    DESCRIPTION_IMAGES_PROMPT,
     REJECTION_MAX_LENGTH,
     REJECTION_MAX_TOKENS,
     REJECTION_SYSTEM_PROMPT,
@@ -190,16 +193,36 @@ class LLMClient:
         content = self._chat(messages, max_tokens=REJECTION_MAX_TOKENS, temperature=0.0)
         return _one_line(content, REJECTION_MAX_LENGTH)
 
+    def transcribe_images(self, images: Sequence[bytes]) -> str:
+        """Переписывает текст вакансии с картинок: у работодателя описание может быть изображениями.
+
+        Провайдер принимает изображения внутри JSON, поэтому каждая картинка уходит
+        data URL с base64, а не ссылкой на CDN.
+        """
+        parts: list[dict[str, Any]] = [
+            {"type": "text", "text": DESCRIPTION_IMAGES_PROMPT}
+        ]
+        for data in images:
+            parts.append({"type": "image_url", "image_url": {"url": _image_data_url(data)}})
+        content = self._chat(
+            [{"role": "user", "content": parts}],
+            max_tokens=DESCRIPTION_IMAGES_MAX_TOKENS,
+            temperature=0.0,
+            model=self.config.ocr.model or self.config.generation.model,
+        )
+        return content.strip()
+
     # --- HTTP -----------------------------------------------------------
 
     def _chat(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         max_tokens: int | None = None,
         temperature: float | None = None,
+        model: str | None = None,
     ) -> str:
         payload: dict[str, Any] = {
-            "model": self.config.generation.model,
+            "model": model or self.config.generation.model,
             "messages": messages,
             "max_tokens": max_tokens or self.config.generation.max_tokens,
             "temperature": (
@@ -644,6 +667,22 @@ def _chat_content(data: Mapping[str, Any]) -> str:
 
 def _endpoint(base_url: str, path: str) -> str:
     return base_url.rstrip("/") + "/" + path.lstrip("/")
+
+
+def _image_data_url(data: bytes) -> str:
+    """Data URL для картинки: изображения провайдер принимает только внутри JSON."""
+    return f"data:{_image_mime(data)};base64," + base64.b64encode(data).decode("ascii")
+
+
+def _image_mime(data: bytes) -> str:
+    """Тип картинки по сигнатуре: провайдеру нужен точный MIME, иначе запрос отклоняется."""
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith(b"GIF8"):
+        return "image/gif"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return "image/jpeg"
 
 
 def _sleep_before_retry(attempt: int, retry_after: str | None) -> None:

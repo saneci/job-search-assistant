@@ -5,10 +5,11 @@ from __future__ import annotations
 import re
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime
 from pathlib import Path
 
+import httpx
 from playwright.sync_api import Error as PlaywrightError, Page
 
 from . import habr_search
@@ -22,7 +23,7 @@ from .browser import (
     wait_for_captcha_solved,
 )
 from .channel import HABR, HH, Channel, QueryLabels, channel_name_for_url, habr_channel
-from .config import FIT_LABEL, NOT_FIT_LABEL, AppConfig
+from .config import FIT_LABEL, NOT_FIT_LABEL, AppConfig, DescriptionOCRConfig
 from .hh_search import (
     is_company_excluded,
     is_excluded,
@@ -1128,6 +1129,86 @@ def _ensure_session_alive(page: Page) -> None:
         raise SessionLostError("сайт требует повторный вход: сессия больше не действительна")
 
 
+def _download_images(
+    urls: Sequence[str], ocr: DescriptionOCRConfig, timeout: float
+) -> list[bytes]:
+    """Скачивает картинки описания: CDN Habr отдаёт их без авторизации.
+
+    Битые ссылки и слишком большие файлы пропускаются молча: одна картинка
+    не должна ломать обработку вакансии.
+    """
+    limit = int(ocr.max_image_mb * 1024 * 1024)
+    images: list[bytes] = []
+    with httpx.Client(timeout=timeout, follow_redirects=True) as client:
+        for src in urls[: ocr.max_images]:
+            try:
+                response = client.get(src)
+            except httpx.HTTPError:
+                continue
+            if response.status_code >= 400:
+                continue
+            data = response.content
+            if not data or len(data) > limit:
+                continue
+            images.append(data)
+    return images
+
+
+def _transcribe_images(
+    details: VacancyDetails,
+    config: AppConfig,
+    llm: LLMClient,
+    logger: RunLogger,
+    log: _VacancyLog,
+) -> VacancyDetails:
+    """Описание картинками: текст переписывает Chat-вызов, дальше идёт обычная цепочка.
+
+    Если картинки не скачались или модель не ответила, вакансия обрабатывается
+    с описанием со страницы: сбой распознавания не останавливает запуск.
+    В журнал идёт только количество картинок и длина текста, самого текста там нет.
+    """
+    urls = details.description_images
+    images = _download_images(urls, config.llm.ocr, config.llm.timeout_seconds)
+    if not images:
+        logger.event(
+            "description_images_error",
+            url=details.url,
+            title=details.title,
+            reason="изображения не скачались",
+        )
+        log.info("описание картинками: изображения не скачались")
+        return details
+    try:
+        transcript = llm.transcribe_images(images).strip()
+    except LLMError as exc:
+        logger.event(
+            "description_images_error", url=details.url, title=details.title, error=str(exc)
+        )
+        log.info(f"описание картинками: распознать не удалось — {exc}")
+        return details
+    if not transcript:
+        logger.event(
+            "description_images_error",
+            url=details.url,
+            title=details.title,
+            reason="модель вернула пустой текст",
+        )
+        log.info("описание картинками: модель вернула пустой текст")
+        return details
+    logger.event(
+        "description_images",
+        url=details.url,
+        title=details.title,
+        images=len(images),
+        chars=len(transcript),
+    )
+    log.info(
+        f"описание картинками: распознал текст с {len(images)} изображений "
+        f"({len(transcript)} символов)"
+    )
+    return replace(details, description=transcript, description_images=())
+
+
 def _process_vacancy(
     page: Page,
     config: AppConfig,
@@ -1288,6 +1369,8 @@ def _process_vacancy(
         return
 
     log.mark_llm()
+    if details.description_images and config.llm.ocr.enabled:
+        details = _transcribe_images(details, config, llm, logger, log)
     try:
         decision = llm.decide(profile, details)
     except LLMError as exc:

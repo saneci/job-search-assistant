@@ -225,6 +225,53 @@ def test_description_falls_back_to_requirements_and_conditions() -> None:
     assert "Вакансия удалённо" in details.description
 
 
+def test_description_images_are_collected_when_text_is_missing() -> None:
+    """Описание картинками: адреса изображений из блока описания попадают в данные вакансии."""
+    page = FakePage(
+        mapping={
+            ".vacancy-description__text": [
+                FakeElement(
+                    mapping={
+                        "img": [
+                            FakeElement(attrs={"src": "https://habrastorage.org/a.png"}),
+                            FakeElement(attrs={"src": "https://habrastorage.org/b.png"}),
+                        ]
+                    }
+                )
+            ],
+            "meta[name='description']": [
+                FakeElement(attrs={"content": "Вакансия удалённо в компании IRLIX."})
+            ],
+        }
+    )
+
+    details = open_vacancy(page, VacancyCard(title="Java", company="IRLIX", url=page.url))  # type: ignore[arg-type]
+
+    assert details.description_images == (
+        "https://habrastorage.org/a.png",
+        "https://habrastorage.org/b.png",
+    )
+
+
+def test_description_images_are_empty_when_text_exists() -> None:
+    """Текст описания на месте: картинки к нему не примешиваются."""
+    page = FakePage(
+        mapping={
+            ".vacancy-description__text": [
+                FakeElement(
+                    "Обязанности: разработка сервисов на Java.",
+                    mapping={"img": [FakeElement(attrs={"src": "https://habrastorage.org/a.png"})]},
+                )
+            ]
+        }
+    )
+
+    details = open_vacancy(page, VacancyCard(title="Java", company="IRLIX", url=page.url))  # type: ignore[arg-type]
+
+    assert details.description == "Обязанности: разработка сервисов на Java."
+    assert details.description_images == ()
+
+
 def test_already_responded_status() -> None:
     page: Any = FakePage(mapping={".vacancy-response-section": [FakeElement()]})
 

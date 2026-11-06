@@ -864,6 +864,28 @@ class GenerationConfig(BaseModel):
         return _as_bool(value)
 
 
+class DescriptionOCRConfig(BaseModel):
+    """Описание картинками: один Chat-вызов переписывает текст с изображений вакансии."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    enabled: bool = True
+    # Пусто — модель Generation: у неё уже есть чтение изображений.
+    model: str = ""
+    max_images: PositiveInt = 3
+    max_image_mb: PositiveFloat = 5.0
+
+    @field_validator("enabled", mode="before")
+    @classmethod
+    def _flags(cls, value: Any) -> bool:
+        return _as_bool(value)
+
+    @field_validator("model", mode="before")
+    @classmethod
+    def _model(cls, value: Any) -> str:
+        return _optional_str(value) or ""
+
+
 class LLMConfig(BaseModel):
     """Настройки LLM-слоя: общий транспорт и два вызова."""
 
@@ -877,6 +899,7 @@ class LLMConfig(BaseModel):
     system_prompt_path: Path | None = DEFAULT_SYSTEM_PROMPT_PATH
     decision: DecisionConfig = Field(default_factory=DecisionConfig)
     generation: GenerationConfig = Field(default_factory=GenerationConfig)
+    ocr: DescriptionOCRConfig = Field(default_factory=DescriptionOCRConfig)
     cover_letter: CoverLetterConfig = Field(default_factory=CoverLetterConfig)
 
     @field_validator("api_key_env", mode="before")

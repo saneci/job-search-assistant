@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import dataclasses
 import json
 from pathlib import Path
@@ -43,6 +44,8 @@ from agent.prompts import (
 )
 
 PROFILE = Profile(text="Java-разработчик", examples="- пример письма", style_rules="Коротко и по делу")
+PNG_IMAGE = b"\x89PNG\r\n\x1a\n" + b"png-payload"
+JPEG_IMAGE = b"\xff\xd8\xff\xe0" + b"jpeg-payload"
 VACANCY = VacancyDetails(
     url="https://hh.ru/vacancy/1",
     title="Java-разработчик",
@@ -85,6 +88,30 @@ def make_client(handler: Any, **config_kwargs: Any) -> LLMClient:
 
 def chat_response(content: str) -> httpx.Response:
     return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
+
+
+def test_transcribe_images_sends_images_as_data_urls() -> None:
+    """Картинки вакансии уходят в Chat API как data URL, ответ становится текстом описания."""
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["payload"] = json.loads(request.content)
+        return chat_response("ЧТО НУЖНО БУДЕТ ДЕЛАТЬ\nРазработка сервисов на Java")
+
+    with make_client(handler) as client:
+        text = client.transcribe_images([PNG_IMAGE, JPEG_IMAGE])
+
+    payload = captured["payload"]
+    content = payload["messages"][0]["content"]
+    assert payload["model"] == "gpt-6-luna-pro"
+    assert content[0]["type"] == "text"
+    assert content[1]["image_url"]["url"] == (
+        "data:image/png;base64," + base64.b64encode(PNG_IMAGE).decode("ascii")
+    )
+    assert content[2]["image_url"]["url"] == (
+        "data:image/jpeg;base64," + base64.b64encode(JPEG_IMAGE).decode("ascii")
+    )
+    assert text == "ЧТО НУЖНО БУДЕТ ДЕЛАТЬ\nРазработка сервисов на Java"
 
 
 def test_decide_sends_expected_request_and_reads_probabilities() -> None:

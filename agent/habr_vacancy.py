@@ -96,9 +96,11 @@ def open_vacancy(page: Page, card: VacancyCard) -> VacancyDetails:
             archived=True,
         )
     description = _first_text(page, DESCRIPTION_SELECTORS)
+    images: tuple[str, ...] = ()
     if not description:
+        images = description_images(page)
         description = _fallback_description(page)
-    if not description:
+    if not description and not images:
         raise VacancyParseError(f"не удалось прочитать описание вакансии: {card.url}")
     return VacancyDetails(
         url=card.url,
@@ -108,7 +110,35 @@ def open_vacancy(page: Page, card: VacancyCard) -> VacancyDetails:
         description=description,
         already_responded=_has_response(page),
         blocker=detect_page_blocker(page),
+        description_images=images,
     )
+
+
+def description_images(page: Page) -> tuple[str, ...]:
+    """Адреса картинок блока описания: текст вакансии работодатель мог отдать изображениями."""
+    for selector in DESCRIPTION_SELECTORS:
+        block = _first_visible(page, (selector,))
+        if block is None:
+            continue
+        try:
+            nodes = block.locator("img")
+            total = nodes.count()
+        except (PlaywrightError, AttributeError):
+            return ()
+        sources: list[str] = []
+        for index in range(total):
+            src = _image_source(nodes.nth(index))
+            if src and src not in sources:
+                sources.append(src)
+        return tuple(sources)
+    return ()
+
+
+def _image_source(node: Locator) -> str:
+    try:
+        return (node.get_attribute("src") or "").strip()
+    except (PlaywrightError, AttributeError):
+        return ""
 
 
 def _fallback_description(page: Page) -> str:
