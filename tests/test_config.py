@@ -168,6 +168,31 @@ def test_local_config_overrides_base(tmp_path: Path) -> None:
     assert config.search.area == "Москва"
 
 
+def test_custom_config_replaces_local(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--config <FILE>` заменяет config.local.yaml, а системный config.yaml остаётся базой."""
+    system = write_config(tmp_path, name="system.yaml")
+    (tmp_path / "config.local.yaml").write_text(
+        json.dumps({"search": {"queries": ["Kotlin"]}}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    custom = tmp_path / "profile.yaml"
+    custom.write_text(
+        json.dumps({"pipeline": {"limit_per_run": 9}}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("agent.config.DEFAULT_CONFIG_PATH", system)
+
+    config = load_config(custom, merge_system=True)
+
+    assert config.pipeline.limit_per_run == 9
+    assert config.search.area == "Москва"
+    assert config.pipeline.delay_between_actions.minimum == 0
+    assert config.search.queries == ("Java backend engineer",)
+    assert config.source_path == system
+
+
 def test_environment_overrides_yaml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Окружение выше файлов: вложенные ключи через `__`, секреты — своими именами."""
     monkeypatch.setenv("PIPELINE__LIMIT_PER_RUN", "7")

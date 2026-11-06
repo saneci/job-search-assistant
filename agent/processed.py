@@ -38,7 +38,7 @@ class ProcessedStore:
     вакансия не будет обработана повторно ни завтра, ни через месяц. Прочие
     файлы каталога (не вида «ГГГГ-ММ-ДД.json») игнорируются.
 
-    Одна запись — это вакансия и резюме: ключ `(url, profile)`. Разными резюме
+    Одна запись — это вакансия и профиль: ключ `(url, profile)`. Разными профилями
     можно отвечать на одну вакансию, поэтому у каждой такой пары своя запись.
     При загрузке старые файлы не переписываются, а при обновлении запись
     переносится в отчёт текущей даты.
@@ -54,12 +54,17 @@ class ProcessedStore:
         directory: Path,
         today: date | None = None,
         run_id: str = "",
+        legacy_profile: str = "",
     ) -> None:
         self.directory = directory
         self.today = today or date.today()
         self.run_id = (run_id or "").strip()
+        # Старые записи Habr шли без профиля: имя подставляет вызывающий код,
+        # иначе вакансия считалась бы новой и обрабатывалась повторно.
+        self.legacy_profile = (legacy_profile or "").strip()
         self._seen: dict[str, str] = {}
         self._records: dict[str, tuple[Path, dict[str, Any]]] = {}
+        self._archived: set[str] = set()
         # Сколько копий пропущено в памяти при загрузке истории (файлы не меняются).
         self.dropped_copies = 0
 
@@ -82,12 +87,15 @@ class ProcessedStore:
     def load(self) -> int:
         """Читает историю из всех файлов дат; возвращает число ключей.
 
-        Файлы читаются от свежих к старым, поэтому для поиска и повторов
-        используется самая новая запись вакансии. Старые файлы остаются
-        историей и не переписываются.
+        Файлы читаются от свежих к старым, а из нескольких копий одной записи
+        берётся самая свежая по `updated_at`: в файле дня строки идут в порядке
+        обработки, поэтому первая строка могла быть старой копией. Старые файлы
+        остаются историей и не переписываются. Ключи всех архивных копий
+        запоминаются: архив терминальный, и повтор их не берёт.
         """
         self._seen.clear()
         self._records.clear()
+        self._archived.clear()
         self.dropped_copies = 0
         if not self.directory.is_dir():
             return 0
@@ -95,18 +103,25 @@ class ProcessedStore:
             day = _file_date(file)
             if day is None:
                 continue
+            day_text = day.strftime(DATE_FORMAT)
             for record in _read(file):
-                keys = vacancy_keys(
-                    str(record.get("title", "")),
-                    str(record.get("company", "")),
-                    str(record.get("url", "")),
-                    str(record.get("profile", "")),
-                )
-                if keys and any(key in self._records for key in keys):
-                    self.dropped_copies += 1
+                keys = self._keys(record)
+                if not keys:
+                    continue
+                if record.get("archived"):
+                    self._archived.update(keys)
+                known = [self._records[key] for key in keys if key in self._records]
+                if not known:
+                    for key in keys:
+                        self._seen.setdefault(key, day_text)
+                        self._records[key] = (file, record)
+                    continue
+                self.dropped_copies += 1
+                newest = max(known, key=lambda entry: _record_time(entry[1]))
+                if _record_time(record) <= _record_time(newest[1]):
                     continue
                 for key in keys:
-                    self._seen.setdefault(key, day.strftime(DATE_FORMAT))
+                    self._seen[key] = day_text
                     self._records[key] = (file, record)
         return len(self._seen)
 
@@ -152,7 +167,12 @@ class ProcessedStore:
         return counts
 
     def pending(self, statuses: Sequence[str]) -> list[dict[str, Any]]:
-        """Записи со статусами, которые нужно повторить (свежие сверху)."""
+        """Записи со статусами, которые нужно повторить (свежие сверху).
+
+        Архив терминальный: если хотя бы одна копия вакансии помечена
+        `archived`, повтор её не берёт. Иначе старая копия без признака снова
+        ставила закрытую вакансию в очередь.
+        """
         wanted = set(statuses)
         found: list[dict[str, Any]] = []
         seen: set[int] = set()
@@ -161,6 +181,8 @@ class ProcessedStore:
                 continue
             seen.add(id(record))
             if record.get("archived"):
+                continue
+            if any(key in self._archived for key in self._keys(record)):
                 continue
             if str(record.get("status", "")) in wanted:
                 found.append(record)
@@ -258,12 +280,15 @@ class ProcessedStore:
         channel: str = "",
         archived: bool = False,
         questionary: Sequence[Mapping[str, str]] | None = None,
+        cover_letter: str | None = None,
     ) -> bool:
         """Записывает вакансию в отчёт дня; известную запись обновляет (повтор).
 
-        `profile` — название резюме, с которым обрабатывалась вакансия.
+        `profile` — профиль записи: резюме hh или имя из заголовка `# PROFILE:`.
         `message` — полный текст причины для окна деталей.
         `questionary` — ответы на анкету или тест: блок `questionary` в записи.
+        `cover_letter` — сопроводительное письмо для окна деталей. None оставляет
+        прежний текст: правка статуса письмо не удаляет.
         Возвращает False, если вакансию нечем опознать при следующем запуске:
         нет ни ссылки, ни названия с компанией.
         """
@@ -281,6 +306,7 @@ class ProcessedStore:
                 channel=channel,
                 archived=archived,
                 questionary=questionary,
+                cover_letter=cover_letter,
             )
 
         now = _now()
@@ -294,7 +320,7 @@ class ProcessedStore:
             "updated_at": now,
         }
         # У Habr и внешней формы нет резюме: поле в отчёт не пишем.
-        if channel not in ("habr", "external"):
+        if channel != "external":
             item["profile"] = profile or ""
         if self.run_id:
             item["run_id"] = self.run_id
@@ -307,13 +333,15 @@ class ProcessedStore:
         if archived:
             # Вакансия в архиве или доступ к ней закрыт: признак виден в UI.
             item["archived"] = True
+        if cover_letter:
+            item["cover_letter"] = cover_letter
         item["questionary"] = [dict(entry) for entry in (questionary or [])]
 
         try:
             with report_lock(self.directory):
                 items = _read(self.path)
                 existing = next(
-                    (row for row in items if _same_vacancy(row, item)), None
+                    (row for row in items if self._same_record(row, item)), None
                 )
                 if existing is not None:
                     return self._update_locked(
@@ -325,6 +353,7 @@ class ProcessedStore:
                         channel=channel,
                         archived=archived,
                         questionary=questionary,
+                        cover_letter=cover_letter,
                     )
                 items.append(item)
                 _write(self.path, items)
@@ -346,6 +375,7 @@ class ProcessedStore:
         count_attempt: bool = True,
         archived: bool = False,
         questionary: Sequence[Mapping[str, str]] | None = None,
+        cover_letter: str | None = None,
     ) -> bool:
         """Обновляет запись, удерживая общую с веб-интерфейсом блокировку каталога."""
         try:
@@ -360,6 +390,7 @@ class ProcessedStore:
                     count_attempt=count_attempt,
                     archived=archived,
                     questionary=questionary,
+                    cover_letter=cover_letter,
                 )
         except ReportLockError as exc:
             raise ProcessedError(str(exc)) from exc
@@ -376,6 +407,7 @@ class ProcessedStore:
         count_attempt: bool = True,
         archived: bool = False,
         questionary: Sequence[Mapping[str, str]] | None = None,
+        cover_letter: str | None = None,
     ) -> bool:
         """Обновляет запись о вакансии: повтор увеличивает счётчик попыток.
 
@@ -386,9 +418,10 @@ class ProcessedStore:
         `message` — полный текст причины; пустая строка удаляет его.
         `questionary=None` оставляет прежние ответы на анкету: правка статуса их
         не затирает. Блок есть в записи всегда: без ответов это пустой список.
+        `cover_letter` заменяет письмо, когда текст передан: None оставляет прежний.
         """
         now = _now()
-        if channel in ("habr", "external"):
+        if channel == "external":
             item.pop("profile", None)
         elif profile is not None:
             item["profile"] = profile
@@ -419,6 +452,8 @@ class ProcessedStore:
         else:
             # Вакансия снова в работе (например, повтор): архив снимается.
             item.pop("archived", None)
+        if cover_letter:
+            item["cover_letter"] = cover_letter
         if questionary is not None:
             item["questionary"] = [dict(entry) for entry in questionary]
         elif "questionary" not in item:
@@ -427,14 +462,14 @@ class ProcessedStore:
             if file == self.path:
                 continue
             rows = _read(file)
-            kept = [row for row in rows if not _same_vacancy(row, item)]
+            kept = [row for row in rows if not self._same_record(row, item)]
             if len(kept) != len(rows):
                 _write(file, kept)
 
         today: list[dict[str, Any]] = []
         replaced = False
         for row in _read(self.path):
-            if _same_vacancy(row, item):
+            if self._same_record(row, item):
                 if not replaced:
                     today.append(item)
                     replaced = True
@@ -447,6 +482,24 @@ class ProcessedStore:
         self._remember(item)
         return True
 
+    def _keys(self, record: Mapping[str, Any]) -> tuple[str, ...]:
+        """Ключи записи с подстановкой имени профиля для старых записей Habr."""
+        return vacancy_keys(
+            str(record.get("title", "")),
+            str(record.get("company", "")),
+            str(record.get("url", "")),
+            _effective_profile(record, self.legacy_profile),
+        )
+
+    def _same_record(self, row: Mapping[str, Any], item: Mapping[str, Any]) -> bool:
+        """Одна и та же запись: та же вакансия и тот же профиль.
+
+        Пустой профиль старой записи Habr приравнивается к имени из `# PROFILE:`,
+        иначе при обновлении рядом с ней появлялась копия с профилем, и повтор
+        брал в работу уже обработанную вакансию.
+        """
+        return _same_vacancy(row, item, self.legacy_profile)
+
     def _remember(self, item: dict[str, Any]) -> None:
         """Индексирует запись по ключам с профилем и без него.
 
@@ -456,14 +509,17 @@ class ProcessedStore:
         self._remember_at(self.path, item)
 
     def _remember_at(self, path: Path, item: dict[str, Any]) -> None:
-        """Индексирует запись и запоминает файл, в котором она лежит."""
+        """Индексирует запись и запоминает файл, в котором она лежит.
+
+        Архивный признак запоминается по всем ключам вакансии: повтор не должен
+        вернуть в работу вакансию, у которой есть архивная копия.
+        """
         day = _file_date(path)
         day_text = day.strftime(DATE_FORMAT) if day else self.today.strftime(DATE_FORMAT)
-        title = str(item.get("title", ""))
-        company = str(item.get("company", ""))
-        url = str(item.get("url", ""))
-        profile = str(item.get("profile", ""))
-        for key in vacancy_keys(title, company, url, profile):
+        keys = self._keys(item)
+        if item.get("archived"):
+            self._archived.update(keys)
+        for key in keys:
             self._seen.setdefault(key, day_text)
             self._records[key] = (path, item)
 
@@ -494,7 +550,9 @@ class ProcessedStore:
             return False
         item = known[1]
         current = str(item.get("status", ""))
-        if item.get("archived"):
+        if item.get("archived") or any(
+            key in self._archived for key in self._keys(item)
+        ):
             return False
         # Терминальные отказ и оффер не переоткрываем. Остальные статусы
         # (sent, invite, skipped, queued, error, excluded) страница откликов
@@ -550,10 +608,28 @@ def _same_url(row: dict[str, Any], url: str) -> bool:
     return bool(url) and str(row.get("url", "")) == url
 
 
-def _same_vacancy(row: dict[str, Any], item: dict[str, Any]) -> bool:
-    """Одна и та же запись: та же вакансия и то же резюме."""
-    if profile_key(str(row.get("profile", ""))) != profile_key(
-        str(item.get("profile", ""))
+def _effective_profile(record: Mapping[str, Any], legacy_profile: str) -> str:
+    """Профиль записи: у старой записи Habr его подставляет имя из `# PROFILE:`.
+
+    Без подстановки такая запись и её новая копия с профилем считались разными
+    вакансиями, и повтор снова брал в работу уже обработанную вакансию.
+    """
+    profile = str(record.get("profile", ""))
+    if profile or not legacy_profile or record.get("channel") != "habr":
+        return profile
+    return legacy_profile
+
+
+def _same_vacancy(
+    row: Mapping[str, Any], item: Mapping[str, Any], legacy_profile: str = ""
+) -> bool:
+    """Одна и та же запись: та же вакансия и тот же профиль.
+
+    Пустой профиль старой записи Habr приравнивается к имени из `# PROFILE:`:
+    это её же запись, просто сделанная до появления профиля в отчёте.
+    """
+    if profile_key(_effective_profile(row, legacy_profile)) != profile_key(
+        _effective_profile(item, legacy_profile)
     ):
         return False
     url = str(item.get("url", ""))

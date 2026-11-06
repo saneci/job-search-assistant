@@ -265,3 +265,61 @@ def test_cards_show_percents_when_there_are_no_responses() -> None:
         "ignore": "0.0%",
     }
 
+
+def habr_row(status: str, updated_at: str, **fields: Any) -> dict[str, Any]:
+    """Запись Habr: профиль и признак архива добавляются по вкусу."""
+    item = {
+        "url": "https://career.habr.com/vacancies/1000169150",
+        "title": "Эксперт-разработчик Java",
+        "company": "Уралсиб",
+        "channel": "habr",
+        "status": status,
+        "created_at": updated_at,
+        "updated_at": updated_at,
+    }
+    item.update(fields)
+    return item
+
+
+def test_dedupe_merges_legacy_habr_copy_without_profile() -> None:
+    """Старая запись Habr без профиля и новая копия — одна вакансия в отчёте."""
+    rows = [
+        habr_row("skipped", "2026-11-06T15:04:48+03:00", profile="Профиль Habr"),
+        habr_row("queued", "2026-11-06T11:42:35+03:00"),
+    ]
+
+    unique = dedupe_vacancies(rows)
+
+    assert len(unique) == 1
+    assert unique[0]["status"] == "skipped"
+    assert unique[0]["profile"] == "Профиль Habr"
+
+
+def test_dedupe_keeps_habr_profiles_separate() -> None:
+    """Записи одной вакансии у разных профилей — разные строки отчёта."""
+    rows = [
+        habr_row("queued", "2026-11-06T18:20:20+03:00", profile="Middle Java-разработчик"),
+        habr_row("skipped", "2026-11-06T18:25:33+03:00", profile="Senior Java-разработчик"),
+    ]
+
+    unique = dedupe_vacancies(rows)
+
+    assert [(row["profile"], row["status"]) for row in unique] == [
+        ("Middle Java-разработчик", "queued"),
+        ("Senior Java-разработчик", "skipped"),
+    ]
+
+
+def test_dedupe_prefers_archived_copy() -> None:
+    """Архивная копия важнее свежей рабочей: архив закрывает вакансию целиком."""
+    rows = [
+        habr_row("queued", "2026-11-06T15:04:12+03:00", profile="Профиль Habr"),
+        habr_row("queued", "2026-11-06T14:57:30+03:00", archived=True),
+    ]
+
+    unique = dedupe_vacancies(rows)
+
+    assert len(unique) == 1
+    assert unique[0]["archived"] is True
+
+

@@ -89,9 +89,14 @@ class RunLogger:
 
     Файл один на дату: перезапуски дописывают события в конец, поэтому в каждой
     записи есть ``run_id`` — по нему видно, к какому запуску относится событие.
+
+    Без ``verbose`` консоль показывает только вакансии, дошедшие до вызова LLM:
+    строки остальных вакансий копятся по ``vacancy_id`` и не печатаются.
     """
 
-    def __init__(self, logs_dir: Path, run_id: str | None = None) -> None:
+    def __init__(
+        self, logs_dir: Path, run_id: str | None = None, *, verbose: bool = True
+    ) -> None:
         now = datetime.now()
         self.logs_dir = logs_dir
         self.logs_dir.mkdir(parents=True, exist_ok=True)
@@ -99,6 +104,9 @@ class RunLogger:
         self.day = now.strftime("%Y-%m-%d")
         self.events_path = self.logs_dir / f"{self.day}.jsonl"
         self._file: TextIO = self.events_path.open("a", encoding="utf-8")
+        self.verbose = verbose
+        self._pending_console: dict[str, list[str]] = {}
+        self._active_vacancies: set[str] = set()
 
     def event(self, name: str, **fields: Any) -> None:
         """Записывает одно событие в лог."""
@@ -119,22 +127,45 @@ class RunLogger:
         `console_message` позволяет показать человеку более полную строку
         (например, с номером вакансии), не дублируя её в поле `message`.
         Дополнительные поля (например, `vacancy_id`) попадают в запись события.
+        Без ``verbose`` строка вакансии ждёт активации и не печатается сразу.
         """
         self.event("info", message=message, **fields)
-        print(self._stamped(console_message or message), flush=True)
+        text = console_message or message
+        vacancy_id = str(fields.get("vacancy_id", "") or "")
+        if not self.verbose and vacancy_id and vacancy_id not in self._active_vacancies:
+            self._pending_console.setdefault(vacancy_id, []).append(self._stamped(text))
+            return
+        print(self._stamped(text), flush=True)
 
     def info_plain(self, message: str) -> None:
         """Печатает многострочный блок (например, отчёт) без меток времени."""
         self.event("info", message=message)
         print(message, flush=True)
 
-    def console(self, message: str) -> None:
+    def console(self, message: str, vacancy_id: str = "") -> None:
         """Печатает подробность пользователю, не дублируя её в журнале.
 
         Нужно для текстов, которые уже есть в отдельном событии (например,
         полный вердикт LLM): в JSONL они не повторяются, а в консоли видны.
         """
+        key = (vacancy_id or "").strip()
+        if not self.verbose and key and key not in self._active_vacancies:
+            self._pending_console.setdefault(key, []).append(self._stamped(message))
+            return
         print(self._stamped(message), flush=True)
+
+    def activate_vacancy(self, vacancy_id: str) -> None:
+        """Включает консоль вакансии: она дошла до вызова LLM.
+
+        Накопленные до этого строки печатаются с исходными метками времени,
+        а следующие сообщения этой вакансии выводятся сразу.
+        """
+        key = (vacancy_id or "").strip()
+        if self.verbose or not key:
+            return
+        self._active_vacancies.add(key)
+        for message in self._pending_console.pop(key, []):
+            print(message, flush=True)
 
     @staticmethod
     def _stamped(message: str) -> str:

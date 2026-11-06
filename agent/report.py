@@ -31,8 +31,8 @@ class RunStats:
     already_sent: list[SkippedVacancy] = field(default_factory=list)
     queued: list[dict[str, Any]] = field(default_factory=list)
     errors: list[RunError] = field(default_factory=list)
-    # Ответы на анкеты и тесты по ссылке вакансии: попадают в отчёт дня.
     questionary: dict[str, list[dict[str, str]]] = field(default_factory=dict)
+    cover_letters: dict[str, str] = field(default_factory=dict)
     stop_reason: str = ""
     reviewed: int = 0
     run_id: str = ""
@@ -48,12 +48,16 @@ def build_report(
     report_path: Path | None = None,
     vacancy_title: str = "",
     resume_name: str = "",
+    channel_name: str = "",
+    profile_name: str = "",
 ) -> str:
     """Формирует текст отчёта для консоли и письма.
 
     С `report_path=None` путь к файлу дня не добавляется — его печатает
     консоль отдельной строкой с меткой времени. В заголовок добавляется
     резюме для hh или вакансия для Habr, когда запуск обработал ровно одну.
+    `channel_name` и `profile_name` печатаются отдельными строками в начале
+    отчёта: по ним видно, где и с каким профилем шёл запуск.
     """
     finished = stats.finished_at or datetime.now()
     separator = "=" * 33
@@ -62,10 +66,12 @@ def build_report(
         header += f" по резюме «{resume_name}»"
     elif vacancy_title:
         header += f" по вакансии «{vacancy_title}»"
-    lines = [
-        separator,
-        header,
-        separator,
+    lines = [separator, header, separator]
+    if channel_name:
+        lines.append(f"- Канал поиска: {channel_name}")
+    if profile_name:
+        lines.append(f"- Профиль: {profile_name}")
+    lines += [
         f"- Обработано вакансий: {stats.reviewed}",
         f"- Отправлено откликов за запуск: {len(stats.sent)}",
     ]

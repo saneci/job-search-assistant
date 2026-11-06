@@ -4,8 +4,8 @@
 при старте, а все ошибки собираются за один проход (`ConfigError` со списком).
 Раскладка `config.yaml` повторяет модели: `search`, `pipeline` (с префильтром), `data`,
 `llm`, `browser`, `notifications`. Источники по убыванию приоритета: аргументы,
-окружение, `.env`, `config.yaml` (структура, лежит в git) + `config.local.yaml`
-(личные данные, файл не в git), дефолты схемы.
+окружение, `.env`, `config.yaml` (структура, лежит в git) + один пользовательский файл
+`config.local.yaml` или `--config <FILE>` (личные данные), дефолты схемы.
 """
 
 from __future__ import annotations
@@ -570,6 +570,20 @@ class DataConfig(BaseModel):
     paths: DataPathsConfig = Field(default_factory=DataPathsConfig)
 
 
+class WebServerConfig(BaseModel):
+    """Параметры веб-сервера отчётов: каталог журналов и срок их хранения.
+
+    Сервер отчётов не зависит от `search`, `pipeline`, `llm` и `browser`:
+    эти разделы нужны только агенту. Поэтому `--start`, `--stop` и `--status`
+    читают из конфига только этот набор значений.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    logs_dir: Path = DEFAULT_LOGS_DIR
+    logs_retention_days: PositiveInt = 30
+
+
 class CoverLetterConfig(BaseModel):
     """Сопроводительное письмо: лимит длины и подпись с контактами."""
 
@@ -1014,8 +1028,9 @@ def _deep_merge(base: Mapping[str, Any], override: Mapping[str, Any]) -> dict[st
 # Какие файлы читать в текущем вызове load_config: путь к config.yaml и к
 # локальному файлу рядом с ним. ContextVar — потому что pydantic-settings
 # создаёт источники без параметров.
-_SOURCES: ContextVar[tuple[Path, Path | None]] = ContextVar(
-    "hh_config_sources", default=(DEFAULT_CONFIG_PATH, None)
+_SOURCES: ContextVar[tuple[Path, ...]] = ContextVar(
+    "hh_config_sources",
+    default=(DEFAULT_CONFIG_PATH, DEFAULT_CONFIG_PATH.with_name(LOCAL_CONFIG_NAME)),
 )
 
 
@@ -1026,11 +1041,12 @@ class YamlSource(PydanticBaseSettingsSource):
         return None, field_name, False
 
     def __call__(self) -> dict[str, Any]:
-        base_path, local_path = _SOURCES.get()
-        data = _read_yaml(base_path)
-        if local_path is not None and local_path.exists():
-            data = _deep_merge(data, _read_yaml(local_path))
-        data["source_path"] = str(base_path)
+        layers = _SOURCES.get()
+        data: dict[str, Any] = {}
+        for layer in layers:
+            if layer.exists():
+                data = _deep_merge(data, _read_yaml(layer))
+        data["source_path"] = str(layers[0])
         return data
 
     def __repr__(self) -> str:  # pragma: no cover - отладка
@@ -1186,27 +1202,61 @@ def _with_secrets(config: AppConfig) -> AppConfig:
     return config.model_copy(update={"llm": llm, "notifications": notifications})
 
 
+def _config_layers(
+    config_path: Path | str | None = None, *, merge_system: bool = False
+) -> list[Path]:
+    """Файлы конфигурации по приоритету: база, затем локальный слой.
+
+    `merge_system` — указанный файл заменяет `config.local.yaml` поверх
+    системного `config.yaml`, так работает `--config <FILE>`. Без него
+    указанный файл становится базой, а `config.local.yaml` рядом с ним —
+    локальным слоем. Одновременно `config.local.yaml` и пользовательский файл
+    не читаются.
+    """
+    custom_path: Path | None = None
+    if config_path is not None:
+        custom_path = Path(config_path)
+        if not custom_path.is_absolute():
+            custom_path = PROJECT_ROOT / custom_path
+        if not custom_path.exists():
+            raise ConfigError(f"Файл конфигурации не найден: {custom_path}")
+
+    system_path = DEFAULT_CONFIG_PATH
+    if merge_system and custom_path is not None:
+        layers: list[Path] = [system_path]
+        if custom_path.resolve() != system_path.resolve():
+            layers.append(custom_path)
+        return layers
+
+    path = custom_path or system_path
+    if not path.exists():
+        raise ConfigError(f"Файл конфигурации не найден: {path}")
+    layers = [path]
+    local_path = path.with_name(LOCAL_CONFIG_NAME)
+    if local_path.exists():
+        layers.append(local_path)
+    return layers
+
+
 def load_config(
     config_path: Path | str | None = None,
     *,
     channel: str | None = None,
+    merge_system: bool = False,
 ) -> AppConfig:
     """Читает config.yaml (+ config.local.yaml) и переменные окружения.
 
     `channel` — канал из командной строки (`--ch`). Он применяется до
     проверки схемы, иначе входу в Habr через `--login --ch habr` мешали бы
     обязательные для hh.ru `search.queries` и `search.area`.
+    `merge_system` — использовать системный `config.yaml` как базу и заменить
+    указанным файлом `config.local.yaml`: так работает `--config <FILE>`.
+    Одновременно `config.local.yaml` и пользовательский файл не читаются.
     """
     load_env()
 
-    path = Path(config_path) if config_path is not None else DEFAULT_CONFIG_PATH
-    if not path.is_absolute():
-        path = PROJECT_ROOT / path
-    if not path.exists():
-        raise ConfigError(f"Файл конфигурации не найден: {path}")
-
-    local_path = path.with_name(LOCAL_CONFIG_NAME)
-    token = _SOURCES.set((path, local_path))
+    layers = _config_layers(config_path, merge_system=merge_system)
+    token = _SOURCES.set(tuple(layers))
     try:
         overrides: dict[str, Any] = {}
         if channel:
@@ -1218,6 +1268,38 @@ def load_config(
         _SOURCES.reset(token)
 
     return _with_secrets(config)
+
+
+def load_web_server_config(
+    config_path: Path | str | None = None,
+) -> WebServerConfig:
+    """Читает из конфига только параметры веб-сервера отчётов.
+
+    Полная схема не проверяется: `--start`, `--stop` и `--status` работают,
+    даже если для агента в конфиге не хватает `search.queries` или `search.area`.
+    Проверяется только раздел `data`, который сервер использует для журналов.
+    """
+    data: dict[str, Any] = {}
+    for layer in _config_layers(config_path, merge_system=config_path is not None):
+        section = _read_yaml(layer).get("data")
+        if isinstance(section, Mapping):
+            data = _deep_merge(data, section)
+    try:
+        parsed = DataConfig(**data)
+    except ValidationError as exc:
+        raise ConfigError(_format_errors(exc)) from None
+    return WebServerConfig(
+        logs_dir=parsed.paths.logs_dir,
+        logs_retention_days=parsed.logs_retention_days,
+    )
+
+
+def web_server_config(config: AppConfig) -> WebServerConfig:
+    """Только параметры веб-сервера из полной конфигурации агента."""
+    return WebServerConfig(
+        logs_dir=config.data.paths.logs_dir,
+        logs_retention_days=config.data.logs_retention_days,
+    )
 
 
 def resolve_area_id(value: Any) -> int:

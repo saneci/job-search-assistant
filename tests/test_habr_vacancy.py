@@ -39,11 +39,13 @@ class FakeElement:
         visible: bool = True,
         mapping: dict[str, list["FakeElement"]] | None = None,
         present: bool = True,
+        attrs: dict[str, str] | None = None,
     ) -> None:
         self._text = text
         self._visible = visible
         self._present = present
         self._mapping = mapping or {}
+        self._attrs = attrs or {}
 
     @property
     def first(self) -> "FakeElement":
@@ -57,6 +59,9 @@ class FakeElement:
 
     def inner_text(self) -> str:
         return self._text
+
+    def get_attribute(self, name: str) -> str:
+        return self._attrs.get(name, "")
 
     def locator(self, selector: str) -> FakeList:
         return FakeList(self._mapping.get(selector, []))
@@ -186,6 +191,38 @@ def test_external_response_is_a_blocker() -> None:
     )
 
     assert detect_page_blocker(page) == "external_form"
+
+
+def test_description_falls_back_to_requirements_and_conditions() -> None:
+    """Описание картинками: текст собирается из требований, условий и мета-описания."""
+    page = FakePage(
+        mapping={
+            ".vacancy-description__text": [FakeElement("")],
+            "meta[name='description']": [
+                FakeElement(attrs={"content": "Вакансия удалённо в компании IRLIX."})
+            ],
+            ".content-section": [
+                FakeElement(
+                    mapping={
+                        ".content-section__title": [FakeElement("Требования")],
+                        ".vacancy-meta": [FakeElement("Бэкенд разработчик Middle Java")],
+                    }
+                ),
+                FakeElement(
+                    mapping={
+                        ".content-section__title": [FakeElement("Условия")],
+                        ".vacancy-meta": [FakeElement("Можно удалённо")],
+                    }
+                ),
+            ],
+        }
+    )
+
+    details = open_vacancy(page, VacancyCard(title="Java", company="IRLIX", url=page.url))  # type: ignore[arg-type]
+
+    assert "Требования: Бэкенд разработчик Middle Java" in details.description
+    assert "Условия: Можно удалённо" in details.description
+    assert "Вакансия удалённо" in details.description
 
 
 def test_already_responded_status() -> None:

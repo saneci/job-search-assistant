@@ -11,8 +11,9 @@ import pytest
 
 from agent.channel import HABR, HH
 from agent.config import load_config
+from agent.llm import DecisionResult, GenerationResult
 from agent.logging_setup import RunLogger
-from agent.models import VacancyCard, VacancyDetails
+from agent.models import NOT_FIT_REPORT_REASON, VacancyCard, VacancyDetails
 from agent.pipeline import (
     _process_and_remember,
     _process_vacancies,
@@ -23,6 +24,7 @@ from agent.pipeline import (
     with_channel,
 )
 from agent.processed import ProcessedStore
+from agent.profile import Profile
 from agent.report import RunStats
 
 
@@ -42,6 +44,62 @@ def write_config(tmp_path: Path, channel: str = "habr") -> Path:
 
 def make_stats() -> RunStats:
     return RunStats(started_at=datetime(2026, 10, 27, 9, 0))
+
+
+class FakeLLM:
+    """LLM без сети: Decision и Generation возвращают заданные ответы."""
+
+    def __init__(
+        self,
+        *,
+        fits: bool = True,
+        letter: str = "Здравствуйте! Готов обсудить вакансию.",
+        reason: str = "Профиль совпадает с требованиями вакансии.",
+        rejection: str = "",
+    ) -> None:
+        self.fits = fits
+        self.letter = letter
+        self.reason = reason
+        self.rejection = rejection
+
+    def decide(self, profile: Any, vacancy: Any) -> DecisionResult:
+        del profile, vacancy
+        probability = 0.95 if self.fits else 0.2
+        return DecisionResult(
+            fits=self.fits,
+            probability=probability,
+            threshold=0.8,
+            probabilities={"подходит": probability, "не подходит": 1 - probability},
+            chosen="подходит" if self.fits else "не подходит",
+        )
+
+    def generate(
+        self,
+        profile: Any,
+        vacancy: Any,
+        max_length: int = 1500,
+        signature: str = "",
+        **kwargs: Any,
+    ) -> GenerationResult:
+        del profile, vacancy, max_length, signature, kwargs
+        return GenerationResult(
+            verdict="подходит" if self.fits else "не подходит",
+            reason=self.reason,
+            cover_letter=self.letter,
+        )
+
+    def explain_rejection(
+        self, profile: Any, vacancy: Any, probability: float, threshold: float
+    ) -> str:
+        del profile, vacancy, probability, threshold
+        return self.rejection
+
+
+def enable_rejection_explanations(path: Path) -> None:
+    """Включает объяснение отказов в конфиге теста, как в рабочем config.yaml."""
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["llm"] = {"decision": {"explain_rejections": True}}
+    path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
 
 
 def test_habr_channel_uses_own_session_and_profile(tmp_path: Path) -> None:
@@ -232,16 +290,23 @@ def test_known_feed_card_with_response_is_skipped(
     assert "skipped_processed" in events
 
 
-def test_external_response_record_is_queued(
+def test_habr_company_site_vacancy_passes_llm_first(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Отклик на сайте компании ждёт ручной обработки, а не считается пропуском."""
+    """«Откликнуться у компании»: LLM и письмо до очереди, канал остаётся habr."""
     config = load_config(write_config(tmp_path))
     card = VacancyCard(
         title="Java-разработчик",
         company="Ozon",
         url="https://career.habr.com/vacancies/1000167337",
-        external_response=True,
+    )
+    details = VacancyDetails(
+        url=card.url,
+        title=card.title,
+        company=card.company,
+        salary="",
+        description="Java, Spring, PostgreSQL.",
+        blocker="external_form",
     )
 
     def fake_search(
@@ -251,34 +316,41 @@ def test_external_response_record_is_queued(
         return [card], 1
 
     monkeypatch.setattr("agent.habr_search.open_search_page", fake_search)
+    monkeypatch.setattr(
+        "agent.habr_vacancy.open_vacancy", lambda page, vacancy: details
+    )
     monkeypatch.setattr("agent.pipeline._ensure_session_alive", lambda page: None)
 
+    llm = FakeLLM()
     stats = make_stats()
-    logger = RunLogger(tmp_path / "logs", run_id="habr-external")
+    logger = RunLogger(tmp_path / "logs", run_id="habr-company-site")
     store = ProcessedStore(tmp_path / "report", today=date.today())
     _process_vacancies(
         page=None,  # type: ignore[arg-type]
         config=config,
-        profile=None,  # type: ignore[arg-type]
-        llm=None,  # type: ignore[arg-type]
+        profile=Profile(
+            text="Java", examples="", style_rules="", name="Профиль Habr"
+        ),
+        llm=llm,
         stats=stats,
         logger=logger,
         processed=store,
     )
     logger.close()
 
-    rows = json.loads(store.path.read_text(encoding="utf-8"))["vacancies"]
-    assert rows[0]["status"] == "queued"
-    assert rows[0]["reason"] == "Отклик на сайте компании"
-    assert rows[0]["channel"] == "external"
-    assert stats.skipped == []
-    assert [item["reason"] for item in stats.queued] == ["Отклик на сайте компании"]
+    row = json.loads(store.path.read_text(encoding="utf-8"))["vacancies"][0]
+    assert row["status"] == "queued"
+    assert row["reason"] == "Отклик нужно отправить на сайте компании"
+    assert row["message"] == llm.reason
+    assert row["channel"] == "habr"
+    assert row["cover_letter"] == llm.letter
+    assert row["profile"] == "Профиль Habr"
 
 
-def test_process_vacancy_returns_external_for_external_blocker(
+def test_habr_company_site_blocker_keeps_letter_and_habr_channel(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Страница с формой на сайте компании даёт канал отчёта external."""
+    """Страница с откликом на сайте компании: короткая причина, вердикт и письмо."""
     config = load_config(write_config(tmp_path))
     card = VacancyCard(
         title="Go-разработчик",
@@ -290,12 +362,98 @@ def test_process_vacancy_returns_external_for_external_blocker(
         title=card.title,
         company=card.company,
         salary="",
-        description="",
+        description="Go, PostgreSQL.",
         blocker="external_form",
     )
     monkeypatch.setattr("agent.habr_vacancy.open_vacancy", lambda page, vacancy: details)
+    llm = FakeLLM()
     stats = make_stats()
     logger = RunLogger(tmp_path / "logs", run_id="external-blocker")
+
+    result = _process_vacancy(
+        None,  # type: ignore[arg-type]
+        config,
+        Profile(text="Go", examples="", style_rules=""),
+        llm,
+        stats,
+        logger,
+        card,
+    )
+    logger.close()
+
+    assert result is None
+    assert [item["url"] for item in stats.queued] == [card.url]
+    assert stats.queued[0]["reason"] == "Отклик нужно отправить на сайте компании"
+    assert stats.queued[0]["message"] == llm.reason
+    assert stats.cover_letters[card.url] == llm.letter
+
+
+def test_habr_company_site_vacancy_not_fit_is_skipped_with_verdict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Неподходящая вакансия: короткая метка и полный вердикт LLM, письма нет."""
+    path = write_config(tmp_path)
+    enable_rejection_explanations(path)
+    config = load_config(path)
+    card = VacancyCard(
+        title="Go-разработчик",
+        company="VK",
+        url="https://career.habr.com/vacancies/1000169504",
+    )
+    details = VacancyDetails(
+        url=card.url,
+        title=card.title,
+        company=card.company,
+        salary="",
+        description="Go, PostgreSQL.",
+        blocker="external_form",
+    )
+    verdict = "Профиль не совпадает: в вакансии требуется опыт Kafka."
+    monkeypatch.setattr("agent.habr_vacancy.open_vacancy", lambda page, vacancy: details)
+    llm = FakeLLM(fits=False, rejection=verdict)
+    stats = make_stats()
+    logger = RunLogger(tmp_path / "logs", run_id="external-not-fit")
+
+    result = _process_vacancy(
+        None,  # type: ignore[arg-type]
+        config,
+        Profile(text="Java", examples="", style_rules=""),
+        llm,
+        stats,
+        logger,
+        card,
+    )
+    logger.close()
+
+    assert result is None
+    assert [(item.report_reason, item.reason) for item in stats.skipped] == [
+        (NOT_FIT_REPORT_REASON, verdict)
+    ]
+    assert stats.queued == []
+    assert stats.cover_letters == {}
+
+
+def test_hh_company_site_blocker_stays_external_channel(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """У hh.ru отклик на сайте работодателя остаётся каналом отчёта external."""
+    config = load_config(write_config(tmp_path, channel="hh"))
+    card = VacancyCard(
+        title="Go-разработчик",
+        company="VK",
+        url="https://hh.ru/vacancy/1000169504",
+    )
+    details = VacancyDetails(
+        url=card.url,
+        title=card.title,
+        company=card.company,
+        salary="",
+        description="Go, PostgreSQL.",
+        blocker="external_form",
+    )
+    monkeypatch.setattr("agent.pipeline.open_vacancy", lambda page, vacancy: details)
+    stats = make_stats()
+    logger = RunLogger(tmp_path / "logs", run_id="hh-external-blocker")
 
     result = _process_vacancy(
         None,  # type: ignore[arg-type]
@@ -309,13 +467,15 @@ def test_process_vacancy_returns_external_for_external_blocker(
     logger.close()
 
     assert result == "external"
-    assert [item["url"] for item in stats.queued] == [card.url]
+    assert [item["reason"] for item in stats.queued] == [
+        "Отклик нужно отправить на сайте работодателя"
+    ]
 
 
-def test_retry_external_response_gets_external_channel(
+def test_retry_habr_company_site_vacancy_stays_habr_channel(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Повтор вакансии внешней формы тоже пишет канал external."""
+    """Повтор вакансии с откликом на сайте компании пишет канал habr."""
     config = load_config(write_config(tmp_path))
     card = VacancyCard(
         title="Go-разработчик",
@@ -331,10 +491,9 @@ def test_retry_external_response_gets_external_channel(
         stats: Any,
         logger: Any,
         vacancy: VacancyCard,
-    ) -> str:
+    ) -> None:
         del page, config, profile, llm, logger, vacancy
         stats.queued.append({"url": card.url, "reason": "external"})
-        return "external"
 
     monkeypatch.setattr("agent.pipeline._process_vacancy", fake_process)
     stats = make_stats()
@@ -356,7 +515,7 @@ def test_retry_external_response_gets_external_channel(
 
     rows = json.loads(store.path.read_text(encoding="utf-8"))["vacancies"]
     assert rows[0]["status"] == "queued"
-    assert rows[0]["channel"] == "external"
+    assert rows[0]["channel"] == "habr"
 
 
 def test_channel_flag_overrides_config(tmp_path: Path) -> None:

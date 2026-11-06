@@ -79,6 +79,27 @@ def test_load_profile(tmp_path: Path) -> None:
     assert "Здравствуйте" in profile.examples
 
 
+def test_load_profile_reads_name_from_header(tmp_path: Path) -> None:
+    """Имя профиля берётся из заголовка `# PROFILE:`."""
+    path = tmp_path / "PROFILE.md"
+    path.write_text(SAMPLE_PROFILE, encoding="utf-8")
+
+    profile = load_profile(path)
+
+    assert profile.name == "Тестовый пользователь"
+
+
+def test_profile_name_empty_without_header(tmp_path: Path) -> None:
+    """Без заголовка `# PROFILE:` имя остаётся пустым."""
+    path = tmp_path / "PROFILE.md"
+    text = "# PROFILE\n\n## Стиль написания писем\n\nПиши коротко.\n"
+    path.write_text(text, encoding="utf-8")
+
+    profile = load_profile(path)
+
+    assert profile.name == ""
+
+
 def test_load_profile_without_style_raises(tmp_path: Path) -> None:
     path = tmp_path / "PROFILE.md"
     path.write_text("# PROFILE\n\n## Опыт\n\nJava", encoding="utf-8")

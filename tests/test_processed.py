@@ -503,20 +503,56 @@ def test_profile_is_written_and_preserved_on_update(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("channel", ["habr", "external"])
-def test_habr_records_do_not_store_empty_profile(tmp_path: Path, channel: str) -> None:
-    """У Habr и внешней формы нет резюме: пустое поле не пишется."""
+def test_habr_keeps_profile_and_external_does_not(tmp_path: Path, channel: str) -> None:
+    """У Habr профиль пишется, у внешней формы hh.ru поля `profile` нет."""
     store = ProcessedStore(tmp_path, today=date(2026, 10, 21))
     store.record(
         url="https://career.habr.com/vacancies/1",
         title="Java",
         company="Ozon",
         status="skipped",
-        profile="",
+        profile="Профиль Habr",
         channel=channel,
     )
 
     row = read_day(tmp_path, "2026-10-21")["vacancies"][0]
-    assert "profile" not in row
+    if channel == "external":
+        assert "profile" not in row
+    else:
+        assert row["profile"] == "Профиль Habr"
+
+
+def test_legacy_habr_record_matches_profile_lookup(tmp_path: Path) -> None:
+    """Старая запись Habr без профиля не считается новой при поиске."""
+    path = tmp_path / "2026-10-20.json"
+    path.write_text(
+        json.dumps(
+            {
+                "date": "2026-10-20",
+                "updated_at": "2026-10-20T09:00:00+03:00",
+                "summary": {},
+                "vacancies": [
+                    {
+                        "url": "https://career.habr.com/vacancies/1",
+                        "title": "Java",
+                        "company": "Ozon",
+                        "status": "sent",
+                        "channel": "habr",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    store = ProcessedStore(
+        tmp_path,
+        today=date(2026, 10, 21),
+        legacy_profile="Профиль Habr",
+    )
+    store.load()
+
+    assert store.find("Java", "Ozon", "https://career.habr.com/vacancies/1", "Профиль Habr")
 
 
 def test_created_at_survives_move_and_update(tmp_path: Path) -> None:
@@ -977,6 +1013,40 @@ def test_record_stores_message_and_clears_it_on_new_outcome(tmp_path: Path) -> N
     assert "message" not in row
 
 
+def test_record_stores_cover_letter_and_keeps_it_on_status_update(tmp_path: Path) -> None:
+    """Сопроводительное письмо хранится в записи и не пропадает при правке статуса."""
+    store = ProcessedStore(tmp_path / "report", today=date(2026, 11, 6), run_id="run")
+    store.record(
+        url="https://career.habr.com/vacancies/1",
+        title="Java-разработчик",
+        company="Ozon",
+        status="sent",
+        reason="Отклик отправлен",
+        channel="habr",
+        cover_letter="Здравствуйте! Готов обсудить вакансию.",
+    )
+
+    payload = json.loads(
+        (tmp_path / "report" / "2026-11-06.json").read_text(encoding="utf-8")
+    )
+    assert payload["vacancies"][0]["cover_letter"] == "Здравствуйте! Готов обсудить вакансию."
+
+    later = ProcessedStore(tmp_path / "report", today=date(2026, 11, 7), run_id="later")
+    later.load()
+    assert later.update_status(
+        url="https://career.habr.com/vacancies/1",
+        title="Java-разработчик",
+        company="Ozon",
+        status="rejected",
+        reason="По отклику пришёл отказ",
+    )
+
+    payload = json.loads(
+        (tmp_path / "report" / "2026-11-07.json").read_text(encoding="utf-8")
+    )
+    assert payload["vacancies"][0]["cover_letter"] == "Здравствуйте! Готов обсудить вакансию."
+
+
 def test_record_writes_run_id(tmp_path: Path) -> None:
     """Запись отчёта помнит запуск, который обработал вакансию."""
     store = ProcessedStore(tmp_path, today=date(2026, 10, 21), run_id="2026-10-21-090000")
@@ -1039,3 +1109,96 @@ def test_today_summary_counts_only_today_file(tmp_path: Path) -> None:
     )
 
     assert today.today_summary() == {"sent": 1}
+
+
+def habr_copy(
+    status: str,
+    updated_at: str,
+    *,
+    profile: str = "",
+    archived: bool = False,
+    attempts: int = 1,
+) -> dict:
+    """Запись Habr для ручного файла дня: профиль и признак архива по вкусу."""
+    row = {
+        "url": "https://career.habr.com/vacancies/1000169150",
+        "title": "Эксперт-разработчик Java",
+        "company": "Уралсиб",
+        "status": status,
+        "attempts": attempts,
+        "channel": "habr",
+        "created_at": "2026-10-28T16:18:11+03:00",
+        "updated_at": updated_at,
+    }
+    if profile:
+        row["profile"] = profile
+    if archived:
+        row["archived"] = True
+        row["reason"] = ARCHIVE_REASON
+    return row
+
+
+def test_load_prefers_newest_copy_within_day(tmp_path: Path) -> None:
+    """В файле дня строки идут по порядку обработки: берётся свежая, а не первая."""
+    old = habr_copy("queued", "2026-11-06T11:42:35+03:00", attempts=12)
+    fresh = habr_copy("skipped", "2026-11-06T15:04:48+03:00", profile="Профиль Habr")
+    write_day(tmp_path, "2026-11-06", [old, fresh])
+
+    store = ProcessedStore(
+        tmp_path, today=date(2026, 11, 6), legacy_profile="Профиль Habr"
+    )
+    store.load()
+
+    record = store.find_record(
+        "Эксперт-разработчик Java",
+        "Уралсиб",
+        "https://career.habr.com/vacancies/1000169150",
+        "Профиль Habr",
+    )
+    assert record is not None
+    assert record["status"] == "skipped"
+
+
+def test_pending_skips_vacancy_archived_in_copy(tmp_path: Path) -> None:
+    """Архив терминальный: копия без признака не возвращает вакансию в повтор."""
+    archived = habr_copy(
+        "queued", "2026-11-06T14:57:30+03:00", archived=True, attempts=13
+    )
+    working = habr_copy(
+        "queued", "2026-11-06T15:04:12+03:00", profile="Профиль Habr", attempts=13
+    )
+    write_day(tmp_path, "2026-11-06", [archived, working])
+
+    store = ProcessedStore(
+        tmp_path, today=date(2026, 11, 6), legacy_profile="Профиль Habr"
+    )
+    store.load()
+
+    assert store.pending(("queued",)) == []
+
+
+def test_update_merges_legacy_habr_copy(tmp_path: Path) -> None:
+    """Обновление записи Habr без профиля не оставляет рядом копию с профилем."""
+    url = "https://career.habr.com/vacancies/1000169150"
+    old = habr_copy("queued", "2026-11-06T11:42:35+03:00", attempts=12)
+    fresh = habr_copy("queued", "2026-11-06T15:04:12+03:00", profile="Профиль Habr")
+    write_day(tmp_path, "2026-11-06", [old, fresh])
+
+    store = ProcessedStore(
+        tmp_path, today=date(2026, 11, 6), legacy_profile="Профиль Habr"
+    )
+    store.load()
+    store.record(
+        url=url,
+        title="Эксперт-разработчик Java",
+        company="Уралсиб",
+        status="sent",
+        profile="Профиль Habr",
+        channel="habr",
+    )
+
+    rows = read_day(tmp_path, "2026-11-06")["vacancies"]
+    assert [(row["profile"], row["status"]) for row in rows] == [
+        ("Профиль Habr", "sent")
+    ]
+

@@ -302,6 +302,121 @@ def test_blocked_vacancy_is_skipped_with_reason(tmp_path: Path, monkeypatch) -> 
     assert stats.queued == []
 
 
+def test_non_verbose_hides_vacancy_skipped_before_llm(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """Без --verbose вакансия, отсеянная до LLM, не попадает в консоль."""
+    config = make_config(tmp_path)
+    card = VacancyCard(title="Java", company="Ozon", url="https://hh.ru/vacancy/7")
+    details = VacancyDetails(
+        url=card.url,
+        title=card.title,
+        company=card.company,
+        salary="",
+        description="",
+        blocker="blocked",
+    )
+    monkeypatch.setattr("agent.pipeline.open_vacancy", lambda page, vacancy: details)
+    stats = make_stats()
+    logger = RunLogger(tmp_path / "logs", run_id="quiet-skip", verbose=False)
+
+    _process_vacancy(
+        page=None,  # type: ignore[arg-type]
+        config=config,
+        profile=None,  # type: ignore[arg-type]
+        llm=None,  # type: ignore[arg-type]
+        stats=stats,
+        logger=logger,
+        card=card,
+    )
+    logger.close()
+
+    assert capsys.readouterr().out == ""
+    assert [item.reason for item in stats.skipped] == ["У вас нет доступа к этой вакансии"]
+    events = [
+        json.loads(line)
+        for line in logger.events_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert [item["event"] for item in events] == ["info", "page_status", "info"]
+    assert events[0]["vacancy_id"] == "7"
+
+
+def test_verbose_shows_vacancy_skipped_before_llm(tmp_path: Path, monkeypatch, capsys) -> None:
+    """С --verbose пропуск и причины видны в консоли как раньше."""
+    config = make_config(tmp_path)
+    card = VacancyCard(title="Java", company="Ozon", url="https://hh.ru/vacancy/7")
+    details = VacancyDetails(
+        url=card.url,
+        title=card.title,
+        company=card.company,
+        salary="",
+        description="",
+        blocker="blocked",
+    )
+    monkeypatch.setattr("agent.pipeline.open_vacancy", lambda page, vacancy: details)
+    logger = RunLogger(tmp_path / "logs", run_id="loud-skip", verbose=True)
+
+    _process_vacancy(
+        page=None,  # type: ignore[arg-type]
+        config=config,
+        profile=None,  # type: ignore[arg-type]
+        llm=None,  # type: ignore[arg-type]
+        stats=make_stats(),
+        logger=logger,
+        card=card,
+    )
+    logger.close()
+
+    out = capsys.readouterr().out
+    assert "открываю вакансию" in out
+    assert "пропуск" in out
+
+
+def test_non_verbose_shows_vacancy_processed_by_llm(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """Без --verbose вакансия, дошедшая до LLM, печатается целиком."""
+    config = make_config(tmp_path)
+    card = VacancyCard(title="Java", company="Ozon", url="https://hh.ru/vacancy/139016311")
+    details = VacancyDetails(
+        url=card.url,
+        title=card.title,
+        company=card.company,
+        salary="",
+        description="Java, Spring, PostgreSQL.",
+        blocker="other_resume",
+    )
+    monkeypatch.setattr("agent.pipeline.open_vacancy", lambda page, vacancy: details)
+
+    class FakeLLM:
+        def decide(self, profile, vacancy):
+            return DecisionResult(
+                fits=True,
+                probability=0.99,
+                threshold=0.8,
+                probabilities={"подходит": 0.99, "не подходит": 0.01},
+                chosen="подходит",
+            )
+
+    logger = RunLogger(tmp_path / "logs", run_id="quiet-llm", verbose=False)
+
+    _process_vacancy(
+        None,  # type: ignore[arg-type]
+        config,
+        Profile(text="Java", examples="", style_rules=""),
+        FakeLLM(),  # type: ignore[arg-type]
+        make_stats(),
+        logger,
+        card,
+    )
+    logger.close()
+
+    out = capsys.readouterr().out
+    assert "открываю вакансию" in out
+    assert "LLM-решение" in out
+    assert "пропуск" not in out
+
+
 def test_invited_vacancy_is_skipped_without_queue(tmp_path: Path, monkeypatch) -> None:
     """«Вас пригласили» → вакансию проходим, а не откладываем в ручные."""
     config = make_config(tmp_path)
@@ -1479,6 +1594,76 @@ def test_sync_habr_responses_updates_known_and_keeps_terminal(
     assert sync["updated"] == 3
 
 
+def test_sync_habr_responses_finds_record_with_profile(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Сверка находит записи текущего профиля, в том числе старые копии без профиля."""
+    report_dir = tmp_path / "report"
+    profiled_url = "https://career.habr.com/vacancies/1000164183"
+    legacy_url = "https://career.habr.com/vacancies/1000164184"
+    old = ProcessedStore(report_dir, today=date(2026, 10, 28))
+    old.record(
+        url=profiled_url,
+        title="Java разработчик",
+        company="ЛАНИТ",
+        status=OUTCOME_SENT,
+        channel="habr",
+        profile="Профиль Habr",
+    )
+    old.record(
+        url=legacy_url,
+        title="Java разработчик 2",
+        company="ЛАНИТ",
+        status=OUTCOME_SENT,
+        channel="habr",
+    )
+
+    store = ProcessedStore(
+        report_dir, today=date(2026, 11, 2), legacy_profile="Профиль Habr"
+    )
+    store.load()
+    responses = [
+        HabrResponse(
+            url=profiled_url,
+            title="Java разработчик",
+            company="ЛАНИТ",
+            label="Отказ",
+            status=OUTCOME_REJECTED,
+        ),
+        HabrResponse(
+            url=legacy_url,
+            title="Java разработчик 2",
+            company="ЛАНИТ",
+            label="Приглашение",
+            status="invite",
+        ),
+    ]
+    monkeypatch.setattr(
+        "agent.pipeline.habr_search.open_responses_page",
+        lambda page, page_index: responses if page_index == 0 else [],
+    )
+    logger = RunLogger(tmp_path / "logs", run_id="habr-sync-profile")
+
+    _sync_habr_responses(None, store, logger, "Профиль Habr")  # type: ignore[arg-type]
+    logger.close()
+
+    profiled = store.find_record("Java разработчик", "ЛАНИТ", profiled_url, "Профиль Habr")
+    legacy = store.find_record("Java разработчик 2", "ЛАНИТ", legacy_url, "Профиль Habr")
+    assert profiled is not None and profiled["status"] == OUTCOME_REJECTED
+    assert legacy is not None and legacy["status"] == "invite"
+    today = json.loads((report_dir / "2026-11-02.json").read_text(encoding="utf-8"))
+    assert [row["profile"] for row in today["vacancies"]] == [
+        "Профиль Habr",
+        "Профиль Habr",
+    ]
+    events = [
+        json.loads(line) for line in logger.events_path.read_text(encoding="utf-8").splitlines()
+    ]
+    sync = [item for item in events if item["event"] == "habr_responses_sync"][0]
+    assert sync["read"] == 2
+    assert sync["updated"] == 2
+
+
 def test_sync_habr_responses_does_not_move_unchanged_status(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -2103,6 +2288,126 @@ def test_sent_vacancy_reason_is_generation_verdict(tmp_path: Path, monkeypatch) 
         "на Java, не указан опыт автоматизации интерфейсов - это "
         "направление потребуется освоить"
     )
+
+
+def test_sent_vacancy_keeps_cover_letter_in_report(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Сопроводительное письмо попадает в запись дневного отчёта."""
+    config = make_config(tmp_path)
+    card = VacancyCard(
+        title="Java-разработчик",
+        company="ППК",
+        url="https://hh.ru/vacancy/138836233",
+    )
+    details = VacancyDetails(
+        url=card.url,
+        title=card.title,
+        company=card.company,
+        salary="",
+        description="Java, Spring, PostgreSQL.",
+    )
+    monkeypatch.setattr("agent.pipeline.open_vacancy", lambda page, vacancy: details)
+    letter = "Здравствуйте! Готов обсудить вакансию."
+
+    class FakeLLM:
+        def decide(self, profile, vacancy):
+            return DecisionResult(
+                fits=True,
+                probability=0.95,
+                threshold=0.8,
+                probabilities={"подходит": 0.95, "не подходит": 0.05},
+                chosen="подходит",
+            )
+
+        def generate(self, profile, vacancy, max_length=1500, signature=""):
+            del profile, vacancy, max_length, signature
+            return GenerationResult(verdict="подходит", reason="ok", cover_letter=letter)
+
+    def fake_respond(page, letter, captcha_waiter=None):
+        del page, letter, captcha_waiter
+        return ResponseResult(status=STATUS_SENT)
+
+    monkeypatch.setattr("agent.pipeline.respond", fake_respond)
+    monkeypatch.setattr("agent.pipeline._pause", lambda config, logger, reason: None)
+    stats = make_stats()
+    logger = RunLogger(tmp_path / "logs", run_id="sent-letter")
+    store = ProcessedStore(tmp_path / "report", today=date.today())
+
+    _process_and_remember(
+        None,  # type: ignore[arg-type]
+        config,
+        Profile(text="Java", examples="", style_rules=""),
+        FakeLLM(),
+        stats,
+        logger,
+        store,
+        card,
+        channel_for(config),
+    )
+    logger.close()
+
+    row = json.loads(store.path.read_text(encoding="utf-8"))["vacancies"][0]
+    assert row["status"] == "sent"
+    assert row["cover_letter"] == letter
+
+
+def test_empty_cover_letter_keeps_full_verdict_in_details(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Письмо не сгенерировано: причина — одно предложение, подробности — весь вердикт."""
+    config = make_config(tmp_path)
+    card = VacancyCard(
+        title="Java-разработчик",
+        company="ППК",
+        url="https://hh.ru/vacancy/138836233",
+    )
+    details = VacancyDetails(
+        url=card.url,
+        title=card.title,
+        company=card.company,
+        salary="",
+        description="Java, Spring, PostgreSQL.",
+    )
+    monkeypatch.setattr("agent.pipeline.open_vacancy", lambda page, vacancy: details)
+    verdict = (
+        "Профиль не подтверждает требуемые пять лет backend-разработки на Java. "
+        "Для роли требуется не менее пяти лет промышленной разработки, "
+        "опыт с Kafka не компенсирует разницу."
+    )
+
+    class FakeLLM:
+        def decide(self, profile, vacancy):
+            return DecisionResult(
+                fits=True,
+                probability=0.95,
+                threshold=0.8,
+                probabilities={"подходит": 0.95, "не подходит": 0.05},
+                chosen="подходит",
+            )
+
+        def generate(self, profile, vacancy, max_length=1500, signature=""):
+            del profile, vacancy, max_length, signature
+            return GenerationResult(verdict="подходит", reason=verdict, cover_letter="")
+
+    stats = make_stats()
+    logger = RunLogger(tmp_path / "logs", run_id="empty-letter")
+
+    _process_vacancy(
+        None,  # type: ignore[arg-type]
+        config,
+        Profile(text="Java", examples="", style_rules=""),
+        FakeLLM(),
+        stats,
+        logger,
+        card,
+    )
+    logger.close()
+
+    assert stats.queued[0]["reason"] == (
+        "Профиль не подтверждает требуемые пять лет backend-разработки на Java"
+    )
+    assert stats.queued[0]["message"] == verdict
 
 
 def test_respond_rejected_marks_vacancy_rejected(tmp_path: Path, monkeypatch) -> None:
@@ -2758,6 +3063,60 @@ def test_retry_counts_only_records_of_run_channel(
     assert mismatched[0]["count"] == 1
     assert "другого канала" in mismatched[0]["message"]
     assert "1 вакансия (queued)" in console
+
+
+def test_retry_skips_habr_vacancy_of_other_profile(tmp_path: Path, monkeypatch) -> None:
+    """Повтор Habr не берёт вакансию другого профиля: запись текущего уже есть."""
+    config = make_config(tmp_path)
+    url = "https://career.habr.com/vacancies/1000164183"
+    store = ProcessedStore(tmp_path / "report", today=date.today())
+    store.record(
+        url=url,
+        title="Java-разработчик",
+        company="ЛАНИТ",
+        status="queued",
+        channel="habr",
+        profile="Middle Java-разработчик",
+    )
+    store.record(
+        url=url,
+        title="Java-разработчик",
+        company="ЛАНИТ",
+        status="skipped",
+        channel="habr",
+        profile="Senior Java-разработчик",
+    )
+    logger = RunLogger(tmp_path / "logs", run_id="retry-habr-profile")
+    stats = make_stats()
+    visited: list[str] = []
+
+    def fake_process(page, config, profile, llm, stats, logger, card) -> None:
+        visited.append(card.url)
+
+    monkeypatch.setattr("agent.pipeline._process_vacancy", fake_process)
+
+    _retry_vacancies(
+        _FakePage(url),
+        config,
+        Profile(text="Java", examples="", style_rules="", name="Senior Java-разработчик"),
+        None,  # type: ignore[arg-type]
+        stats,
+        logger,
+        store,
+        ("queued",),
+        channel_for(config, "habr"),
+    )
+    logger.close()
+
+    events = [
+        json.loads(line) for line in logger.events_path.read_text(encoding="utf-8").splitlines()
+    ]
+    found = [item for item in events if item["event"] == "retry_profile_mismatch"]
+
+    assert visited == []
+    assert stats.reviewed == 1
+    assert found[0]["url"] == url
+    assert "другим профилем" in found[0]["message"]
 
 
 def test_retry_profile_mismatch_has_message(tmp_path: Path, monkeypatch) -> None:

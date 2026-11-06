@@ -69,6 +69,36 @@ def test_console_prints_without_event(tmp_path: Path, capsys) -> None:
     assert read_events(logger.events_path) == []
 
 
+def test_non_verbose_hides_vacancy_until_llm(tmp_path: Path, capsys) -> None:
+    """Без --verbose строки вакансии не печатаются, пока она не дошла до LLM."""
+    logger = RunLogger(tmp_path, run_id="quiet", verbose=False)
+
+    logger.info("открываю вакансию", vacancy_id="777")
+    logger.console("LLM-вердикт: подходит", vacancy_id="777")
+    assert capsys.readouterr().out == ""
+
+    logger.activate_vacancy("777")
+    out = capsys.readouterr().out
+    logger.close()
+
+    assert "открываю вакансию" in out
+    assert "LLM-вердикт: подходит" in out
+    assert len(read_events(logger.events_path)) == 1
+
+
+def test_verbose_prints_vacancy_before_llm(tmp_path: Path, capsys) -> None:
+    """С --verbose строки вакансии видны сразу, как раньше."""
+    logger = RunLogger(tmp_path, run_id="loud", verbose=True)
+
+    logger.info("открываю вакансию", vacancy_id="777")
+    logger.console("LLM-вердикт: подходит", vacancy_id="777")
+    logger.close()
+
+    out = capsys.readouterr().out
+    assert "открываю вакансию" in out
+    assert "LLM-вердикт: подходит" in out
+
+
 def test_info_plain_has_no_timestamp(tmp_path: Path, capsys) -> None:
     logger = RunLogger(tmp_path, run_id="report")
     report = "=================================\nОтчёт за 2026-10-21 15:19\n================================="

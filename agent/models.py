@@ -13,10 +13,6 @@ class VacancyCard:
     company: str
     url: str
     salary: str = ""
-    # Отклик отправляется на сайте компании: автоматической отправки нет,
-    # вакансия ждёт ручной обработки в очереди.
-    external_response: bool = False
-    # На карточке видно «Вы откликнулись»: отклик уже есть, карточку не открываем.
     already_responded: bool = False
 
 

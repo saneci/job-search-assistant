@@ -137,16 +137,6 @@
                                 <span class="option-check" aria-hidden="true">✓</span>
                                 <span class="option-label">Habr Career</span>
                             </button>
-                            <button class="dropdown-option" type="button" data-channel="external"
-                                    role="menuitemradio" aria-checked="false">
-                                <span class="option-check" aria-hidden="true">✓</span>
-                                <span class="option-label">Сайт компании</span>
-                            </button>
-                            <button class="dropdown-option" type="button" data-channel="unknown"
-                                    role="menuitemradio" aria-checked="false">
-                                <span class="option-check" aria-hidden="true">✓</span>
-                                <span class="option-label">Без канала</span>
-                            </button>
                         </div>
                     </div>
                 </div>
@@ -197,7 +187,7 @@
                 <table id="vacancyTable" hidden>
                     <thead>
                     <tr>
-                        <th>Резюме</th>
+                        <th>Профиль</th>
                         <th>Вакансия</th>
                         <th>Компания</th>
                         <th>Причина / Комментарий</th>
@@ -384,6 +374,57 @@
                 return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
             }
 
+            async function copyToClipboard(text) {
+                if (!text) return false;
+                try {
+                    if (navigator.clipboard && window.isSecureContext) {
+                        await navigator.clipboard.writeText(text);
+                        return true;
+                    }
+                } catch (error) {
+                    // Резервный способ ниже: Clipboard API может быть запрещён.
+                }
+                const area = document.createElement('textarea');
+                area.value = text;
+                area.setAttribute('readonly', '');
+                area.style.position = 'fixed';
+                area.style.top = '-1000px';
+                document.body.appendChild(area);
+                area.select();
+                let copied = false;
+                try {
+                    copied = document.execCommand('copy');
+                } catch (error) {
+                    copied = false;
+                }
+                area.remove();
+                return copied;
+            }
+
+            function flashCopied(button) {
+                const original = button.textContent;
+                button.textContent = 'Скопировано';
+                button.classList.add('copied');
+                window.setTimeout(() => {
+                    button.textContent = original;
+                    button.classList.remove('copied');
+                }, 1500);
+            }
+
+            function createCopyButton(text, label) {
+                const button = document.createElement('button');
+                button.type = 'button';
+                button.className = 'copy-btn';
+                button.textContent = 'Копировать';
+                button.title = label;
+                button.setAttribute('aria-label', label);
+                button.addEventListener('click', async (event) => {
+                    event.stopPropagation();
+                    if (await copyToClipboard(text)) flashCopied(button);
+                });
+                return button;
+            }
+
             /* ---------- Детали вакансии ---------- */
             let detailsVacancy = null;
             let detailsFocus = null;
@@ -427,7 +468,7 @@
                     addDetailRow(dl, 'Ссылка', '—');
                 }
                 addDetailRow(dl, 'Канал', CHANNEL_LABELS[v.channel] || v.channel || '—');
-                addDetailRow(dl, 'Резюме', v.profile || '—');
+                addDetailRow(dl, 'Профиль', v.profile || '—');
                 addDetailRow(dl, 'Статус', statusLabel);
                 addDetailRow(dl, 'Причина', v.reason || '—');
                 if (v.message && v.message !== v.reason) {
@@ -440,6 +481,25 @@
                 addDetailRow(dl, 'Запуск', v.run_id || '—');
                 addDetailRow(dl, 'Архив', v.archived ? 'Да' : 'Нет');
                 body.appendChild(dl);
+
+                const letterHeading = document.createElement('h3');
+                letterHeading.className = 'details-subtitle';
+                letterHeading.textContent = 'Сопроводительное письмо';
+                body.appendChild(letterHeading);
+
+                const letterText = typeof v.cover_letter === 'string' ? v.cover_letter.trim() : '';
+                if (!letterText) {
+                    const emptyLetter = document.createElement('p');
+                    emptyLetter.className = 'details-empty';
+                    emptyLetter.textContent = 'Письмо не сгенерировано.';
+                    body.appendChild(emptyLetter);
+                } else {
+                    const letter = document.createElement('div');
+                    letter.className = 'details-letter';
+                    letter.textContent = letterText;
+                    letter.appendChild(createCopyButton(letterText, 'Скопировать сопроводительное письмо'));
+                    body.appendChild(letter);
+                }
 
                 const heading = document.createElement('h3');
                 heading.className = 'details-subtitle';
@@ -466,6 +526,9 @@
                         answer.textContent = item.answer || 'Без ответа';
                         card.appendChild(question);
                         card.appendChild(answer);
+                        if (item.answer) {
+                            card.appendChild(createCopyButton(item.answer, 'Скопировать ответ на вопрос'));
+                        }
                         list.appendChild(card);
                     }
                     body.appendChild(list);
@@ -613,7 +676,7 @@
                 for (const v of filtered) {
                     const tr = document.createElement('tr');
 
-                    // Резюме: у Habr и внешней формы его нет.
+                    // Профиль: у внешней формы hh.ru его нет.
                     const tdProfile = document.createElement('td');
                     tdProfile.className = 'profile-cell' + (v.profile ? '' : ' empty');
                     tdProfile.textContent = v.profile || '—';
@@ -942,7 +1005,7 @@
                 const url = window.location.pathname + (query ? `?${query}` : '');
                 window.history.replaceState(null, '', url);
                 try {
-                    if (!hasSelectedFilters(filters, {includeFiles: true}) && !filters.datesNone) {
+                    if (!hasSelectedFilters(filters, {includeFiles: true})) {
                         window.localStorage.removeItem(FILTER_STORAGE_KEY);
                     } else {
                         window.localStorage.setItem(FILTER_STORAGE_KEY, JSON.stringify(filters));
@@ -969,7 +1032,10 @@
                 syncMenu(els.statusMenu, els.statusLabel, 'status', currentStatus);
                 syncMenu(els.channelMenu, els.channelLabel, 'channel', currentChannel);
                 els.searchInput.value = currentQuery;
-                els.filterReset.disabled = !hasSelectedFilters(currentFilters());
+                els.filterReset.disabled = !hasSelectedFilters(
+                    currentFilters(),
+                    {includeFiles: true}
+                );
             }
 
             /* Порядок восстановления: адрес → сохранённое состояние → значения по умолчанию. */

@@ -39,6 +39,11 @@ USER_AUTH_MENU_SELECTOR = ".user-auth-menu"
 
 TITLE_SELECTORS = ("h1.page-title__title", "h1")
 DESCRIPTION_SELECTORS = (".vacancy-description__text", ".style-ugc")
+# Альтернативные источники описания: работодатель может вставить его картинками.
+META_DESCRIPTION_SELECTOR = "meta[name='description']"
+CONTENT_SECTION_SELECTOR = ".content-section"
+CONTENT_SECTION_TITLE_SELECTOR = ".content-section__title"
+VACANCY_META_SELECTOR = ".vacancy-meta"
 COMPANY_SELECTORS = (".vacancy-company__title a.link-comp", ".vacancy-company__title a")
 SALARY_SELECTORS = (".vacancy-header__salary",)
 RESPOND_BUTTON_SELECTORS = (".vacancy-header__footer button",)
@@ -92,6 +97,8 @@ def open_vacancy(page: Page, card: VacancyCard) -> VacancyDetails:
         )
     description = _first_text(page, DESCRIPTION_SELECTORS)
     if not description:
+        description = _fallback_description(page)
+    if not description:
         raise VacancyParseError(f"не удалось прочитать описание вакансии: {card.url}")
     return VacancyDetails(
         url=card.url,
@@ -102,6 +109,48 @@ def open_vacancy(page: Page, card: VacancyCard) -> VacancyDetails:
         already_responded=_has_response(page),
         blocker=detect_page_blocker(page),
     )
+
+
+def _fallback_description(page: Page) -> str:
+    """Описание без текста: требования, условия и мета-описание страницы.
+
+    Habr разрешает работодателю вставить описание картинками: в блоке описания
+    текста нет. Для Decision собираем мета-описание и текстовые блоки
+    требований и условий, а если их нет, страница остаётся неразобранной.
+    """
+    parts: list[str] = []
+    meta = " ".join(_meta_description(page).split())
+    if meta:
+        parts.append(meta.rstrip("."))
+    sections = page.locator(CONTENT_SECTION_SELECTOR)
+    try:
+        total = min(sections.count(), 10)
+    except (PlaywrightError, AttributeError):
+        total = 0
+    for index in range(total):
+        section = sections.nth(index)
+        title = " ".join(_first_text(section, (CONTENT_SECTION_TITLE_SELECTOR,)).split())
+        text = " ".join(_first_text(section, (VACANCY_META_SELECTOR,)).split())
+        if title and text:
+            parts.append(f"{title}: {text}".rstrip("."))
+    if not parts:
+        return ""
+    return (
+        "Текст описания на сайте недоступен, доступны только требования и условия. "
+        + ". ".join(parts)
+        + "."
+    )
+
+
+def _meta_description(page: Page) -> str:
+    """Содержимое `meta[name=description]`: краткое описание вакансии с сайта."""
+    try:
+        locator = page.locator(META_DESCRIPTION_SELECTOR)
+        if not locator.count():
+            return ""
+        return (locator.first.get_attribute("content") or "").strip()
+    except (PlaywrightError, AttributeError):
+        return ""
 
 
 def detect_page_blocker(page: Page) -> str | None:

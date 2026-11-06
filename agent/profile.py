@@ -13,14 +13,20 @@ class ProfileError(RuntimeError):
 
 @dataclass(frozen=True)
 class Profile:
-    """Данные профиля для промпта LLM."""
+    """Данные профиля для промпта LLM.
+
+    `name` — значение из заголовка `# PROFILE:`: по нему в отчёте видно,
+    какой профиль использовался (у Habr резюме hh.ru нет).
+    """
 
     text: str
     examples: str
     style_rules: str
+    name: str = ""
 
 
 _HEADING_RE = re.compile(r"^(?P<level>#{1,6})\s+(?P<title>.+?)\s*$", re.MULTILINE)
+_PROFILE_NAME_RE = re.compile(r"^\s*#\s*PROFILE\s*:\s*(?P<name>.+?)\s*$", re.MULTILINE | re.IGNORECASE)
 _EXAMPLES_HEADING_RE = re.compile(r"^\s*[*-]\s*\*\*[^*]*пример", re.IGNORECASE)
 _BULLET_RE = re.compile(r"^[*-]\s+")
 
@@ -36,7 +42,18 @@ def load_profile(path: Path) -> Profile:
             "В профиле не найден раздел со стилем писем. Ожидается заголовок вида "
             "'## Стиль написания сопроводительных писем'"
         )
-    return Profile(text=text, examples=examples, style_rules=style_rules)
+    return Profile(
+        text=text,
+        examples=examples,
+        style_rules=style_rules,
+        name=parse_profile_name(text),
+    )
+
+
+def parse_profile_name(text: str) -> str:
+    """Имя профиля из заголовка `# PROFILE:`; без заголовка — пустая строка."""
+    match = _PROFILE_NAME_RE.search(text or "")
+    return match.group("name").strip() if match else ""
 
 
 def split_style_section(text: str) -> tuple[str, str]:

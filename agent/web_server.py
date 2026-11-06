@@ -15,7 +15,7 @@ from pathlib import Path
 
 import httpx
 
-from .config import PROJECT_ROOT, AppConfig
+from .config import PROJECT_ROOT, AppConfig, WebServerConfig
 from .logging_setup import (
     SERVER_LOG_DIR_ENV,
     SERVER_LOG_DIRNAME,
@@ -79,17 +79,37 @@ def server_status(logger: RunLogger) -> int:
     return 0 if running else 1
 
 
-def ensure_web_server(config: AppConfig, logger: RunLogger) -> bool:
+def _log_settings(config: AppConfig | WebServerConfig) -> tuple[Path, int]:
+    """Каталог журналов и срок хранения из любой формы конфигурации.
+
+    Запуск агента передаёт полную конфигурацию, а `--start` — только параметры
+    веб-сервера: серверу больше ничего не нужно.
+    """
+    logs_dir = getattr(config, "logs_dir", None)
+    if logs_dir is not None:
+        return Path(logs_dir), int(config.logs_retention_days)
+    return (
+        Path(config.data.paths.logs_dir),
+        int(config.data.logs_retention_days),
+    )
+
+
+def ensure_web_server(
+    config: AppConfig | WebServerConfig, logger: RunLogger
+) -> bool:
     """Запускает веб-сервер в фоне, если он ещё не запущен.
 
-    Повторный запуск не нужен: проверяем HTTP-ответ. Сбой запуска не должен
-    останавливать агента: отчёт всё равно сохранится в файл. Возвращает
-    True, если сервер уже работает или запущен, иначе False.
+    Серверу нужны только каталог журналов и срок их хранения: отчёты он
+    читает из каталога данных по умолчанию. Поэтому запуск не требует полной
+    конфигурации агента. Повторный запуск не нужен: проверяем HTTP-ответ.
+    Сбой запуска не должен останавливать агента: отчёт всё равно сохранится
+    в файл. Возвращает True, если сервер уже работает или запущен, иначе False.
     """
     if server_alive():
         logger.info(f"Веб-сервер уже запущен: {WEB_URL}")
         return True
-    log_dir = config.data.paths.logs_dir / SERVER_LOG_DIRNAME
+    logs_dir, retention_days = _log_settings(config)
+    log_dir = logs_dir / SERVER_LOG_DIRNAME
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / f"{date.today():%Y-%m-%d}.log"
     log_config = PROJECT_ROOT / "web" / "uvicorn-log.json"
@@ -111,7 +131,6 @@ def ensure_web_server(config: AppConfig, logger: RunLogger) -> bool:
         "--port",
         str(WEB_PORT),
     ]
-    retention_days = getattr(config.data, "logs_retention_days", 7)
     kwargs: dict[str, object] = {
         "cwd": str(PROJECT_ROOT),
         "stdin": subprocess.DEVNULL,
