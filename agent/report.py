@@ -130,7 +130,7 @@ def send_email(
 
     message = EmailMessage()
     message["Subject"] = subject
-    message["From"] = formataddr(("HH Agent", config.sender))
+    message["From"] = formataddr(("Job Search Assistant", config.sender))
     message["To"] = target
     message.set_content(body)
 

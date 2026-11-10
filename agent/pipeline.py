@@ -1366,8 +1366,21 @@ def _process_vacancy(
     ):
         stats.stop_reason = f"достигнут лимит откликов за запуск ({config.pipeline.limit_per_run})"
         log.info(f"лимит откликов достигнут ({stats.sent_count}), вакансия не обрабатывается")
-        return
+        return None
 
+    if other_resume:
+        queue(
+            stats,
+            logger,
+            details,
+            "other_resume",
+            "отклик уже отправлен другим резюме",
+            reason=OTHER_RESUME_REASON,
+        )
+        log.info(f"уже есть отклик другим резюме: {OTHER_RESUME_REASON}")
+        return None
+
+    _pause(config, logger, "перед обработкой новой вакансии")
     log.mark_llm()
     if details.description_images and config.llm.ocr.enabled:
         details = _transcribe_images(details, config, llm, logger, log)
@@ -1375,12 +1388,11 @@ def _process_vacancy(
         decision = llm.decide(profile, details)
     except LLMError as exc:
         _record_error(stats, logger, page, config, details, exc)
-        return
+        return None
 
     llm_reason = ""
     llm_reason_source = ""
     fits = meets_threshold(decision.probability, decision.threshold)
-    verdict = FIT_LABEL if fits else NOT_FIT_LABEL
     if not fits:
         llm_reason = (
             f"вероятность {decision.probability:.2f} не выше порога {decision.threshold:.2f}"
@@ -1398,6 +1410,7 @@ def _process_vacancy(
                     llm_reason = explanation
                     llm_reason_source = "model"
 
+    verdict = FIT_LABEL if fits else NOT_FIT_LABEL
     log.event(
         "decision",
         url=details.url,
@@ -1433,19 +1446,7 @@ def _process_vacancy(
             )
         )
         log.info(f"вакансия не подошла: {llm_reason}")
-        return
-
-    if other_resume:
-        queue(
-            stats,
-            logger,
-            details,
-            "other_resume",
-            "подходит, но отклик уже отправлен другим резюме",
-            reason=OTHER_RESUME_REASON,
-        )
-        log.info(f"подходит, но уже есть отклик другого резюме: {OTHER_RESUME_REASON}")
-        return
+        return None
 
     captcha_waiter = _captcha_waiter(
         page, config, logger, details, site=channel.site_label
@@ -1664,7 +1665,7 @@ def _process_vacancy(
             )
         )
         log.info(f"отклик отправлен (всего {stats.sent_count} из {config.pipeline.limit_per_run})")
-        _pause(config, logger, "после отправки отклика")
+        # _pause(config, logger, "после отправки отклика")
         return None
 
     if status == STATUS_REJECTED:
