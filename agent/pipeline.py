@@ -54,13 +54,14 @@ from .hh_vacancy import (
     submit_response,
     submit_test,
 )
-from .llm import LLMClient, LLMError, meets_threshold
+from .llm import DecisionResult, LLMClient, LLMError, meets_threshold
 from .logging_setup import RunLogger, prune_logs
 from .models import (
     ALREADY_RESPONDED_REASON,
     ARCHIVE_REASON,
     ERROR_REPORT_REASON,
     INVITE_REASON,
+    INTERRUPTED_REASON,
     INVITED_OTHER_RESUME_REASON,
     NOT_FIT_REPORT_REASON,
     OFFER_REASON,
@@ -91,6 +92,7 @@ from .prefilter import (
     PrefilterResult,
     Question,
     evaluate,
+    language_level,
     llm_answers,
     manual_hint,
     merge_answers,
@@ -135,7 +137,6 @@ QUEUE_REASON_TEXTS: dict[str, str] = {
     "no_form": "hh.ru не показал форму отклика — проверьте вакансию вручную",
     "unknown": "hh.ru не подтвердил отправку отклика — проверьте вакансию вручную",
     "other_resume": "Уже отправлен отклик по другому резюме",
-    "interrupted": "Запуск прерван во время обработки вакансии, проверьте вакансию вручную",
 }
 
 # Короткая причина для списка: подробности с формулировкой вопроса — в поле `message`.
@@ -225,8 +226,8 @@ def _letter_has_project_link(letter: str, links: tuple[str, ...]) -> bool:
 # Состояния страницы вакансии, при которых отклик не нужен: код → (статус
 # записи, причина в отчёте за день). Приглашение и недоступная вакансия —
 # `skipped`, отказ работодателя — отдельный статус `rejected`. Отклик другого
-# резюме сюда не входит: сначала проверяем, подходит ли вакансия, и только
-# подходящую откладываем в очередь.
+# резюме сюда не входит: отклик уже есть, поэтому Decision не вызываем, а
+# вакансию сразу откладываем в очередь.
 PAGE_STATUS_REASONS: dict[str, tuple[str, str]] = {
     "archived": (OUTCOME_SKIPPED, ARCHIVE_REASON),
     "invited": (OUTCOME_SKIPPED, INVITED_OTHER_RESUME_REASON),
@@ -301,6 +302,7 @@ def run(
 
     config = with_channel(config, channel_name)
     channel = channel_for(config)
+    profile = _assessment_profile(profile, config)
     processed = _open_report(config, logger, _profile_name(config, channel, profile))
     log_channel_choice(logger, channel, channel_name)
     _require_resume_name(config, logger, channel)
@@ -537,6 +539,21 @@ def _profile_name(
     if channel.name == HH:
         return config.pipeline.resume.name
     return profile.name if profile is not None else ""
+
+
+def _assessment_profile(profile: Profile, config: AppConfig) -> Profile:
+    """Профиль для Decision: годы опыта и английский из анкеты hh.
+
+    Числа берутся из pipeline.prefilter.answers: в тексте профиля стаж в IT
+    и стаж в роли разработчика стоят рядом, и модель читает их как одно.
+    """
+    answers = config.pipeline.prefilter.answers
+    return replace(
+        profile,
+        experience_total_years=answers.work_experience_total,
+        experience_role_years=answers.work_experience_profile,
+        english_level=language_level(answers.languages),
+    )
 
 
 def session_settings(config: AppConfig, channel: Channel) -> tuple[Path, Path | None]:
@@ -890,7 +907,11 @@ def _process_and_remember(
             archived=_outcome_archived(skipped),
             questionary=stats.questionary.get(card.url, ()),
             message=_outcome_message(stats, counters, outcome),
-            cover_letter=stats.cover_letters.get(card.url, ""),
+            cover_letter=(
+                "" if outcome == OUTCOME_SENT else stats.cover_letters.get(card.url, "")
+            ),
+            probability=_outcome_probability(stats, counters, outcome),
+            decision_reason=_outcome_decision_reason(stats, counters, outcome),
         )
 
 
@@ -905,19 +926,23 @@ def _remember_interrupted(
 ) -> None:
     """Страховка от потери вакансии при остановке запуска.
 
-    Отклик мог уйти или не уйти, поэтому без записи в отчёт вакансия осталась бы
-    без ручной проверки на сайте.
+    Отклик мог уйти или не уйти, поэтому вакансия попадает в ошибки: точный
+    статус неизвестен, а ручная проверка на сайте обязательна.
     """
-    reason = QUEUE_REASON_TEXTS["interrupted"]
-    _queue(stats, logger, card, "interrupted", reason=reason, channel=channel)
+    log = _VacancyLog(logger, card.title, card.company, card.url)
+    stats.errors.append(
+        RunError(url=card.url, title=card.title, message=INTERRUPTED_REASON)
+    )
+    log.event("interrupted_vacancy", url=card.url, error=INTERRUPTED_REASON)
     _remember_processing(
         processed,
         logger,
         card,
-        OUTCOME_QUEUED,
-        reason,
+        OUTCOME_ERROR,
+        INTERRUPTED_REASON,
         _profile_name(config, channel, profile),
         channel=channel.name,
+        message=INTERRUPTED_REASON,
     )
 
 
@@ -1221,8 +1246,17 @@ def _process_vacancy(
     """Обрабатывает вакансию; возвращает канал отчёта, если он не равен каналу поиска."""
     channel = _channel_for(config)
 
+    decision: DecisionResult | None = None
+
     def queue(*args: object, **kwargs: object) -> None:
-        """Отложить вакансию: тексты причин — из выбранного канала."""
+        """Отложить вакансию: тексты причин — из выбранного канала.
+
+        Если Decision уже вызывался, вердикт попадает и в очередь: по файлу
+        дня видно, почему вакансия отложена, а не только почему пропущена.
+        """
+        if decision is not None:
+            kwargs.setdefault("probability", decision.probability)
+            kwargs.setdefault("decision_reason", decision.reason)
         _queue(*args, channel=channel, **kwargs)  # type: ignore[arg-type]
 
     log = _VacancyLog(logger, card.title, card.company, card.url)
@@ -1377,7 +1411,7 @@ def _process_vacancy(
             "отклик уже отправлен другим резюме",
             reason=OTHER_RESUME_REASON,
         )
-        log.info(f"уже есть отклик другим резюме: {OTHER_RESUME_REASON}")
+        log.info(f"уже есть отклик другим резюме, LLM не вызываю: {OTHER_RESUME_REASON}")
         return None
 
     _pause(config, logger, "перед обработкой новой вакансии")
@@ -1390,8 +1424,9 @@ def _process_vacancy(
         _record_error(stats, logger, page, config, details, exc)
         return None
 
-    llm_reason = ""
-    llm_reason_source = ""
+    llm_reason = decision.reason
+    llm_reason_source = "decision"
+    explanation = ""
     fits = meets_threshold(decision.probability, decision.threshold)
     if not fits:
         llm_reason = (
@@ -1423,6 +1458,7 @@ def _process_vacancy(
         llm_reason=llm_reason,
         llm_reason_source=llm_reason_source,
         probabilities=decision.probabilities,
+        checks=decision.checks,
     )
     probabilities = ", ".join(
         f"{label}={value:.2f}" for label, value in decision.probabilities.items()
@@ -1441,8 +1477,9 @@ def _process_vacancy(
                 url=details.url,
                 reason=llm_reason,
                 probability=decision.probability,
+                decision_reason=decision.reason,
                 report_reason=NOT_FIT_REPORT_REASON,
-                report_message=llm_reason,
+                report_message=explanation,
             )
         )
         log.info(f"вакансия не подошла: {llm_reason}")
@@ -1660,6 +1697,7 @@ def _process_vacancy(
                 url=details.url,
                 probability=decision.probability,
                 reason=generation.reason,
+                decision_reason=decision.reason,
                 report_reason=SENT_REPORT_REASON,
                 report_message=generation.reason,
             )
@@ -1682,6 +1720,7 @@ def _process_vacancy(
                 url=details.url,
                 reason=REJECTED_REASON,
                 probability=decision.probability,
+                decision_reason=decision.reason,
             )
         )
         log.info("по вакансии уже есть отказ по текущему резюме, вакансия пройдена")
@@ -1976,6 +2015,8 @@ def _queue(
     *,
     reason: str = "",
     message: str = "",
+    probability: float | None = None,
+    decision_reason: str = "",
     channel: Channel | None = None,
 ) -> None:
     """Отмечает вакансию как отложенную: отклик нужно отправить вручную.
@@ -1997,6 +2038,10 @@ def _queue(
     }
     if message_text:
         entry["message"] = message_text
+    if probability is not None:
+        entry["probability"] = round(float(probability), 4)
+    if decision_reason:
+        entry["decision_reason"] = decision_reason
     stats.queued.append(entry)
     extra = {"message": message_text} if message_text else {}
     log.event("queued", url=card.url, title=card.title, code=code, reason=text, note=note, **extra)
@@ -2372,6 +2417,42 @@ def _outcome_message(
     return ""
 
 
+def _outcome_probability(
+    stats: RunStats,
+    before: tuple[int, int, int, int, int, int, int],
+    outcome: str,
+) -> float | None:
+    """Вероятность Decision у результата: пишется в файл дня для аудита."""
+    if outcome == OUTCOME_SENT and len(stats.sent) > before[0]:
+        return stats.sent[-1].probability
+    if outcome == OUTCOME_SKIPPED and len(stats.skipped) > before[1]:
+        return stats.skipped[-1].probability
+    if outcome == OUTCOME_REJECTED and len(stats.rejected) > before[5]:
+        return stats.rejected[-1].probability
+    if outcome == OUTCOME_QUEUED and len(stats.queued) > before[2]:
+        value = stats.queued[-1].get("probability")
+        return float(value) if isinstance(value, (int, float)) else None
+    return None
+
+
+def _outcome_decision_reason(
+    stats: RunStats,
+    before: tuple[int, int, int, int, int, int, int],
+    outcome: str,
+) -> str:
+    """Вердикт Decision: пусто, если модель не вызывалась."""
+    if outcome == OUTCOME_SENT and len(stats.sent) > before[0]:
+        return stats.sent[-1].decision_reason
+    if outcome == OUTCOME_SKIPPED and len(stats.skipped) > before[1]:
+        return stats.skipped[-1].decision_reason
+    if outcome == OUTCOME_REJECTED and len(stats.rejected) > before[5]:
+        return stats.rejected[-1].decision_reason
+    if outcome == OUTCOME_QUEUED and len(stats.queued) > before[2]:
+        value = stats.queued[-1].get("decision_reason")
+        return str(value) if value else ""
+    return ""
+
+
 def _remember_processing(
     processed: ProcessedStore,
     logger: RunLogger,
@@ -2384,13 +2465,17 @@ def _remember_processing(
     questionary: Sequence[Mapping[str, str]] = (),
     message: str = "",
     cover_letter: str = "",
+    probability: float | None = None,
+    decision_reason: str = "",
 ) -> None:
     """Записывает вакансию в дневной отчёт, чтобы не проходить её снова.
 
     Для пропусков, отложенных и упавших вакансий пишется причина — по файлу
     дня видно, почему вакансию не взяли и что имеет смысл повторить.
     `message` — полный текст причины для окна деталей.
-    `cover_letter` — сопроводительное письмо для окна деталей.
+    `cover_letter` — сопроводительное письмо: нужно для ручного отклика по
+    отложенной или упавшей вакансии, у отправленной его в отчёт не пишем.
+    `probability` и `decision_reason` — вердикт Decision для аудита.
     """
     if (
         outcome
@@ -2421,6 +2506,8 @@ def _remember_processing(
             questionary=questionary,
             message=message,
             cover_letter=cover_letter,
+            probability=probability,
+            decision_reason=decision_reason,
         )
     except ProcessedError as exc:
         vid = vacancy_id(card.url)

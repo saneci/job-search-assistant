@@ -471,6 +471,7 @@
                 addDetailRow(dl, 'Профиль', v.profile || '—');
                 addDetailRow(dl, 'Статус', statusLabel);
                 addDetailRow(dl, 'Причина', v.reason || '—');
+                addDetailRow(dl, 'Решение LLM', v.decision_reason || '—');
                 if (v.message && v.message !== v.reason) {
                     addDetailRow(dl, 'Подробности', v.message);
                 }

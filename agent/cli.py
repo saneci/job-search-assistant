@@ -7,7 +7,7 @@ import os
 import subprocess
 import sys
 from collections.abc import Sequence
-from typing import TextIO
+from typing import TextIO, Never
 
 from .browser import BrowserError, BrowserSession
 from .channel import CHANNEL_NAMES
@@ -495,7 +495,7 @@ def _run_server_action(action: str, args: argparse.Namespace) -> int:
 class _CliArgumentParser(argparse.ArgumentParser):
     """Парсер, который сообщает об ошибках в едином стиле приложения."""
 
-    def error(self, message: str) -> None:
+    def error(self, message: str) -> Never:
         raise _translate_parser_error(message)
 
     def _check_value(self, action: argparse.Action, value: object) -> None:

@@ -185,14 +185,21 @@ def test_boost_is_skipped_when_cache_is_fresh(tmp_path: Path) -> None:
     assert not page.boost_button.clicked
 
 
-def test_boost_without_button_does_not_update_cache(tmp_path: Path) -> None:
+def test_boost_without_button_marks_check_time(tmp_path: Path) -> None:
+    """Кнопки нет: время проверки сохраняется, страница не открывается каждый запуск."""
     config = make_config(tmp_path)
     page = FakePage("Java-разработчик", has_button=False)
 
     status = boost_resume(page, config, make_logger(tmp_path))  # type: ignore[arg-type]
 
     assert status == STATUS_UNAVAILABLE
-    assert ResumeCache(config.data.paths.cache).last_boost("Java-разработчик") is None
+    assert ResumeCache(config.data.paths.cache).last_boost("Java-разработчик") is not None
+
+    again = FakePage("Java-разработчик", has_button=False)
+    second = boost_resume(again, config, make_logger(tmp_path))  # type: ignore[arg-type]
+
+    assert second == STATUS_FRESH
+    assert again.visited == []
 
 
 def test_boost_without_resume_link_is_unavailable(tmp_path: Path) -> None:

@@ -35,6 +35,26 @@ SCROLL_EMPTY_SECONDS = 2.0
 
 TITLE_SELECTOR = "a[data-qa='serp-item__title'], a[data-qa='vacancy-serp__vacancy-title']"
 
+# Кириллические буквы, которые визуально совпадают с латинскими: после
+# приведения регистра их достаточно свести к латинскому двойнику. Иначе
+# «Разработчик С++» с кириллической «С» не ловится стоп-словом «C++».
+_CONFUSABLES = str.maketrans(
+    {
+        "а": "a",
+        "в": "b",
+        "с": "c",
+        "е": "e",
+        "к": "k",
+        "м": "m",
+        "н": "h",
+        "о": "o",
+        "р": "p",
+        "т": "t",
+        "у": "y",
+        "х": "x",
+    }
+)
+
 # Один шаблон на оба канала: hh.ru — /vacancy/<id>, Habr — /vacancies/<id>.
 _VACANCY_ID_RE = re.compile(r"/vacanc(?:y|ies)/(\d+)")
 
@@ -102,15 +122,26 @@ def is_company_excluded(company: str, keywords: Sequence[str]) -> str | None:
 
 
 def match_keyword(text: str, keywords: Sequence[str]) -> str | None:
-    """Ищет ключевое слово без учёта регистра («ё» приравнивается к «е»)."""
+    """Ищет ключевое слово без учёта регистра («ё» приравнивается к «е»).
+
+    Работодатели набирают названия кириллическими двойниками латинских букв:
+    «Разработчик С++» приходит с кириллической «С», и стоп-слово «C++» иначе
+    не сработает. Похожие буквы сводятся к одной до сравнения, возвращается
+    исходное написание стоп-слова из конфига.
+    """
     if not text:
         return None
-    lowered = text.lower().replace("ё", "е")
+    lowered = _fold_confusables(text)
     for keyword in keywords:
-        normalized = keyword.strip().lower().replace("ё", "е")
+        normalized = _fold_confusables(keyword).strip()
         if normalized and normalized in lowered:
             return keyword
     return None
+
+
+def _fold_confusables(text: str) -> str:
+    """Нижний регистр, «ё» → «е» и общий вид для похожих кириллических букв."""
+    return text.lower().replace("ё", "е").translate(_CONFUSABLES)
 
 
 def profile_key(profile: str) -> str:

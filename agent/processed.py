@@ -281,14 +281,19 @@ class ProcessedStore:
         archived: bool = False,
         questionary: Sequence[Mapping[str, str]] | None = None,
         cover_letter: str | None = None,
+        probability: float | None = None,
+        decision_reason: str | None = None,
     ) -> bool:
         """Записывает вакансию в отчёт дня; известную запись обновляет (повтор).
 
         `profile` — профиль записи: резюме hh или имя из заголовка `# PROFILE:`.
         `message` — полный текст причины для окна деталей.
         `questionary` — ответы на анкету или тест: блок `questionary` в записи.
-        `cover_letter` — сопроводительное письмо для окна деталей. None оставляет
-        прежний текст: правка статуса письмо не удаляет.
+        `cover_letter` — сопроводительное письмо для ручного отклика: пишет его
+        только отложенная или упавшая вакансия. None оставляет прежний текст:
+        правка статуса письмо не удаляет.
+        `probability` и `decision_reason` — вердикт Decision для аудита: без них
+        по файлу дня не видно, почему вакансия признана подходящей.
         Возвращает False, если вакансию нечем опознать при следующем запуске:
         нет ни ссылки, ни названия с компанией.
         """
@@ -307,6 +312,8 @@ class ProcessedStore:
                 archived=archived,
                 questionary=questionary,
                 cover_letter=cover_letter,
+                probability=probability,
+                decision_reason=decision_reason,
             )
 
         now = _now()
@@ -335,6 +342,10 @@ class ProcessedStore:
             item["archived"] = True
         if cover_letter:
             item["cover_letter"] = cover_letter
+        if probability is not None:
+            item["probability"] = round(float(probability), 4)
+        if decision_reason:
+            item["decision_reason"] = decision_reason
         item["questionary"] = [dict(entry) for entry in (questionary or [])]
 
         try:
@@ -354,6 +365,8 @@ class ProcessedStore:
                         archived=archived,
                         questionary=questionary,
                         cover_letter=cover_letter,
+                        probability=probability,
+                        decision_reason=decision_reason,
                     )
                 items.append(item)
                 _write(self.path, items)
@@ -376,6 +389,8 @@ class ProcessedStore:
         archived: bool = False,
         questionary: Sequence[Mapping[str, str]] | None = None,
         cover_letter: str | None = None,
+        probability: float | None = None,
+        decision_reason: str | None = None,
     ) -> bool:
         """Обновляет запись, удерживая общую с веб-интерфейсом блокировку каталога."""
         try:
@@ -391,6 +406,8 @@ class ProcessedStore:
                     archived=archived,
                     questionary=questionary,
                     cover_letter=cover_letter,
+                    probability=probability,
+                    decision_reason=decision_reason,
                 )
         except ReportLockError as exc:
             raise ProcessedError(str(exc)) from exc
@@ -408,6 +425,8 @@ class ProcessedStore:
         archived: bool = False,
         questionary: Sequence[Mapping[str, str]] | None = None,
         cover_letter: str | None = None,
+        probability: float | None = None,
+        decision_reason: str | None = None,
     ) -> bool:
         """Обновляет запись о вакансии: повтор увеличивает счётчик попыток.
 
@@ -454,6 +473,10 @@ class ProcessedStore:
             item.pop("archived", None)
         if cover_letter:
             item["cover_letter"] = cover_letter
+        if probability is not None:
+            item["probability"] = round(float(probability), 4)
+        if decision_reason:
+            item["decision_reason"] = decision_reason
         if questionary is not None:
             item["questionary"] = [dict(entry) for entry in questionary]
         elif "questionary" not in item:

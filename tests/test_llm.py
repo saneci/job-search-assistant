@@ -54,6 +54,20 @@ VACANCY = VacancyDetails(
     description="Spring Boot, Kafka, PostgreSQL.",
 )
 
+# Вакансия с явными блоками: проверяет, что требования и «будет плюсом»
+# попадают в запрос решения отдельными полями.
+DECISION_VACANCY = VacancyDetails(
+    url="https://hh.ru/vacancy/2",
+    title="Java-разработчик",
+    company="Ozon",
+    salary="200 000 ₽",
+    description=(
+        "Обязанности\nРазработка сервисов\n\n"
+        "Требования\nJava, Spring Boot, PostgreSQL\n\n"
+        "Будет плюсом\nKafka"
+    ),
+)
+
 
 def make_config(
     *,
@@ -114,61 +128,150 @@ def test_transcribe_images_sends_images_as_data_urls() -> None:
     assert text == "ЧТО НУЖНО БУДЕТ ДЕЛАТЬ\nРазработка сервисов на Java"
 
 
-def test_decide_sends_expected_request_and_reads_probabilities() -> None:
-    captured: dict[str, Any] = {}
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        captured["url"] = str(request.url)
-        captured["payload"] = json.loads(request.content)
-        captured["auth"] = request.headers["authorization"]
-        return httpx.Response(
-            200,
-            json={
-                "answers": {
-                    "fit": {
-                        "type": "choice",
-                        "value": "подходит",
-                        "probabilities": {"подходит": 0.87, "не подходит": 0.13},
-                        "confidence": 0.87,
-                    }
-                }
-            },
-        )
-
-    with make_client(handler) as client:
-        result = client.decide(PROFILE, VACANCY)
-
-    assert captured["url"] == "https://api.aitunnel.ru/v1/decisions"
-    assert captured["auth"] == "Bearer sk-aitunnel-test"
-    assert captured["payload"]["model"] == "gpt-6-luna-decisions"
-    assert captured["payload"]["questions"]["fit"]["criteria"].keys() == {"подходит", "не подходит"}
-    assert captured["payload"]["state"]["vacancy"]["title"] == "Java-разработчик"
-    assert result.fits is True
-    assert result.probability == pytest.approx(0.87)
-    assert result.threshold == pytest.approx(0.8)
-
-
-def test_decide_is_strict_at_threshold() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"подходит": 0.8, "не подходит": 0.2})
-
-    with make_client(handler) as client:
-        result = client.decide(PROFILE, VACANCY)
-
-    assert result.fits is False
-
-
 def test_meets_threshold_is_strict() -> None:
     """Ровно порог — не выше порога, поэтому вакансия пропускается."""
     assert meets_threshold(0.8, 0.8) is False
     assert meets_threshold(0.81, 0.8) is True
 
 
-def test_decide_accepts_noul_answer() -> None:
+def decision_response(**checks: float) -> httpx.Response:
+    """Ответ Decisions API: по одному noul на каждый вопрос."""
+    values = {
+        "mandatory_missing": 0.02,
+        "experience_short": 0.03,
+        "stack_match": 0.95,
+        "red_flags": 0.01,
+    }
+    values.update(checks)
+    return httpx.Response(
+        200,
+        json={
+            "answers": {
+                name: {"type": "noul", "noul": value}
+                for name, value in values.items()
+            }
+        },
+    )
+
+
+def test_decide_sends_questions_and_reads_noul_answers() -> None:
+    captured: dict[str, Any] = {}
+
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200,
-            json={"answers": {"fit": {"type": "noul", "value": True, "probability": 0.95}}},
+        captured["url"] = str(request.url)
+        captured["payload"] = json.loads(request.content)
+        captured["auth"] = request.headers["authorization"]
+        return decision_response(
+            stack_match=0.9,
+            mandatory_missing=0.9,
+            experience_short=0.05,
+            red_flags=0.05,
+        )
+
+    with make_client(handler) as client:
+        result = client.decide(PROFILE, DECISION_VACANCY)
+
+    payload = captured["payload"]
+    assert captured["url"] == "https://api.aitunnel.ru/v1/decisions"
+    assert captured["auth"] == "Bearer sk-aitunnel-test"
+    assert payload["model"] == "gpt-6-luna-decisions"
+    assert sorted(payload["questions"]) == [
+        "experience_short",
+        "mandatory_missing",
+        "red_flags",
+        "stack_match",
+    ]
+    assert all(item["type"] == "noul" for item in payload["questions"].values())
+    assert payload["state"]["profile"]["text"] == "Java-разработчик"
+    assert "чего нет в тексте профиля" in payload["state"]["profile"]["facts"]
+    vacancy = payload["state"]["vacancy"]
+    assert vacancy["title"] == "Java-разработчик"
+    assert vacancy["requirements"] == "Java, Spring Boot, PostgreSQL"
+    assert vacancy["optional"] == "Kafka"
+    assert result.checks["mandatory_missing"] == pytest.approx(0.9)
+    assert result.probability == pytest.approx(0.9)
+    assert result.fits is False
+    assert result.reason == (
+        "Вакансия подходит на 90%, это выше требования 80%. "
+        "Блокеры: обязательные требования без опыта"
+    )
+
+
+def test_decide_is_strict_at_threshold() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return decision_response(
+            stack_match=0.8,
+            mandatory_missing=0.0,
+            experience_short=0.0,
+            red_flags=0.0,
+        )
+
+    with make_client(handler) as client:
+        result = client.decide(PROFILE, VACANCY)
+
+    assert result.probability == pytest.approx(0.8)
+    assert result.fits is False
+
+
+@pytest.mark.parametrize(
+    ("probability", "expected"),
+    [
+        (0.21, "Вакансия подходит на 21%, но это ниже требования 80%"),
+        (0.8, "Вакансия подходит на 80%, но это не выше требования 80%"),
+    ],
+)
+def test_decision_reason_speaks_percent_and_requirement(
+    probability: float, expected: str
+) -> None:
+    """В отчёт идёт фраза про проценты, а не служебные названия проверок."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return decision_response(
+            stack_match=probability,
+            mandatory_missing=1.0,
+            experience_short=0.16,
+            red_flags=0.06,
+        )
+
+    with make_client(handler) as client:
+        result = client.decide(PROFILE, VACANCY)
+
+    assert result.fits is False
+    assert result.reason == expected
+
+
+def test_decide_blocker_rejects_high_stack() -> None:
+    """Обязательное требование без опыта роняет итог, даже если стек совпал."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return decision_response(
+            stack_match=0.95,
+            mandatory_missing=0.91,
+            experience_short=0.0,
+            red_flags=0.0,
+        )
+
+    with make_client(handler) as client:
+        result = client.decide(PROFILE, VACANCY)
+
+    assert result.checks["mandatory_missing"] == pytest.approx(0.91)
+    assert result.probability == pytest.approx(0.95)
+    assert result.fits is False
+    assert result.reason == (
+        "Вакансия подходит на 95%, это выше требования 80%. "
+        "Блокеры: обязательные требования без опыта"
+    )
+
+
+def test_decide_small_experience_gap_is_not_blocker() -> None:
+    """«От 3 лет» при 2.5 года: разница меньше двух лет не блокирует отклик."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return decision_response(
+            stack_match=0.95,
+            mandatory_missing=0.1,
+            experience_short=0.3,
+            red_flags=0.1,
         )
 
     with make_client(handler) as client:
@@ -176,6 +279,57 @@ def test_decide_accepts_noul_answer() -> None:
 
     assert result.probability == pytest.approx(0.95)
     assert result.fits is True
+
+
+def test_decide_low_stack_is_rejected() -> None:
+    """Требование «от 1 года» не спасает вакансию с совпадением стека ниже порога."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return decision_response(
+            stack_match=0.4,
+            mandatory_missing=0.1,
+            experience_short=0.1,
+            red_flags=0.1,
+        )
+
+    with make_client(handler) as client:
+        result = client.decide(PROFILE, VACANCY)
+
+    assert result.probability == pytest.approx(0.4)
+    assert result.fits is False
+
+
+def test_decide_parses_flat_answers() -> None:
+    """Плоский ответ провайдера: имя вопроса → вероятность «да»."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "mandatory_missing": 0.1,
+                "experience_short": 0.1,
+                "stack_match": 0.95,
+                "red_flags": 0.1,
+            },
+        )
+
+    with make_client(handler) as client:
+        result = client.decide(PROFILE, VACANCY)
+
+    assert result.probability == pytest.approx(0.95)
+    assert result.fits is True
+
+
+def test_decide_requires_every_answer() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"answers": {"stack_match": {"type": "noul", "noul": 0.9}}},
+        )
+
+    with make_client(handler) as client:
+        with pytest.raises(LLMResponseError, match="mandatory_missing"):
+            client.decide(PROFILE, VACANCY)
 
 
 def test_decide_without_api_key_raises() -> None:
@@ -397,53 +551,6 @@ def test_parse_generation_requires_verdict() -> None:
         parse_generation({"reason": "нет вердикта"})
 
 
-def test_decide_parses_official_choice_answer() -> None:
-    """Формат AITUNNEL: answers.fit.{type,choice,confidence,probabilities}."""
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200,
-            json={
-                "id": "gen-dec-1",
-                "model": "gpt-6-luna-decisions",
-                "answers": {
-                    "fit": {
-                        "type": "choice",
-                        "choice": "подходит",
-                        "confidence": 0.67,
-                        "probabilities": {"подходит": 0.78, "не подходит": 0.22},
-                    }
-                },
-                "usage": {"input_tokens": 500, "cost_rub": 0.004},
-            },
-        )
-
-    with make_client(handler) as client:
-        result = client.decide(PROFILE, VACANCY)
-
-    assert result.probability == pytest.approx(0.78)
-    assert result.chosen == "подходит"
-    assert result.probabilities == {"подходит": 0.78, "не подходит": 0.22}
-    assert result.fits is False  # 0.78 < порога 0.8
-
-
-def test_decide_parses_official_noul_answer() -> None:
-    """Формат AITUNNEL: answers.fit.noul — вероятность «да»."""
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200,
-            json={"answers": {"fit": {"type": "noul", "noul": 0.91}}},
-        )
-
-    with make_client(handler) as client:
-        result = client.decide(PROFILE, VACANCY)
-
-    assert result.probability == pytest.approx(0.91)
-    assert result.probabilities["не подходит"] == pytest.approx(0.09)
-    assert result.fits is True
-
-
 def test_load_system_prompt_falls_back_to_minimal_prompt(tmp_path: Path) -> None:
     assert load_system_prompt(None) == FALLBACK_SYSTEM_PROMPT
     assert load_system_prompt(tmp_path / "missing.md") == FALLBACK_SYSTEM_PROMPT
@@ -593,44 +700,32 @@ def test_parse_generation_flags_greeting_present() -> None:
     assert result.cover_letter.startswith("Здравствуйте! Текст.")
 
 
-def test_decide_sends_criteria_from_config() -> None:
-    """Критерии (включая порог соответствия) задаются только конфигом."""
+def test_decide_sends_questions_from_config() -> None:
+    """Формулировки вопросов задаются только конфигом."""
     captured: dict[str, Any] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured["payload"] = json.loads(request.content)
-        return httpx.Response(
-            200,
-            json={
-                "answers": {
-                    "fit": {
-                        "type": "choice",
-                        "choice": "подходит",
-                        "confidence": 0.9,
-                        "probabilities": {"подходит": 0.9, "не подходит": 0.1},
-                    }
-                }
-            },
-        )
+        return decision_response()
 
     config = make_config()
-    config = config.model_copy(
+    questions = dict(config.decision.questions)
+    questions["mandatory_missing"] = questions["mandatory_missing"].model_copy(
         update={
-            "decision": config.decision.model_copy(
-                update={
-                    "criteria": {"подходит": "МОЙ КРИТЕРИЙ", "не подходит": "МОЙ АНТИКРИТЕРИЙ"}
-                }
-            )
+            "instructions": "МОЙ ВОПРОС",
+            "criteria": {"true": "МОЙ КРИТЕРИЙ", "false": "МОЙ АНТИКРИТЕРИЙ"},
         }
+    )
+    config = config.model_copy(
+        update={"decision": config.decision.model_copy(update={"questions": questions})}
     )
 
     with LLMClient(config, transport=httpx.MockTransport(handler)) as client:
         client.decide(PROFILE, VACANCY)
 
-    assert captured["payload"]["questions"]["fit"]["criteria"] == {
-        "подходит": "МОЙ КРИТЕРИЙ",
-        "не подходит": "МОЙ АНТИКРИТЕРИЙ",
-    }
+    sent = captured["payload"]["questions"]["mandatory_missing"]
+    assert sent["instructions"] == "МОЙ ВОПРОС"
+    assert sent["criteria"] == {"true": "МОЙ КРИТЕРИЙ", "false": "МОЙ АНТИКРИТЕРИЙ"}
 
 
 def test_explain_rejection_is_cheap_and_single_line() -> None:

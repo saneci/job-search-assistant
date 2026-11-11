@@ -485,7 +485,9 @@ _LEVELS = ("a1", "a2", "b1", "b2", "c1", "c2", "native")
 _QUESTION_LEVEL_RE = re.compile(
     r"\b(a1|a2|b1|b2|c1|c2)\b|свободн\w*|продвинут\w*|средн\w*|начальн\w*|родной", re.IGNORECASE
 )
-_PROFILE_LANGUAGES_RE = re.compile(r"([a-zа-я]{2})\s*[:=]\s*([a-zа-я0-9]+)", re.IGNORECASE)
+_PROFILE_LANGUAGES_RE = re.compile(
+    r"([a-zа-я]{2})[\"']?\s*[:=]\s*[\"']?([a-zа-я0-9]+)", re.IGNORECASE
+)
 _LANGUAGE_CODES = {
     "англ": "en",
     "english": "en",
@@ -1006,6 +1008,11 @@ def _language_code(text: str) -> str:
         if word in lowered:
             return code
     return ""
+
+
+def language_level(languages: str, code: str = "en") -> str:
+    """Уровень языка из строки профиля: «en: b1» или «{'en': 'b1'}»."""
+    return _profile_level(languages, code)
 
 
 def _profile_level(languages: str, code: str) -> str:

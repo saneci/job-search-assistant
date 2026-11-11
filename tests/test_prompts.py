@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import pytest
+
 from agent.models import VacancyDetails
 from agent.profile import Profile
 from agent.prompts import (
     build_user_prompt,
     detect_required_opening,
     opening_from_text,
+    profile_facts,
     requires_project_links,
+    split_requirements,
+    years_text,
 )
 
 PROFILE = Profile(text="Java-разработчик", examples="- пример", style_rules="Коротко")
@@ -107,3 +112,71 @@ def test_user_prompt_without_requirement_has_no_projects_hint() -> None:
 
     assert "ТРЕБОВАНИЕ ВАКАНСИИ К ПРОЕКТАМ" not in prompt
 
+
+
+def test_requirements_block_is_extracted_by_heading() -> None:
+    """Блок «Требования» берётся из тела вакансии, а не из шапки сайта."""
+    description = (
+        "Ищем разработчика.\n\n"
+        "Обязанности\nРазработка сервисов\n\n"
+        "Требования\nопыт коммерческой разработки с Java от 3 лет\n"
+        "знание JavaScript/TypeScript\n\n"
+        "Будет плюсом\nреальный опыт с React\n\n"
+        "Условия\nгибридный формат"
+    )
+
+    result = split_requirements(description)
+
+    assert result.mandatory == (
+        "опыт коммерческой разработки с Java от 3 лет\nзнание JavaScript/TypeScript"
+    )
+    assert result.optional == "реальный опыт с React"
+
+
+def test_requirements_synonyms_and_inline_text() -> None:
+    """Синонимы заголовка и строка «Требования: ...» тоже дают блок требований."""
+    assert split_requirements(
+        "Что мы ждём от кандидата\nJava, Spring\n\nУсловия\nофис"
+    ).mandatory == "Java, Spring"
+    assert split_requirements("Обязательные требования:\nJava, Kafka").mandatory == (
+        "Java, Kafka"
+    )
+    assert split_requirements("Кого ищем\nJava-разработчика").mandatory == "Java-разработчика"
+    assert split_requirements("Требования: опыт от 5 лет, Java, UML").mandatory == (
+        "опыт от 5 лет, Java, UML"
+    )
+
+
+def test_requirements_block_absent() -> None:
+    """Без заголовка блок пустой: Decision получает полное описание."""
+    result = split_requirements("Spring Boot, Kafka, PostgreSQL.")
+
+    assert result.mandatory == ""
+    assert result.optional == ""
+
+
+def test_profile_facts_use_questionnaire_numbers() -> None:
+    """Факты профиля — числа из анкеты и правило «нет в профиле — нет опыта»."""
+    profile = Profile(
+        text="Java-разработчик",
+        examples="",
+        style_rules="",
+        experience_total_years=11,
+        experience_role_years=2.5,
+        english_level="b1",
+    )
+
+    facts = profile_facts(profile)
+
+    assert "всего опыта в IT: 11 лет" in facts
+    assert "опыт в роли разработчика: 2.5 года" in facts
+    assert "английский: b1" in facts
+    assert "чего нет в тексте профиля" in facts
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    ((2.5, "2.5 года"), (11, "11 лет"), (1, "1 год"), (21, "21 год"), (0.5, "0.5 года")),
+)
+def test_years_text(value: float, expected: str) -> None:
+    assert years_text(value) == expected

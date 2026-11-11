@@ -22,6 +22,7 @@ from agent.logging_setup import RunLogger
 from agent.models import (
     ARCHIVE_REASON,
     ERROR_REPORT_REASON,
+    INTERRUPTED_REASON,
     NOT_FIT_REPORT_REASON,
     REJECTED_REASON,
     SENT_REPORT_REASON,
@@ -384,18 +385,17 @@ def test_non_verbose_shows_vacancy_processed_by_llm(
         company=card.company,
         salary="",
         description="Java, Spring, PostgreSQL.",
-        blocker="other_resume",
     )
     monkeypatch.setattr("agent.pipeline.open_vacancy", lambda page, vacancy: details)
 
     class FakeLLM:
         def decide(self, profile, vacancy):
             return DecisionResult(
-                fits=True,
-                probability=0.99,
+                fits=False,
+                probability=0.1,
                 threshold=0.8,
-                probabilities={"подходит": 0.99, "не подходит": 0.01},
-                chosen="подходит",
+                probabilities={"подходит": 0.1, "не подходит": 0.9},
+                chosen="не подходит",
             )
 
     logger = RunLogger(tmp_path / "logs", run_id="quiet-llm", verbose=False)
@@ -504,8 +504,8 @@ def test_other_resume_fit_is_queued(tmp_path: Path, monkeypatch) -> None:
     ]
 
 
-def test_other_resume_not_fit_is_skipped(tmp_path: Path, monkeypatch) -> None:
-    """Если вакансия не подходит, отклик другого резюме не повод её откладывать."""
+def test_other_resume_is_queued_without_llm(tmp_path: Path, monkeypatch) -> None:
+    """Отклик уже есть у другого резюме: Decision не вызываем, вакансия в очереди."""
     config = make_config(tmp_path)
     card = VacancyCard(title="Java", company="Ozon", url="https://hh.ru/vacancy/139016311")
     details = VacancyDetails(
@@ -520,34 +520,24 @@ def test_other_resume_not_fit_is_skipped(tmp_path: Path, monkeypatch) -> None:
 
     class FakeLLM:
         def decide(self, profile, vacancy):
-            return DecisionResult(
-                fits=False,
-                probability=0.4,
-                threshold=0.8,
-                probabilities={"подходит": 0.4, "не подходит": 0.6},
-                chosen="не подходит",
-            )
-
-        def explain_rejection(self, profile, vacancy, probability, threshold):
-            del profile, vacancy, probability, threshold
-            return ""
+            raise AssertionError("по вакансии с откликом другого резюме LLM не нужен")
 
     stats = make_stats()
-    logger = RunLogger(tmp_path / "logs", run_id="other-resume-not-fit")
+    logger = RunLogger(tmp_path / "logs", run_id="other-resume-no-llm")
     _process_vacancy(
         None,  # type: ignore[arg-type]
         config,
         Profile(text="Java", examples="", style_rules=""),
-        FakeLLM(),
+        FakeLLM(),  # type: ignore[arg-type]
         stats,
         logger,
         card,
     )
     logger.close()
 
-    assert stats.queued == []
-    assert [item.reason for item in stats.skipped] == [
-        "вероятность 0.40 не выше порога 0.80"
+    assert stats.skipped == []
+    assert [item["reason"] for item in stats.queued] == [
+        "Уже отправлен отклик по другому резюме"
     ]
 
 
@@ -2068,8 +2058,8 @@ def test_retry_does_not_wait_between_records(tmp_path: Path, monkeypatch) -> Non
     assert pauses == []
 
 
-def test_llm_skip_does_not_wait_pause(tmp_path: Path, monkeypatch) -> None:
-    """Вакансия не подошла по оценке LLM — паузы нет: ждём только перед откликом."""
+def test_pause_happens_before_decision(tmp_path: Path, monkeypatch) -> None:
+    """Перед оценкой LLM ждём как человек: иначе капча вылетает каждые 5-10 минут."""
     config = make_config(tmp_path)
     details = VacancyDetails(
         url="https://hh.ru/vacancy/138836233",
@@ -2113,7 +2103,7 @@ def test_llm_skip_does_not_wait_pause(tmp_path: Path, monkeypatch) -> None:
     )
     logger.close()
 
-    assert pauses == []
+    assert pauses == ["перед обработкой новой вакансии"]
     assert len(stats.skipped) == 1
 
 
@@ -2165,6 +2155,113 @@ def test_probability_equal_threshold_is_skipped(tmp_path: Path, monkeypatch) -> 
     assert [item.reason for item in stats.skipped] == [
         "вероятность 0.80 не выше порога 0.80"
     ]
+
+
+def _config_with_explanations(config: AppConfig) -> AppConfig:
+    """Конфиг как в рабочем config.yaml: отказы объясняются дешёвым Chat-вызовом."""
+    decision = config.llm.decision.model_copy(update={"explain_rejections": True})
+    llm = config.llm.model_copy(update={"decision": decision})
+    return config.model_copy(update={"llm": llm})
+
+
+def test_not_fit_keeps_human_verdict_and_explanation_in_details(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """В отчёте: короткая метка, вердикт процентами и объяснение модели отдельным текстом."""
+    config = _config_with_explanations(make_config(tmp_path))
+    details = VacancyDetails(
+        url="https://hh.ru/vacancy/138833329",
+        title="Java-разработчик",
+        company="Ozon",
+        salary="",
+        description="Java, Spring Boot, PostgreSQL.",
+    )
+    monkeypatch.setattr("agent.pipeline.open_vacancy", lambda page, vacancy: details)
+    verdict = "Вакансия подходит на 21%, но это ниже требования 80%"
+    explanation = "Java и Spring Boot подтверждены профилем. Jira и Confluence не указаны."
+
+    class FakeLLM:
+        def decide(self, profile, vacancy):
+            return DecisionResult(
+                fits=False,
+                probability=0.21,
+                threshold=0.8,
+                probabilities={"подходит": 0.21, "не подходит": 0.79},
+                chosen="не подходит",
+                reason=verdict,
+            )
+
+        def explain_rejection(self, profile, vacancy, probability, threshold):
+            del profile, vacancy, probability, threshold
+            return explanation
+
+    stats = make_stats()
+    logger = RunLogger(tmp_path / "logs", run_id="not-fit-verdict")
+    card = VacancyCard(title=details.title, company=details.company, url=details.url)
+
+    _process_vacancy(
+        _FakePage(details.url),
+        config,
+        Profile(text="Java", examples="", style_rules=""),
+        FakeLLM(),
+        stats,
+        logger,
+        card,
+    )
+    logger.close()
+
+    item = stats.skipped[0]
+    assert item.report_reason == NOT_FIT_REPORT_REASON
+    assert item.decision_reason == verdict
+    assert item.report_message == explanation
+    assert item.reason == explanation
+
+
+def test_not_fit_without_explanation_has_no_details(tmp_path: Path, monkeypatch) -> None:
+    """Без объяснения «Подробности» пустые: техническая причина в окно деталей не идёт."""
+    config = make_config(tmp_path)
+    details = VacancyDetails(
+        url="https://hh.ru/vacancy/138833329",
+        title="Java-разработчик",
+        company="Ozon",
+        salary="",
+        description="Java, Spring Boot, PostgreSQL.",
+    )
+    monkeypatch.setattr("agent.pipeline.open_vacancy", lambda page, vacancy: details)
+
+    class FakeLLM:
+        def decide(self, profile, vacancy):
+            return DecisionResult(
+                fits=False,
+                probability=0.21,
+                threshold=0.8,
+                probabilities={"подходит": 0.21, "не подходит": 0.79},
+                chosen="не подходит",
+                reason="Вакансия подходит на 21%, но это ниже требования 80%",
+            )
+
+        def explain_rejection(self, profile, vacancy, probability, threshold):
+            raise AssertionError("объяснение выключено в конфиге")
+
+    stats = make_stats()
+    logger = RunLogger(tmp_path / "logs", run_id="not-fit-no-details")
+    card = VacancyCard(title=details.title, company=details.company, url=details.url)
+
+    _process_vacancy(
+        _FakePage(details.url),
+        config,
+        Profile(text="Java", examples="", style_rules=""),
+        FakeLLM(),
+        stats,
+        logger,
+        card,
+    )
+    logger.close()
+
+    item = stats.skipped[0]
+    assert item.reason == "вероятность 0.21 не выше порога 0.80"
+    assert item.decision_reason == "Вакансия подходит на 21%, но это ниже требования 80%"
+    assert item.report_message == ""
 
 
 def test_pause_happens_before_response(tmp_path: Path, monkeypatch) -> None:
@@ -2222,7 +2319,7 @@ def test_pause_happens_before_response(tmp_path: Path, monkeypatch) -> None:
     )
     logger.close()
 
-    assert order == ["перед отправкой отклика", "respond", "после отправки отклика"]
+    assert order == ["перед обработкой новой вакансии", "перед отправкой отклика", "respond"]
 
 
 def test_sent_vacancy_reason_is_generation_verdict(tmp_path: Path, monkeypatch) -> None:
@@ -2290,10 +2387,10 @@ def test_sent_vacancy_reason_is_generation_verdict(tmp_path: Path, monkeypatch) 
     )
 
 
-def test_sent_vacancy_keeps_cover_letter_in_report(
+def test_sent_vacancy_has_no_cover_letter_in_report(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """Сопроводительное письмо попадает в запись дневного отчёта."""
+    """Письмо отправленной вакансии в отчёт не пишем: оно нужно только для ручного отклика."""
     config = make_config(tmp_path)
     card = VacancyCard(
         title="Java-разработчик",
@@ -2309,6 +2406,7 @@ def test_sent_vacancy_keeps_cover_letter_in_report(
     )
     monkeypatch.setattr("agent.pipeline.open_vacancy", lambda page, vacancy: details)
     letter = "Здравствуйте! Готов обсудить вакансию."
+    decision_reason = "Подходит: совпадение стека 0.95"
 
     class FakeLLM:
         def decide(self, profile, vacancy):
@@ -2318,6 +2416,7 @@ def test_sent_vacancy_keeps_cover_letter_in_report(
                 threshold=0.8,
                 probabilities={"подходит": 0.95, "не подходит": 0.05},
                 chosen="подходит",
+                reason=decision_reason,
             )
 
         def generate(self, profile, vacancy, max_length=1500, signature=""):
@@ -2349,7 +2448,70 @@ def test_sent_vacancy_keeps_cover_letter_in_report(
 
     row = json.loads(store.path.read_text(encoding="utf-8"))["vacancies"][0]
     assert row["status"] == "sent"
+    assert "cover_letter" not in row
+    assert row["probability"] == 0.95
+    assert row["decision_reason"] == decision_reason
+
+
+def test_queued_vacancy_keeps_letter_and_decision(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Отложенной вакансии письмо и вердикт нужны: человек отвечает по ним руками."""
+    config = make_config(tmp_path)
+    card = VacancyCard(
+        title="Java-разработчик",
+        company="ППК",
+        url="https://hh.ru/vacancy/138836233",
+    )
+    details = VacancyDetails(
+        url=card.url,
+        title=card.title,
+        company=card.company,
+        salary="",
+        description="Приложите ссылку на проект в сопроводительном письме.",
+    )
+    monkeypatch.setattr("agent.pipeline.open_vacancy", lambda page, vacancy: details)
+    letter = "Здравствуйте! Готов обсудить вакансию."
+    decision_reason = "Подходит: совпадение стека 0.95"
+
+    class FakeLLM:
+        def decide(self, profile, vacancy):
+            return DecisionResult(
+                fits=True,
+                probability=0.95,
+                threshold=0.8,
+                probabilities={"подходит": 0.95, "не подходит": 0.05},
+                chosen="подходит",
+                reason=decision_reason,
+            )
+
+        def generate(self, profile, vacancy, max_length=1500, signature=""):
+            del profile, vacancy, max_length, signature
+            return GenerationResult(verdict="подходит", reason="ok", cover_letter=letter)
+
+    monkeypatch.setattr("agent.pipeline._pause", lambda config, logger, reason: None)
+    stats = make_stats()
+    logger = RunLogger(tmp_path / "logs", run_id="queued-letter")
+    store = ProcessedStore(tmp_path / "report", today=date.today())
+
+    _process_and_remember(
+        None,  # type: ignore[arg-type]
+        config,
+        Profile(text="Java", examples="", style_rules=""),
+        FakeLLM(),
+        stats,
+        logger,
+        store,
+        card,
+        channel_for(config),
+    )
+    logger.close()
+
+    row = json.loads(store.path.read_text(encoding="utf-8"))["vacancies"][0]
+    assert row["status"] == "queued"
     assert row["cover_letter"] == letter
+    assert row["probability"] == 0.95
+    assert row["decision_reason"] == decision_reason
 
 
 def test_empty_cover_letter_keeps_full_verdict_in_details(
@@ -2529,7 +2691,7 @@ def test_retry_pauses_before_response(tmp_path: Path, monkeypatch) -> None:
     )
     logger.close()
 
-    assert order == ["перед отправкой отклика", "respond", "после отправки отклика"]
+    assert order == ["перед обработкой новой вакансии", "перед отправкой отклика", "respond"]
 
 
 def test_retry_statuses_take_config_or_explicit_value(tmp_path: Path) -> None:
@@ -2998,14 +3160,16 @@ def test_interrupted_vacancy_is_saved_to_report(tmp_path: Path, monkeypatch) -> 
 
     row = store.find_record(card.title, card.company, card.url, "Java Developer")
     assert row is not None
-    assert row["status"] == "queued"
-    assert row["reason"] == QUEUE_REASON_TEXTS["interrupted"]
+    assert row["status"] == "error"
+    assert row["reason"] == INTERRUPTED_REASON
+    assert row["message"] == INTERRUPTED_REASON
     assert row["run_id"] == "run-interrupted"
-    assert len(stats.queued) == 1
+    assert len(stats.errors) == 1
+    assert stats.queued == []
     events = [
         json.loads(line) for line in logger.events_path.read_text(encoding="utf-8").splitlines()
     ]
-    assert [item.get("code") for item in events if item["event"] == "queued"] == ["interrupted"]
+    assert [item["event"] for item in events].count("interrupted_vacancy") == 1
 
 
 def test_retry_counts_only_records_of_run_channel(
@@ -3186,7 +3350,6 @@ def test_image_only_description_is_transcribed_before_decision(
         company=card.company,
         salary="",
         description=fallback,
-        blocker="other_resume",
         description_images=("https://habrastorage.org/a.png",),
     )
     monkeypatch.setattr("agent.pipeline.open_vacancy", lambda page, vacancy: details)
@@ -3203,11 +3366,11 @@ def test_image_only_description_is_transcribed_before_decision(
         def decide(self, profile, vacancy):
             seen.append(vacancy.description)
             return DecisionResult(
-                fits=True,
-                probability=0.87,
+                fits=False,
+                probability=0.1,
                 threshold=0.8,
-                probabilities={"подходит": 0.87, "не подходит": 0.13},
-                chosen="подходит",
+                probabilities={"подходит": 0.1, "не подходит": 0.9},
+                chosen="не подходит",
             )
 
     logger = RunLogger(tmp_path / "logs", run_id="ocr-transcribed")
@@ -3245,7 +3408,6 @@ def test_image_transcription_failure_keeps_page_description(
         company=card.company,
         salary="",
         description=fallback,
-        blocker="other_resume",
         description_images=("https://habrastorage.org/a.png",),
     )
     monkeypatch.setattr("agent.pipeline.open_vacancy", lambda page, vacancy: details)
@@ -3314,7 +3476,6 @@ def test_image_only_description_with_disabled_ocr_is_not_transcribed(
         company=card.company,
         salary="",
         description="Требования: Бэкенд разработчик Middle Java",
-        blocker="other_resume",
         description_images=("https://habrastorage.org/a.png",),
     )
     monkeypatch.setattr("agent.pipeline.open_vacancy", lambda page, vacancy: details)

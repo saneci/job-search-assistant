@@ -77,17 +77,81 @@ DEFAULT_BASE_URL = "https://api.aitunnel.ru/v1"
 FIT_LABEL = "подходит"
 NOT_FIT_LABEL = "не подходит"
 
-# Критерии для Decision API. Значения по умолчанию; в config.yaml
-# (llm.decision.criteria) их можно переопределить — это единственный
-# источник числовых порогов и формулировок для модели решений.
-DEFAULT_FIT_CRITERIA = (
-    "Требования, обязанности, стек и условия вакансии совпадают с профилем "
-    "не менее чем на 70%, красных флагов нет"
+# Вопросы Decision API: одно суждение — один вопрос, итог считается в коде.
+DECISION_QUESTION_MANDATORY = "mandatory_missing"
+DECISION_QUESTION_EXPERIENCE = "experience_short"
+DECISION_QUESTION_STACK = "stack_match"
+DECISION_QUESTION_FLAGS = "red_flags"
+DECISION_QUESTION_NAMES = (
+    DECISION_QUESTION_MANDATORY,
+    DECISION_QUESTION_EXPERIENCE,
+    DECISION_QUESTION_STACK,
+    DECISION_QUESTION_FLAGS,
 )
-DEFAULT_NOT_FIT_CRITERIA = (
-    "Совпадение по ключевым требованиям менее 70%, другая специализация "
-    "или есть красные флаги"
-)
+
+# Значения по умолчанию; в config.yaml (llm.decision.questions) их можно
+# переопределить — это единственный источник формулировок для модели решений.
+DEFAULT_DECISION_QUESTIONS: dict[str, dict[str, object]] = {
+    DECISION_QUESTION_MANDATORY: {
+        "instructions": (
+            "В требованиях вакансии есть обязательное требование, которого нет "
+            "в профиле пользователя?"
+        ),
+        "criteria": {
+            "true": (
+                "Хотя бы один пункт блока «Требования» не подтверждён профилем: языка, "
+                "технологии, домена, сертификата или уровня английского у пользователя "
+                "нет, и смежного опыта профиль не называет"
+            ),
+            "false": (
+                "Все обязательные требования подтверждены профилем прямо или смежным "
+                "опытом, который в профиле назван"
+            ),
+        },
+    },
+    DECISION_QUESTION_EXPERIENCE: {
+        "instructions": (
+            "Требуемый в вакансии опыт работы существенно выше фактического опыта "
+            "пользователя в этой роли?"
+        ),
+        "criteria": {
+            "true": (
+                "Требуемый опыт в роли больше фактического больше чем на два года: например, "
+                "в вакансии 5 лет, а опыт в роли разработчика 2.5 года"
+            ),
+            "false": (
+                "Разница с фактическим опытом не больше двух лет (в том числе «от 3 лет» "
+                "при 2.5 года), требование к опыту не указано или опыт пользователя выше"
+            ),
+        },
+    },
+    DECISION_QUESTION_STACK: {
+        "instructions": (
+            "Ключевые технологии и обязанности вакансии подтверждены профилем?"
+        ),
+        "criteria": {
+            "true": (
+                "Большинство ключевых технологий и обязанностей из вакансии "
+                "подтверждены профилем"
+            ),
+            "false": (
+                "Половина и больше ключевых технологий или обязанностей в профиле "
+                "не подтверждены"
+            ),
+        },
+    },
+    DECISION_QUESTION_FLAGS: {
+        "instructions": "В вакансии есть красные флаги?",
+        "criteria": {
+            "true": (
+                "Размытые обязанности без конкретики, «работа за идею», неоплачиваемое "
+                "тестовое без сроков и условий, оплата только процентом и другие "
+                "признаки недобросовестного работодателя"
+            ),
+            "false": "Обязанности конкретные, условия обычные, красных флагов нет",
+        },
+    },
+}
 
 AREA_IDS: dict[str, int] = {
     "москва": 1,
@@ -120,9 +184,15 @@ class ConfigError(RuntimeError):
     """Некорректная конфигурация."""
 
 
-def default_decision_criteria() -> dict[str, str]:
-    """Критерии Decision API по умолчанию (переопределяются в config.yaml)."""
-    return {FIT_LABEL: DEFAULT_FIT_CRITERIA, NOT_FIT_LABEL: DEFAULT_NOT_FIT_CRITERIA}
+def default_decision_questions() -> dict[str, DecisionQuestionConfig]:
+    """Вопросы Decision API по умолчанию (переопределяются в config.yaml)."""
+    return {
+        name: DecisionQuestionConfig(
+            instructions=str(value["instructions"]),
+            criteria=dict(value["criteria"]),  # type: ignore[arg-type]
+        )
+        for name, value in DEFAULT_DECISION_QUESTIONS.items()
+    }
 
 
 # --- Примитивы схемы ------------------------------------------------------
@@ -326,25 +396,52 @@ def _area_id(value: Any) -> int:
         raise ValueError(str(exc)) from None
 
 
-def _decision_criteria(value: Any) -> dict[str, str]:
-    """Критерии Decision API: значения по умолчанию, переопределённые из конфига."""
-    criteria = default_decision_criteria()
+def _decision_questions(value: Any) -> dict[str, DecisionQuestionConfig]:
+    """Вопросы Decision API: значения по умолчанию, переопределённые из конфига."""
+    result = default_decision_questions()
     if value is None:
-        return criteria
+        return result
     if not isinstance(value, Mapping):
         raise ValueError(
-            "llm.decision.criteria должен быть словарём вида "
-            f"{{{FIT_LABEL}: '...', {NOT_FIT_LABEL}: '...'}}"
+            "llm.decision.questions должен быть словарём вида "
+            "{имя вопроса: {instructions: '...', criteria: {true: '...', false: '...'}}}"
         )
-    for label, text in value.items():
-        name = str(label).strip()
-        if name not in criteria:
+    for question, raw in value.items():
+        name = str(question).strip()
+        if name not in DECISION_QUESTION_NAMES:
             raise ValueError(
-                f"llm.decision.criteria: неизвестный вариант «{name}» "
-                f"(допустимо: {FIT_LABEL}, {NOT_FIT_LABEL})"
+                f"llm.decision.questions: неизвестный вопрос «{name}» "
+                f"(допустимо: {', '.join(DECISION_QUESTION_NAMES)})"
             )
-        criteria[name] = _str(text, f"llm.decision.criteria.{name}")
-    return criteria
+        if not isinstance(raw, Mapping):
+            raise ValueError(f"llm.decision.questions.{name} должен быть словарём")
+        instructions = _str(
+            raw.get("instructions"), f"llm.decision.questions.{name}.instructions"
+        )
+        criteria = raw.get("criteria")
+        if not isinstance(criteria, Mapping):
+            raise ValueError(
+                f"llm.decision.questions.{name}.criteria должен быть словарём "
+                "{true: '...', false: '...'}"
+            )
+        normalized = {str(key).strip().lower(): value for key, value in criteria.items()}
+        unknown = sorted(set(normalized) - {"true", "false"})
+        if unknown:
+            raise ValueError(
+                f"llm.decision.questions.{name}.criteria: неизвестные ключи "
+                f"{', '.join(unknown)} (допустимо: true, false)"
+            )
+        texts: dict[str, str] = {}
+        for label in ("true", "false"):
+            if label not in normalized:
+                raise ValueError(
+                    f"llm.decision.questions.{name}.criteria: нет ключа «{label}»"
+                )
+            texts[label] = _str(
+                normalized[label], f"llm.decision.questions.{name}.criteria.{label}"
+            )
+        result[name] = DecisionQuestionConfig(instructions=instructions, criteria=texts)
+    return result
 
 
 def _drop_path(data: dict[str, Any], path: str) -> None:
@@ -808,6 +905,15 @@ class PipelineConfig(BaseModel):
         return _positive_int(value, "pipeline.max_vacancies")
 
 
+class DecisionQuestionConfig(BaseModel):
+    """Один вопрос Decision API: утверждение и что считать «да» и «нет»."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    instructions: str
+    criteria: dict[str, str]
+
+
 class DecisionConfig(BaseModel):
     """Параметры Decision-вызова (модель решений)."""
 
@@ -815,7 +921,11 @@ class DecisionConfig(BaseModel):
 
     model: str = "gpt-6-luna-decisions"
     threshold: float = 0.8
-    criteria: dict[str, str] = Field(default_factory=default_decision_criteria)
+    # Блокером считается проверка с вероятностью не ниже этого порога.
+    blocker_threshold: float = 0.5
+    questions: dict[str, DecisionQuestionConfig] = Field(
+        default_factory=default_decision_questions
+    )
     explain_rejections: bool = False
 
     @field_validator("model", mode="before")
@@ -831,10 +941,20 @@ class DecisionConfig(BaseModel):
             raise ValueError("llm.decision.threshold должен быть в диапазоне (0, 1]")
         return number
 
-    @field_validator("criteria", mode="before")
+    @field_validator("blocker_threshold", mode="before")
     @classmethod
-    def _criteria(cls, value: Any) -> dict[str, str]:
-        return _decision_criteria(value)
+    def _blocker_threshold(cls, value: Any) -> float:
+        number = _as_float(value)
+        if not 0 < number <= 1:
+            raise ValueError(
+                "llm.decision.blocker_threshold должен быть в диапазоне (0, 1]"
+            )
+        return number
+
+    @field_validator("questions", mode="before")
+    @classmethod
+    def _questions(cls, value: Any) -> dict[str, DecisionQuestionConfig]:
+        return _decision_questions(value)
 
     @field_validator("explain_rejections", mode="before")
     @classmethod

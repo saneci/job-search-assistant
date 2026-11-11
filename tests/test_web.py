@@ -264,6 +264,17 @@ def test_report_page_has_site_nav_and_details_dialog(client: TestClient) -> None
     assert "currentStatus === 'skipped'" in response.text
 
 
+def test_report_details_show_llm_verdict_without_probability_row(
+    client: TestClient,
+) -> None:
+    """В окне деталей есть решение LLM, отдельного поля «Вероятность» больше нет."""
+    response = client.get("/report")
+
+    assert response.status_code == 200
+    assert "addDetailRow(dl, 'Решение LLM'" in response.text
+    assert "addDetailRow(dl, 'Вероятность'" not in response.text
+
+
 def test_index_has_site_nav(client: TestClient) -> None:
     """С главной страницы в отчёты можно перейти из шапки, а не только по карточке."""
     response = client.get("/")

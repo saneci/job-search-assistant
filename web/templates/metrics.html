@@ -87,14 +87,12 @@
                     <div class="metric-card card-response">
                         <div class="label">Конверсия в отклик</div>
                         <div class="value">{{ metrics.rate_text.response }}</div>
-                        <div class="sub">{{ metrics.responses }} {{ metrics.words.responses }}
-                            из {{ metrics.total }} {{ metrics.words.vacancies_genitive }}</div>
+                        <div class="sub">{{ metrics.responses }} {{ metrics.words.responses }} из {{ metrics.total }} {{ metrics.words.vacancies_genitive }}</div>
                     </div>
                     <div class="metric-card card-offer">
                         <div class="label">Конверсия в оффер</div>
                         <div class="value">{{ metrics.rate_text.offer }}</div>
-                        <div class="sub">{{ metrics.offers }} {{ metrics.words.offers }}
-                            из {{ metrics.responses }}</div>
+                        <div class="sub">{{ metrics.offers }} {{ metrics.words.offers }} из {{ metrics.responses }}</div>
                     </div>
                     <div class="metric-card card-rejected">
                         <div class="label">Доля отказов</div>
@@ -168,8 +166,7 @@
                                             <div class="stack-segment"
                                                  style="width: {{ item.percent }}%; background: {{ item.color }};"
                                                  title="{{ item.label }}: {{ item.count }}">
-                                                {% if item.percent >= 10 %}
-                                                    <span>{{ item.percent_text }}</span>{% endif %}
+                                                {% if item.percent >= 10 %}<span>{{ item.percent_text }}</span>{% endif %}
                                             </div>
                                         {% endfor %}
                                     </div>
@@ -197,8 +194,7 @@
                                             <div class="stack-segment"
                                                  style="width: {{ item.percent }}%; background: {{ item.color }};"
                                                  title="{{ item.label }}: {{ item.count }}">
-                                                {% if item.percent >= 10 %}
-                                                    <span>{{ item.percent_text }}</span>{% endif %}
+                                                {% if item.percent >= 10 %}<span>{{ item.percent_text }}</span>{% endif %}
                                             </div>
                                         {% endfor %}
                                     </div>

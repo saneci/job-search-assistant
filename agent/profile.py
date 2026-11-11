@@ -23,6 +23,10 @@ class Profile:
     examples: str
     style_rules: str
     name: str = ""
+    # Факты для оценки вакансии: числа берутся из анкеты hh.
+    experience_total_years: float | None = None
+    experience_role_years: float | None = None
+    english_level: str = ""
 
 
 _HEADING_RE = re.compile(r"^(?P<level>#{1,6})\s+(?P<title>.+?)\s*$", re.MULTILINE)

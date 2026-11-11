@@ -313,3 +313,83 @@ def test_pet_projects_are_not_read_from_environment(
 
     assert config.llm.cover_letter.pet_projects == ()
 
+
+
+def test_decision_questions_have_defaults(tmp_path: Path) -> None:
+    config = load_config(write_config(tmp_path))
+    questions = config.llm.decision.questions
+
+    assert set(questions) == {
+        "mandatory_missing",
+        "experience_short",
+        "stack_match",
+        "red_flags",
+    }
+    assert set(questions["mandatory_missing"].criteria) == {"true", "false"}
+
+
+def test_decision_questions_override_one_question(tmp_path: Path) -> None:
+    path = write_config(
+        tmp_path,
+        {
+            "llm": {
+                "decision": {
+                    "questions": {
+                        "stack_match": {
+                            "instructions": "МОЙ ВОПРОС",
+                            "criteria": {"true": "ДА", "false": "НЕТ"},
+                        }
+                    }
+                }
+            }
+        },
+    )
+
+    config = load_config(path)
+    question = config.llm.decision.questions["stack_match"]
+
+    assert question.instructions == "МОЙ ВОПРОС"
+    assert question.criteria == {"true": "ДА", "false": "НЕТ"}
+    assert "mandatory_missing" in config.llm.decision.questions
+
+
+def test_decision_questions_reject_unknown_name(tmp_path: Path) -> None:
+    path = write_config(
+        tmp_path,
+        {
+            "llm": {
+                "decision": {
+                    "questions": {
+                        "fit": {
+                            "instructions": "Подходит ли вакансия?",
+                            "criteria": {"true": "да", "false": "нет"},
+                        }
+                    }
+                }
+            }
+        },
+    )
+
+    with pytest.raises(ConfigError, match="неизвестный вопрос"):
+        load_config(path)
+
+
+def test_decision_questions_require_both_criteria(tmp_path: Path) -> None:
+    path = write_config(
+        tmp_path,
+        {
+            "llm": {
+                "decision": {
+                    "questions": {
+                        "stack_match": {
+                            "instructions": "Стек совпадает?",
+                            "criteria": {"true": "да"},
+                        }
+                    }
+                }
+            }
+        },
+    )
+
+    with pytest.raises(ConfigError, match="false"):
+        load_config(path)
