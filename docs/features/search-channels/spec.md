@@ -2,7 +2,7 @@
 
 ## Status
 
-`IN_PROGRESS`
+`DONE`
 
 ## Goal
 
