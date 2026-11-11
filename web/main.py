@@ -31,6 +31,7 @@ from .metrics import (
     CHANNEL_LABELS,
     build_metrics,
     dedupe_vacancies,
+    prefer_record,
     profile_key,
     profile_value,
 )
@@ -154,18 +155,34 @@ def current_report_path() -> Path:
     return REPORTS_DIR / f"{date.today().isoformat()}.json"
 
 
+def _same_record(row: Mapping[str, Any], url: str, profile: str | None) -> bool:
+    """Строка относится к этой вакансии и профилю.
+
+    Запись — это вакансия и профиль: у Habr профиль хранится в записи, поэтому
+    правка одной записи не удаляет записи, сделанные другим профилем.
+    """
+    if str(row.get("url", "")) != url:
+        return False
+    if profile is None:
+        return True
+    return profile_key(row) == profile
+
+
 def find_vacancy(url: str, profile: str | None = None) -> dict[str, Any] | None:
-    """Первая запись вакансии с этим резюме во всех отчётах."""
+    """Запись вакансии с этим профилем: архивная терминальнее, иначе самая свежая.
+
+    Архивную копию выбираем и тогда, когда рядом осталась рабочая: архив
+    закрывает вакансию целиком, и правка не должна её переоткрывать.
+    """
     wanted = None if profile is None else profile_value(profile)
+    best: dict[str, Any] | None = None
     for path in report_files():
         for vacancy in read_report(path)["vacancies"]:
-            if (
-                isinstance(vacancy, dict)
-                and str(vacancy.get("url", "")) == url
-                and (wanted is None or profile_key(vacancy) == wanted)
-            ):
-                return vacancy
-    return None
+            if not isinstance(vacancy, dict) or not _same_record(vacancy, url, wanted):
+                continue
+            if best is None or prefer_record(vacancy, best):
+                best = vacancy
+    return best
 
 
 
@@ -712,9 +729,10 @@ async def update_status(update: StatusUpdate) -> dict[str, Any]:
         vacancy["created_at"] = str(
             vacancy.get("created_at") or vacancy.get("updated_at") or changed_at
         )
-        if str(vacancy.get("channel", "")) in ("habr", "external"):
+        channel = str(vacancy.get("channel", ""))
+        if channel == "external":
             vacancy.pop("profile", None)
-        else:
+        elif channel != "habr" or vacancy.get("profile"):
             vacancy["profile"] = str(vacancy.get("profile") or "")
         vacancy["updated_at"] = changed_at
         if update.status == STATUS_ARCHIVED:
@@ -736,15 +754,13 @@ async def update_status(update: StatusUpdate) -> dict[str, Any]:
                 # или объяснение прежнего статуса, и оно остаётся в отчёте.
                 vacancy["attempts"] = int(vacancy.get("attempts", 0)) + 1
 
+        wanted = None if update.profile is None else profile_value(update.profile)
         for path in report_files():
             data = read_report(path)
-            wanted = None if update.profile is None else profile_value(update.profile)
             rows = [
                 row
                 for row in data["vacancies"]
-                if not isinstance(row, dict)
-                or str(row.get("url", "")) != update.url
-                or (wanted is not None and profile_key(row) != wanted)
+                if not isinstance(row, dict) or not _same_record(row, update.url, wanted)
             ]
             if len(rows) != len(data["vacancies"]):
                 data["vacancies"] = rows

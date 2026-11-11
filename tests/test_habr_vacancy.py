@@ -39,11 +39,13 @@ class FakeElement:
         visible: bool = True,
         mapping: dict[str, list["FakeElement"]] | None = None,
         present: bool = True,
+        attrs: dict[str, str] | None = None,
     ) -> None:
         self._text = text
         self._visible = visible
         self._present = present
         self._mapping = mapping or {}
+        self._attrs = attrs or {}
 
     @property
     def first(self) -> "FakeElement":
@@ -57,6 +59,9 @@ class FakeElement:
 
     def inner_text(self) -> str:
         return self._text
+
+    def get_attribute(self, name: str) -> str:
+        return self._attrs.get(name, "")
 
     def locator(self, selector: str) -> FakeList:
         return FakeList(self._mapping.get(selector, []))
@@ -186,6 +191,85 @@ def test_external_response_is_a_blocker() -> None:
     )
 
     assert detect_page_blocker(page) == "external_form"
+
+
+def test_description_falls_back_to_requirements_and_conditions() -> None:
+    """Описание картинками: текст собирается из требований, условий и мета-описания."""
+    page = FakePage(
+        mapping={
+            ".vacancy-description__text": [FakeElement("")],
+            "meta[name='description']": [
+                FakeElement(attrs={"content": "Вакансия удалённо в компании IRLIX."})
+            ],
+            ".content-section": [
+                FakeElement(
+                    mapping={
+                        ".content-section__title": [FakeElement("Требования")],
+                        ".vacancy-meta": [FakeElement("Бэкенд разработчик Middle Java")],
+                    }
+                ),
+                FakeElement(
+                    mapping={
+                        ".content-section__title": [FakeElement("Условия")],
+                        ".vacancy-meta": [FakeElement("Можно удалённо")],
+                    }
+                ),
+            ],
+        }
+    )
+
+    details = open_vacancy(page, VacancyCard(title="Java", company="IRLIX", url=page.url))  # type: ignore[arg-type]
+
+    assert "Требования: Бэкенд разработчик Middle Java" in details.description
+    assert "Условия: Можно удалённо" in details.description
+    assert "Вакансия удалённо" in details.description
+
+
+def test_description_images_are_collected_when_text_is_missing() -> None:
+    """Описание картинками: адреса изображений из блока описания попадают в данные вакансии."""
+    page = FakePage(
+        mapping={
+            ".vacancy-description__text": [
+                FakeElement(
+                    mapping={
+                        "img": [
+                            FakeElement(attrs={"src": "https://habrastorage.org/a.png"}),
+                            FakeElement(attrs={"src": "https://habrastorage.org/b.png"}),
+                        ]
+                    }
+                )
+            ],
+            "meta[name='description']": [
+                FakeElement(attrs={"content": "Вакансия удалённо в компании IRLIX."})
+            ],
+        }
+    )
+
+    details = open_vacancy(page, VacancyCard(title="Java", company="IRLIX", url=page.url))  # type: ignore[arg-type]
+
+    assert details.description_images == (
+        "https://habrastorage.org/a.png",
+        "https://habrastorage.org/b.png",
+    )
+
+
+def test_description_images_are_empty_when_text_exists() -> None:
+    """Текст описания на месте: картинки к нему не примешиваются."""
+    page = FakePage(
+        mapping={
+            ".vacancy-description__text": [
+                FakeElement(
+                    "Обязанности: разработка сервисов на Java.",
+                    mapping={"img": [FakeElement(attrs={"src": "https://habrastorage.org/a.png"})]},
+                )
+            ]
+        }
+    )
+
+    details = open_vacancy(page, VacancyCard(title="Java", company="IRLIX", url=page.url))  # type: ignore[arg-type]
+
+    assert details.description == "Обязанности: разработка сервисов на Java."
+    assert details.description_images == ()
 
 
 def test_already_responded_status() -> None:

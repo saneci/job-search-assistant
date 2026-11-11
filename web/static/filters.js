@@ -12,8 +12,9 @@
     // а отдельный признак, поэтому у записи остаётся прежний status.
     const ARCHIVED_STATUS = 'archived';
 
-    // Каналы записи. `unknown` — записи старых отчётов без поля channel.
-    const CHANNELS = new Set(['all', 'hh', 'habr', 'external', 'unknown']);
+    // Каналы, которые можно выбрать фильтром. Записи старых отчётов без поля
+    // channel получают `unknown` только для вывода и в фильтр не попадают.
+    const CHANNELS = new Set(['all', 'hh', 'habr', 'external']);
     const URL_KEYS = ['status', 'channel', 'q', 'date', 'dates'];
 
     function defaultFilters() {
@@ -46,14 +47,16 @@
     }
 
     /* Фильтры выбраны, если задан статус, источник или текст поиска. Даты в это
-       не входят: кнопка сброса на них не реагирует, но в сохранённом состоянии
-       они остаются, поэтому у записи в хранилище свой флаг includeFiles. */
+       не входят по умолчанию: кнопка сброса реагирует на них только с флагом
+       includeFiles, чтобы не включаться от состояния хранилища. Снятые даты —
+       тоже выбор дат: отчёт пуст, и сброс должен вернуть все дни. */
     function hasSelectedFilters(filters, options) {
         const withFiles = Boolean(options && options.includeFiles === true);
         const facetsSelected = filters.status !== 'all'
             || filters.channel !== 'all'
             || filters.query !== '';
-        return facetsSelected || (withFiles && filters.files.length > 0);
+        const datesSelected = filters.files.length > 0 || filters.datesNone === true;
+        return facetsSelected || (withFiles && datesSelected);
     }
 
     function matchesQuery(vacancy, query) {

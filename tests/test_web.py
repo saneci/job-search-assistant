@@ -264,6 +264,17 @@ def test_report_page_has_site_nav_and_details_dialog(client: TestClient) -> None
     assert "currentStatus === 'skipped'" in response.text
 
 
+def test_report_details_show_llm_verdict_without_probability_row(
+    client: TestClient,
+) -> None:
+    """В окне деталей есть решение LLM, отдельного поля «Вероятность» больше нет."""
+    response = client.get("/report")
+
+    assert response.status_code == 200
+    assert "addDetailRow(dl, 'Решение LLM'" in response.text
+    assert "addDetailRow(dl, 'Вероятность'" not in response.text
+
+
 def test_index_has_site_nav(client: TestClient) -> None:
     """С главной страницы в отчёты можно перейти из шапки, а не только по карточке."""
     response = client.get("/")
@@ -272,6 +283,14 @@ def test_index_has_site_nav(client: TestClient) -> None:
     assert 'class="site-nav"' in response.text
     assert 'aria-current="page"' in response.text
     assert 'href="/report"' in response.text
+
+
+def test_report_details_have_cover_letter_block(client: TestClient) -> None:
+    """В окне деталей есть блок «Сопроводительное письмо»."""
+    response = client.get("/report")
+
+    assert response.status_code == 200
+    assert "Сопроводительное письмо" in response.text
 
 
 def test_report_page_has_offer_status(client: TestClient) -> None:
@@ -294,6 +313,14 @@ def test_report_page_warns_about_terminal_status(client: TestClient) -> None:
     assert "TERMINAL_STATUSES" in response.text
 
 
+def test_report_details_modal_is_wide(client: TestClient) -> None:
+    """Окно деталей шире обычной модалки примерно на 20% с каждой стороны."""
+    css = client.get("/static/report.css").text
+
+    assert ".modal-card--wide" in css
+    assert "max-width: 1064px" in css
+
+
 def test_report_filters_are_single_row_menus(client: TestClient) -> None:
     """Фильтры отчёта — одна линия: сброс, дата, статус, источник, поиск, счётчик."""
     response = client.get("/report")
@@ -311,6 +338,8 @@ def test_report_filters_are_single_row_menus(client: TestClient) -> None:
     assert "header-filters" not in html
     assert 'id="statusMenu"' in html and 'data-status="skipped"' in html
     assert 'id="channelMenu"' in html and 'data-channel="habr"' in html
+    # Пункта «Без канала» нет: новые записи всегда имеют источник, старые видны в «Все».
+    assert 'data-channel="unknown"' not in html
 
 
 def test_update_status_keeps_created_at(
@@ -465,6 +494,82 @@ def test_update_status_keeps_habr_without_profile(
     assert response.status_code == 200
     data = json.loads(today.read_text(encoding="utf-8"))
     assert "profile" not in data["vacancies"][0]
+
+
+def test_update_status_keeps_habr_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ручная правка статуса Habr не затирает профиль записи."""
+    monkeypatch.setattr(web_main, "REPORTS_DIR", tmp_path)
+    today = tmp_path / "today.json"
+    monkeypatch.setattr(web_main, "current_report_path", lambda: today)
+    item = vacancy_with_dates(
+        "1", "sent", "2026-10-24T10:00:00+03:00", "2026-10-24T10:00:00+03:00"
+    )
+    item["url"] = "https://career.habr.com/vacancies/1"
+    item["channel"] = "habr"
+    item["profile"] = "Профиль Habr"
+    write_report(tmp_path, "2026-10-24.json", [item])
+    client = TestClient(web_main.app)
+
+    response = client.post(
+        "/api/v1/update-status",
+        json={
+            "report_name": "2026-10-24.json",
+            "url": "https://career.habr.com/vacancies/1",
+            "profile": "Профиль Habr",
+            "status": "offer",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["profile"] == "Профиль Habr"
+    data = json.loads(today.read_text(encoding="utf-8"))
+    assert data["vacancies"][0]["profile"] == "Профиль Habr"
+
+
+def test_update_status_keeps_other_habr_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Правка статуса Habr не трогает запись той же вакансии у другого профиля."""
+    monkeypatch.setattr(web_main, "REPORTS_DIR", tmp_path)
+    today = tmp_path / "today.json"
+    monkeypatch.setattr(web_main, "current_report_path", lambda: today)
+    middle = vacancy_with_dates(
+        "1", "queued", "2026-10-24T10:00:00+03:00", "2026-10-24T10:00:00+03:00"
+    )
+    middle["url"] = "https://career.habr.com/vacancies/1"
+    middle["channel"] = "habr"
+    middle["profile"] = "Middle Java-разработчик"
+    senior = vacancy_with_dates(
+        "1", "sent", "2026-10-24T10:00:00+03:00", "2026-10-24T12:00:00+03:00"
+    )
+    senior["url"] = "https://career.habr.com/vacancies/1"
+    senior["channel"] = "habr"
+    senior["profile"] = "Senior Java-разработчик"
+    write_report(tmp_path, "2026-10-24.json", [middle, senior])
+    client = TestClient(web_main.app)
+
+    response = client.post(
+        "/api/v1/update-status",
+        json={
+            "report_name": "2026-10-24.json",
+            "url": "https://career.habr.com/vacancies/1",
+            "profile": "Senior Java-разработчик",
+            "status": "archived",
+        },
+    )
+
+    assert response.status_code == 200
+    old = json.loads((tmp_path / "2026-10-24.json").read_text(encoding="utf-8"))
+    assert [(row["profile"], row["status"]) for row in old["vacancies"]] == [
+        ("Middle Java-разработчик", "queued")
+    ]
+    data = json.loads(today.read_text(encoding="utf-8"))
+    rows = data["vacancies"]
+    assert len(rows) == 1
+    assert rows[0]["archived"] is True
+    assert rows[0]["profile"] == "Senior Java-разработчик"
 
 
 def test_update_status_changes_only_selected_profile(
@@ -982,6 +1087,32 @@ def test_old_visibility_hint_is_shown_as_generic_failure(
     assert row["message"] == web_main.SEND_FAILED_REASON
     stored = json.loads((tmp_path / "2026-10-24.json").read_text(encoding="utf-8"))
     assert stored["vacancies"][0]["reason"] == notice
+
+
+def test_report_details_have_copy_buttons(client: TestClient) -> None:
+    """Письмо и ответ анкеты можно скопировать кнопкой в окне деталей."""
+    html = client.get("/report").text
+
+    assert "createCopyButton" in html
+    assert "navigator.clipboard" in html
+    assert "createCopyButton(item.answer, 'Скопировать ответ на вопрос')" in html
+    assert "createCopyButton(letterText, 'Скопировать сопроводительное письмо')" in html
+    assert ".copy-btn" in client.get("/static/report.css").text
+
+
+def test_cover_letter_is_visible_in_details_api(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Письмо из записи отчёта отдаётся API для окна деталей."""
+    monkeypatch.setattr(web_main, "REPORTS_DIR", tmp_path)
+    item = vacancy("1", "sent")
+    item["cover_letter"] = "Здравствуйте! Готов обсудить вакансию."
+    write_report(tmp_path, "2026-10-24.json", [item])
+    client = TestClient(web_main.app)
+
+    row = client.get("/api/v1/vacancies").json()["vacancies"][0]
+
+    assert row["cover_letter"] == "Здравствуйте! Готов обсудить вакансию."
 
 
 def test_old_questionary_answers_are_cleaned(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

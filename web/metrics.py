@@ -71,25 +71,48 @@ def profile_key(record: Mapping[str, Any]) -> str:
     return profile_value(record.get("profile", ""))
 
 
+def _invited_at(record: Mapping[str, Any]) -> str:
+    """Дата приглашения из записи или пустая строка.
+
+    `null` в JSON считается отсутствием даты: `str(None)` дал бы строку «None»,
+    и запись без приглашения попала бы в счётчик.
+    """
+    return str(record.get("invited_at") or "").strip()
+
+
 def effective_status(record: Mapping[str, Any]) -> str:
     """Статус записи для графиков с учётом факта приглашения.
 
     `invited_at` ставится один раз и не сбрасывается. Поэтому запись, у которой
     статус позже откатили в `sent` или `skipped`, всё равно считается дошедшей
     до приглашения. Оффер и отказ — финальные исходы, их не перекрываем.
+    Статус `invite` без даты приглашения считается отправленным откликом: дата —
+    единственный признак, что приглашение было на самом деле.
     """
     status = str(record.get("status", "") or "unknown")
     if status in FINAL_STATUSES:
         return status
-    if str(record.get("invited_at", "")).strip():
+    if _invited_at(record):
         return "invite"
+    if status == "invite":
+        return "sent"
     return status
 
 
-def _vacancy_key(record: Mapping[str, Any], index: int) -> tuple[str, ...]:
-    """Ключ записи: вакансия и резюме. Разные резюме — разные записи."""
+def _vacancy_key(
+    record: Mapping[str, Any], index: int, legacy_profiles: Mapping[str, str]
+) -> tuple[str, ...]:
+    """Ключ записи: вакансия и профиль. У Habr профиль теперь тоже хранится.
+
+    Старые записи Habr шли без профиля: их профиль неизвестен, поэтому копия
+    относится к профилю, которым вакансию обрабатывали последний раз
+    (`legacy_profiles`). Так старая копия не висит отдельной строкой, а записи
+    разных профилей одной вакансии остаются разными записями.
+    """
     profile = profile_key(record)
     url = str(record.get("url", "")).strip()
+    if url and not profile:
+        profile = legacy_profiles.get(url, "")
     if url:
         return ("url", url) if not profile else ("url", url, "profile", profile)
     title = str(record.get("title", "")).strip()
@@ -100,7 +123,29 @@ def _vacancy_key(record: Mapping[str, Any], index: int) -> tuple[str, ...]:
             if not profile
             else ("title", title, company, "profile", profile)
         )
-    return ("row", str(index))
+    return "row", str(index)
+
+
+def _legacy_profiles(records: Iterable[Mapping[str, Any]]) -> dict[str, str]:
+    """Профиль для старых записей Habr без профиля: самый свежий известный.
+
+    Habr хранит профиль в записи не с самого начала. Копия без профиля —
+    это та же вакансия, которую последний раз обрабатывали профилем из
+    `# PROFILE:`, поэтому берём профиль самой свежей записи с профилем.
+    """
+    latest: dict[str, tuple[tuple[float, str], str]] = {}
+    for record in records:
+        if str(record.get("channel", "")).strip() != "habr":
+            continue
+        url = str(record.get("url", "")).strip()
+        profile = profile_key(record)
+        if not url or not profile:
+            continue
+        moment = _updated_key(record)
+        known = latest.get(url)
+        if known is None or moment >= known[0]:
+            latest[url] = (moment, profile)
+    return {url: profile for url, (_, profile) in latest.items()}
 
 
 def _updated_key(record: Mapping[str, Any]) -> tuple[float, str]:
@@ -116,14 +161,32 @@ def _updated_key(record: Mapping[str, Any]) -> tuple[float, str]:
     return 0.0, ""
 
 
+def prefer_record(candidate: Mapping[str, Any], current: Mapping[str, Any]) -> bool:
+    """Какая копия записи важнее: архивная терминальнее, иначе побеждает свежая.
+
+    Архив закрывает вакансию целиком. Если одна копия в архиве, а другая
+    осталась в очереди, показывается архивная: иначе закрытая вакансия снова
+    выглядит рабочей.
+    """
+    if bool(candidate.get("archived")) != bool(current.get("archived")):
+        return bool(candidate.get("archived"))
+    return _updated_key(candidate) >= _updated_key(current)
+
+
 def dedupe_vacancies(records: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    """Оставляет по одной — самой свежей — записи на каждую вакансию."""
+    """Оставляет по одной — архивной или самой свежей — копии на каждую запись.
+
+    Запись — это вакансия и профиль: у Habr профиль хранится в записи, как
+    и у hh. Копии без профиля относятся к профилю, которым вакансию
+    обрабатывали последний раз.
+    """
+    items = [dict(record) for record in records]
+    legacy_profiles = _legacy_profiles(items)
     best: dict[tuple[str, ...], dict[str, Any]] = {}
-    for index, record in enumerate(records):
-        item = dict(record)
-        key = _vacancy_key(item, index)
+    for index, item in enumerate(items):
+        key = _vacancy_key(item, index, legacy_profiles)
         previous = best.get(key)
-        if previous is None or _updated_key(item) >= _updated_key(previous):
+        if previous is None or prefer_record(item, previous):
             best[key] = item
     return list(best.values())
 
@@ -248,7 +311,7 @@ def build_metrics(
     others = total - responses
     # «Дошло до приглашения»: факт хранится в `invited_at`, поэтому счётчик не
     # уменьшается, когда запись переходит из `invite` в `offer` или `rejected`.
-    invited_total = sum(1 for row in rows if str(row.get("invited_at", "")).strip())
+    invited_total = sum(1 for row in rows if _invited_at(row))
 
     pie_segments = [
         (responses - offers - invites, "var(--color-sent)"),

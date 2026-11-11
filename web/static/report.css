@@ -710,7 +710,7 @@ tbody tr:hover {
 
 /* Детали вакансии: широкое окно, таблица полей и ответы на анкету. */
 .modal-card--wide {
-    max-width: 760px;
+    max-width: 1064px;
     max-height: 90vh;
     display: flex;
     flex-direction: column;
@@ -810,7 +810,8 @@ tbody tr:hover {
 }
 
 .questionary-item {
-    padding: 10px 12px;
+    position: relative;
+    padding: 10px 112px 10px 12px;
     border: 1px solid var(--border-soft);
     border-radius: 10px;
     background: var(--surface-2);
@@ -829,6 +830,43 @@ tbody tr:hover {
 .details-empty {
     margin: 0;
     color: var(--muted);
+}
+
+.details-letter {
+    position: relative;
+    padding: 10px 112px 10px 12px;
+    border: 1px solid var(--border-soft);
+    border-radius: 10px;
+    background: var(--surface-2);
+    color: var(--muted-strong);
+    white-space: pre-wrap;
+}
+
+.copy-btn {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    padding: 4px 8px;
+    border: 1px solid var(--border-soft);
+    border-radius: 8px;
+    background: var(--surface);
+    color: var(--muted-strong);
+    font: inherit;
+    font-size: .72rem;
+    line-height: 1.2;
+    cursor: pointer;
+    touch-action: manipulation;
+}
+
+.copy-btn:hover,
+.copy-btn:focus-visible {
+    border-color: var(--link);
+    color: var(--link);
+}
+
+.copy-btn.copied {
+    border-color: var(--link);
+    color: var(--link);
 }
 
 .details-actions {
@@ -858,5 +896,11 @@ tbody tr:hover {
 
     .details-grid dt {
         margin-top: 8px;
+    }
+
+    .details-letter,
+    .questionary-item {
+        padding-right: 12px;
+        padding-top: 40px;
     }
 }

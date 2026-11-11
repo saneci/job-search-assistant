@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 from .models import VacancyDetails
@@ -108,12 +109,22 @@ RETRY_JSON_INSTRUCTION = (
     "Верни только JSON-объект без markdown-разметки и пояснений."
 )
 
-REJECTION_SYSTEM_PROMPT = """Ты объясняешь кандидату, почему вакансия ему не подходит.
-Одно предложение до 200 символов: чего не хватает или что именно не совпало.
-Только причина — без вступлений, извинений и советов. Пиши по-русски."""
+REJECTION_SYSTEM_PROMPT = """Ты объясняешь кандидату, насколько вакансия ему подходит.
+Два-три предложения до 400 символов: сначала что из требований подтверждено профилем, затем чего не хватает.
+Только факты из профиля и вакансии, без вступлений, извинений и советов. Пиши по-русски."""
 
-REJECTION_MAX_TOKENS = 120
-REJECTION_MAX_LENGTH = 240
+# Описание картинками: работодатель на Habr отдаёт текст вакансии изображениями.
+# Задача вызова — переписать текст, а не оценить вакансию.
+DESCRIPTION_IMAGES_PROMPT = (
+    "Перепиши весь текст с изображений вакансии по-русски, сохраняя порядок блоков и пунктов. "
+    "Только то, что видно на изображениях, без пояснений и пересказа своими словами. "
+    "Если текста на изображениях нет, верни пустую строку."
+)
+
+DESCRIPTION_IMAGES_MAX_TOKENS = 2000
+
+REJECTION_MAX_TOKENS = 250
+REJECTION_MAX_LENGTH = 400
 _REJECTION_DESCRIPTION_LIMIT = 1500
 
 
@@ -246,3 +257,142 @@ def load_system_prompt(path: Path | None = None) -> str:
     except OSError:
         return FALLBACK_SYSTEM_PROMPT
     return text or FALLBACK_SYSTEM_PROMPT
+
+
+# --- Требования вакансии и факты профиля для Decision ---------------------
+
+# Заголовки блоков, которые встречаются в описаниях hh.ru и Habr.
+_REQUIREMENTS_HEADINGS = (
+    "обязательные требования",
+    "квалификационные требования",
+    "требования к кандидату",
+    "требования к соискателю",
+    "требуемый опыт",
+    "требования",
+    "что мы ждём от кандидата",
+    "что мы ждем от кандидата",
+    "что мы ждём",
+    "что мы ждем",
+    "что ожидаем от кандидата",
+    "что ожидаем",
+    "кого мы ищем",
+    "кого ищем",
+    "наши ожидания",
+    "ключевые навыки",
+)
+_OPTIONAL_HEADINGS = (
+    "будет большим плюсом",
+    "будет плюсом",
+    "будет преимуществом",
+    "плюсом будет",
+    "желательно",
+    "приветствуется",
+)
+_OTHER_HEADINGS = (
+    "обязанности",
+    "задачи",
+    "условия работы",
+    "условия",
+    "мы предлагаем",
+    "что мы предлагаем",
+    "бонусы",
+    "о компании",
+    "о проекте",
+    "о нас",
+)
+
+
+@dataclass(frozen=True)
+class VacancyRequirements:
+    """Блок требований вакансии: обязательные и «будет плюсом»."""
+
+    mandatory: str = ""
+    optional: str = ""
+
+
+def split_requirements(description: str) -> VacancyRequirements:
+    """Находит в описании блок требований, не полагаясь на шапку сайта.
+
+    Заголовок блока ищется по строке целиком (hh.ru и Habr отдают заголовки
+    отдельными строками) или по началу строки с двоеточием: «Требования: ...».
+    Секция заканчивается на следующем известном заголовке.
+    """
+    sections: list[tuple[str, list[str]]] = []
+    for line in (description or "").splitlines():
+        heading = _section_heading(line)
+        if heading is not None:
+            kind, rest = heading
+            sections.append((kind, [rest] if rest else []))
+            continue
+        if sections:
+            sections[-1][1].append(line)
+    return VacancyRequirements(
+        mandatory=_section_text(sections, "requirements"),
+        optional=_section_text(sections, "optional"),
+    )
+
+
+def _section_heading(line: str) -> tuple[str, str] | None:
+    """Тип секции и остаток строки после заголовка (пусто — заголовок один)."""
+    text = line.strip()
+    if not text:
+        return None
+    lowered = text.casefold()
+    groups = (
+        ("requirements", _REQUIREMENTS_HEADINGS),
+        ("optional", _OPTIONAL_HEADINGS),
+        ("other", _OTHER_HEADINGS),
+    )
+    for kind, headings in groups:
+        for heading in headings:
+            if lowered == heading:
+                return kind, ""
+            prefix = heading + ":"
+            if lowered.startswith(prefix):
+                return kind, text[len(prefix):].strip()
+    return None
+
+
+def _section_text(sections: list[tuple[str, list[str]]], kind: str) -> str:
+    """Текст секций одного типа: строки без отступов, абзацы через пустую строку."""
+    blocks = [
+        "\n".join(line.strip() for line in lines).strip()
+        for section_kind, lines in sections
+        if section_kind == kind
+    ]
+    return "\n\n".join(block for block in blocks if block)
+
+
+def profile_facts(profile: Profile) -> str:
+    """Факты профиля для Decision: числа из анкеты и правило «нет в профиле — нет опыта»."""
+    lines: list[str] = []
+    if profile.experience_total_years is not None:
+        lines.append(f"- всего опыта в IT: {years_text(profile.experience_total_years)}")
+    if profile.experience_role_years is not None:
+        lines.append(
+            f"- опыт в роли разработчика: {years_text(profile.experience_role_years)}"
+        )
+    if profile.english_level:
+        lines.append(f"- английский: {profile.english_level}")
+    lines.append(
+        "- чего нет в тексте профиля, того у пользователя нет: требование выполнено, "
+        "только если профиль подтверждает его прямо или называет смежный опыт"
+    )
+    return "\n".join(lines)
+
+
+def years_text(value: float) -> str:
+    """Число лет по-русски: «2.5 года», «11 лет», «1 год»."""
+    whole = int(value)
+    tail = whole % 100
+    if value != whole:
+        word = "года"
+    elif 11 <= tail <= 14:
+        word = "лет"
+    elif whole % 10 == 1:
+        word = "год"
+    elif 2 <= whole % 10 <= 4:
+        word = "года"
+    else:
+        word = "лет"
+    return f"{value:g} {word}"

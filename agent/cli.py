@@ -7,15 +7,16 @@ import os
 import subprocess
 import sys
 from collections.abc import Sequence
-from typing import TextIO
+from typing import TextIO, Never
 
 from .browser import BrowserError, BrowserSession
 from .channel import CHANNEL_NAMES
 from .config import (
-    DEFAULT_CONFIG_PATH,
     AppConfig,
     ConfigError,
     load_config,
+    load_web_server_config,
+    web_server_config,
 )
 from .hh_vacancy import ResumeNotFoundError
 from .logging_setup import RunLogger
@@ -104,11 +105,20 @@ def _option_rows(
         color: bool,
         label_color: str = _COLOR_OPTION,
 ) -> str:
-    """Строки «опция  описание»: подписи выровнены по самой длинной."""
-    width = max(len(label) for label, _ in rows)
+    """Строки «опция  описание»: подписи выровнены по самой длинной.
+
+    Если в блоке есть короткая форма, длинные опции сдвигаются на её ширину:
+    так продолжение списка стоит под длинной формой, а не под дефисом.
+    """
+    has_short = any(label.startswith("-") and not label.startswith("--") for label, _ in rows)
+    labels = [
+        (f"    {label}" if has_short and label.startswith("--") else label, description)
+        for label, description in rows
+    ]
+    width = max(len(label) for label, _ in labels)
     return "\n".join(
         f"  {_paint(label.ljust(width), label_color, color)}  {description}"
-        for label, description in rows
+        for label, description in labels
     )
 
 
@@ -179,11 +189,15 @@ GENERAL_OPTIONS = (
     ),
     (
         "--config <FILE>",
-        "путь к YAML-конфигурации, по умолчанию: config.yaml в корне проекта",
+        "путь к YAML-конфигурации: заменяет config.local.yaml, config.yaml остаётся базой",
     ),
     (
         "--channel, --ch <CHANNEL>",
         "канал запуска: hh или habr, по умолчанию: search.channel из config.yaml",
+    ),
+    (
+        "-v, --verbose",
+        "подробный вывод в консоль: показать пропуски и причины по каждой вакансии",
     ),
     ("-r, --retry, --re [STATUS]", "повторить обработку вакансий, без поиска"),
     (
@@ -458,10 +472,30 @@ def _server_action_conflicts(args: argparse.Namespace) -> bool:
     )
 
 
+def _run_server_action(action: str, args: argparse.Namespace) -> int:
+    """Выполняет --start, --stop или --status без полной конфигурации агента.
+
+    Серверу отчётов не нужны `search`, `pipeline`, `llm` и `browser`. Если
+    читать всю схему, служебная команда падает из-за отсутствующих
+    `search.queries`, хотя поиск здесь не запускается.
+    """
+    try:
+        config = load_web_server_config(args.config)
+    except ConfigError as exc:
+        print(f"Ошибка конфигурации: {exc}", file=sys.stderr)
+        return 2
+    with RunLogger(config.logs_dir, verbose=args.verbose) as logger:
+        if action == "start":
+            return 0 if ensure_web_server(config, logger) else 1
+        if action == "stop":
+            return stop_web_server(logger)
+        return server_status(logger)
+
+
 class _CliArgumentParser(argparse.ArgumentParser):
     """Парсер, который сообщает об ошибках в едином стиле приложения."""
 
-    def error(self, message: str) -> None:
+    def error(self, message: str) -> Never:
         raise _translate_parser_error(message)
 
     def _check_value(self, action: argparse.Action, value: object) -> None:
@@ -516,9 +550,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--config",
-        default=str(DEFAULT_CONFIG_PATH),
+        default=None,
         metavar="<FILE>",
-        help="путь к YAML-конфигурации, по умолчанию: config.yaml в корне проекта",
+        help="путь к YAML-конфигурации: заменяет config.local.yaml, config.yaml остаётся базой",
     )
     parser.add_argument(
         "--channel",
@@ -529,6 +563,15 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "канал запуска: hh или habr, по умолчанию: search.channel из config.yaml; "
             "действует для обычного запуска, --retry и --login"
+        ),
+    )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help=(
+            "подробный вывод в консоль: все вакансии, пропуски и причины; "
+            "без опции показываются только вакансии, обработанные LLM"
         ),
     )
     parser.add_argument(
@@ -598,25 +641,20 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(error_text(conflict), file=sys.stderr)
         return 2
+    if server_action:
+        return _run_server_action(server_action, args)
 
     try:
         # Канал из `--ch` передаём в конфиг сразу: иначе у Habr потребуются
         # запросы и регион, которые нужны только hh.ru.
-        config = load_config(args.config, channel=args.channel)
+        config = load_config(
+            args.config, channel=args.channel, merge_system=args.config is not None
+        )
     except ConfigError as exc:
         print(f"Ошибка конфигурации: {exc}", file=sys.stderr)
         return 2
 
-    with RunLogger(config.data.paths.logs_dir) as logger:
-        if args.start:
-            return 0 if ensure_web_server(config, logger) else 1
-
-        if args.stop:
-            return stop_web_server(logger)
-
-        if args.status:
-            return server_status(logger)
-
+    with RunLogger(config.data.paths.logs_dir, verbose=args.verbose) as logger:
         if args.install_browser:
             return _install_browser(config)
 
@@ -640,7 +678,7 @@ def main(argv: list[str] | None = None) -> int:
                 return 1
             return 0
 
-        ensure_web_server(config, logger)
+        ensure_web_server(web_server_config(config), logger)
 
         if not config.llm.api_key.get_secret_value():
             print(

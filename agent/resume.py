@@ -126,7 +126,11 @@ def boost_resume(page: Page, config: AppConfig, logger: RunLogger) -> str:
         button = _find_boost_button(page)
         if button is None or not _is_enabled(button):
             logger.event("resume_boost_unavailable", resume=name, url=page.url)
-            logger.info("Кнопки «Поднять в поиске» нет, подъём не требуется.")
+            _remember_check(cache, name, logger)
+            logger.info(
+                f"Кнопки «Поднять в поиске» нет: время проверки отмечено, "
+                f"следующая проверка не раньше чем через {interval} ч."
+            )
             return STATUS_UNAVAILABLE
 
         button.click()
@@ -146,6 +150,19 @@ def boost_resume(page: Page, config: AppConfig, logger: RunLogger) -> str:
     logger.event("resume_boosted", resume=name, boosted_at=at.isoformat())
     logger.info(f"Резюме «{name}» поднято в поиске.")
     return STATUS_BOOSTED
+
+
+def _remember_check(cache: ResumeCache, name: str, logger: RunLogger) -> None:
+    """Отмечает проверку страницы резюме, когда кнопки подъёма нет.
+
+    hh сам обновляет резюме и дату обновления на странице не отдаёт: без
+    отметки агент открывал бы страницу резюме на каждом запросе и запуске.
+    """
+    try:
+        cache.mark(name)
+    except OSError as exc:
+        logger.event("resume_cache_error", resume=name, error=str(exc))
+        logger.info(f"Не удалось сохранить отметку проверки резюме: {exc}")
 
 
 def _find_resume_link(page: Page, name: str) -> Locator | None:

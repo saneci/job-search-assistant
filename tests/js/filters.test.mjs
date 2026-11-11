@@ -56,6 +56,21 @@ test('hasSelectedFilters: только даты не включают кнопк
     assert.equal(f.hasSelectedFilters(onlyFiles, {includeFiles: true}), true);
 });
 
+/* Кнопка «Сбросить фильтры» должна загораться и от одной выбранной даты:
+   отчёт уже отфильтрован, и снимать это условие нужно тем же нажатием. */
+test('hasSelectedFilters: одна дата включает сброс с флагом includeFiles', () => {
+    const onlyOne = filters({files: ['2026-10-27.json']});
+
+    assert.equal(f.hasSelectedFilters(onlyOne, {includeFiles: true}), true);
+});
+
+test('hasSelectedFilters: снятые даты включают сброс', () => {
+    const none = filters({datesNone: true});
+
+    assert.equal(f.hasSelectedFilters(none, {includeFiles: true}), true);
+    assert.equal(f.hasSelectedFilters(none), false);
+});
+
 test('hasSelectedFilters: includeFiles не отменяет грани', () => {
     const both = filters({status: 'sent', files: ['2026-10-27.json']});
 
@@ -82,7 +97,7 @@ test('normalizeFilters: известный статус сохраняется',
 test('normalizeFilters: канал проверяется по списку', () => {
     assert.equal(f.normalizeFilters({channel: 'habr'}, STATUSES).channel, 'habr');
     assert.equal(f.normalizeFilters({channel: 'external'}, STATUSES).channel, 'external');
-    assert.equal(f.normalizeFilters({channel: 'unknown'}, STATUSES).channel, 'unknown');
+    assert.equal(f.normalizeFilters({channel: 'unknown'}, STATUSES).channel, 'all');
     assert.equal(f.normalizeFilters({channel: 'superjob'}, STATUSES).channel, 'all');
 });
 

@@ -65,6 +65,19 @@ def test_build_report(tmp_path: Path) -> None:
     assert f"Отчёт сохранён в файле: {report_path}" in report
 
 
+def test_report_starts_with_channel_and_profile() -> None:
+    """В начале отчёта видно канал поиска и профиль запуска."""
+    lines = build_report(
+        make_stats(),
+        channel_name="career.habr.com",
+        profile_name="Senior Java-разработчик",
+    ).splitlines()
+
+    assert lines[3] == "- Канал поиска: career.habr.com"
+    assert lines[4] == "- Профиль: Senior Java-разработчик"
+    assert lines[5].startswith("- Обработано вакансий: ")
+
+
 def test_report_names_single_vacancy() -> None:
     """Заголовок отчёта называет вакансию, если запуск был по одной."""
     stats = RunStats(

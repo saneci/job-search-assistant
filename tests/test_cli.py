@@ -32,17 +32,18 @@ from agent.logging_setup import RunLogger
 GENERAL_HELP_TEXT = """Персональный ассистент для поиска работы, который отсеивает нерелевантное и оставляет только то, что стоит вашего внимания
 
 Options:
-  -h, --help                  показать справку и выйти
-  --install-browser           установить Chromium для Playwright (не нужен при browser.channel)
-  --login                     открыть браузер, войти на сайт выбранного канала и сохранить сессию
-  --config <FILE>             путь к YAML-конфигурации, по умолчанию: config.yaml в корне проекта
-  --channel, --ch <CHANNEL>   канал запуска: hh или habr, по умолчанию: search.channel из config.yaml
-  -r, --retry, --re [STATUS]  повторить обработку вакансий, без поиска
-  --excluded                  повторить обработку только исключённых вакансий, синоним --retry excluded
-  --notify-test               отправить тестовое оповещение о завершении работы по включённым видам уведомлений
-  --start                     запустить веб-сервер отчётов в фоне и выйти
-  --stop                      остановить веб-сервер отчётов и выйти
-  --status                    показать, запущен ли веб-сервер отчётов, и выйти
+  -h, --help                     показать справку и выйти
+      --install-browser          установить Chromium для Playwright (не нужен при browser.channel)
+      --login                    открыть браузер, войти на сайт выбранного канала и сохранить сессию
+      --config <FILE>            путь к YAML-конфигурации: заменяет config.local.yaml, config.yaml остаётся базой
+      --channel, --ch <CHANNEL>  канал запуска: hh или habr, по умолчанию: search.channel из config.yaml
+  -v, --verbose                  подробный вывод в консоль: показать пропуски и причины по каждой вакансии
+  -r, --retry, --re [STATUS]     повторить обработку вакансий, без поиска
+      --excluded                 повторить обработку только исключённых вакансий, синоним --retry excluded
+      --notify-test              отправить тестовое оповещение о завершении работы по включённым видам уведомлений
+      --start                    запустить веб-сервер отчётов в фоне и выйти
+      --stop                     остановить веб-сервер отчётов и выйти
+      --status                   показать, запущен ли веб-сервер отчётов, и выйти
 
 Для получения справки по конкретной опции нужно после опции ввести --help или -h, если документация есть она будет показана, пример: ./run.sh --retry -h
 
@@ -122,6 +123,15 @@ def read_events(logger: RunLogger) -> list[dict]:
         json.loads(line)
         for line in logger.events_path.read_text(encoding="utf-8").splitlines()
     ]
+
+
+def test_parser_has_verbose_flag() -> None:
+    """Короткая и длинная формы включают подробный вывод, по умолчанию он выключен."""
+    parser = build_parser()
+
+    assert parser.parse_args([]).verbose is False
+    assert parser.parse_args(["-v"]).verbose is True
+    assert parser.parse_args(["--verbose"]).verbose is True
 
 
 def test_parser_has_notify_test_flag() -> None:
@@ -472,6 +482,72 @@ def test_main_passes_channel_and_retry_to_run(tmp_path: Path, monkeypatch) -> No
     assert captured == {"channel": "habr", "retry": RETRY_ALL}
 
 
+def test_main_config_option_replaces_local_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--config <FILE>` заменяет config.local.yaml, системный config.yaml остаётся базой."""
+    system = make_config(tmp_path)
+    (tmp_path / "config.local.yaml").write_text(
+        json.dumps({"search": {"area": "Санкт-Петербург"}}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    custom = tmp_path / "profile.yaml"
+    custom.write_text(
+        json.dumps({"pipeline": {"limit_per_run": 9}}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    captured: dict[str, object] = {}
+
+    class FakeLogger:
+        def __enter__(self) -> "FakeLogger":
+            return self
+
+        def __exit__(self, *exc_info: object) -> bool:
+            return False
+
+    def fake_run(config, logger, retry=None, channel_name=None):
+        del logger, retry, channel_name
+        captured["limit"] = config.pipeline.limit_per_run
+        captured["area"] = config.search.area
+
+    monkeypatch.setenv("AITUNNEL_API_KEY", "test-key")
+    monkeypatch.setattr("agent.config.DEFAULT_CONFIG_PATH", system.source_path)
+    monkeypatch.setattr("agent.cli.RunLogger", lambda *args, **kwargs: FakeLogger())
+    monkeypatch.setattr("agent.cli.run", fake_run)
+    monkeypatch.setattr("agent.cli.ensure_web_server", lambda *args, **kwargs: None)
+
+    assert main(["--config", str(custom)]) == 0
+    assert captured == {"limit": 9, "area": "Москва"}
+
+
+def test_main_passes_verbose_to_logger(tmp_path: Path, monkeypatch) -> None:
+    """`-v` включает подробный режим журнала запуска."""
+    make_config(tmp_path)
+    captured: dict[str, object] = {}
+
+    class FakeLogger:
+        def __enter__(self) -> "FakeLogger":
+            return self
+
+        def __exit__(self, *exc_info: object) -> bool:
+            return False
+
+    def fake_logger(*args, **kwargs):
+        del args
+        captured.update(kwargs)
+        return FakeLogger()
+
+    def fake_run(config, logger, retry=None, channel_name=None):
+        del config, logger, retry, channel_name
+
+    monkeypatch.setattr("agent.cli.RunLogger", fake_logger)
+    monkeypatch.setattr("agent.cli.run", fake_run)
+    monkeypatch.setattr("agent.cli.ensure_web_server", lambda *args, **kwargs: None)
+
+    assert main(["--config", str(tmp_path / "config.yaml"), "-v"]) == 0
+    assert captured == {"verbose": True}
+
+
 def test_main_stops_on_resume_not_found(tmp_path: Path, monkeypatch, capsys) -> None:
     """Нет резюме в форме: код 1 и понятное сообщение без трейсбека."""
     data = {
@@ -575,6 +651,71 @@ def test_main_status_returns_server_status(tmp_path: Path, monkeypatch) -> None:
 
     assert main(["--config", str(tmp_path / "config.yaml"), "--status"]) == 1
     assert calls == ["status"]
+
+
+def test_server_actions_do_not_require_search_config(tmp_path: Path, monkeypatch) -> None:
+    """Служебные команды сервера работают без `search.queries`: поиск не запускается."""
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        json.dumps({"data": {"logs_retention_days": 5}}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    calls: list[str] = []
+
+    class FakeLogger:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            del args, kwargs
+
+        def __enter__(self) -> "FakeLogger":
+            return self
+
+        def __exit__(self, *exc_info: object) -> bool:
+            return False
+
+    def fake_start(config, logger):
+        del logger
+        calls.append(f"start:{config.logs_retention_days}")
+        return True
+
+    def fake_stop(logger):
+        del logger
+        calls.append("stop")
+        return 0
+
+    def fake_status(logger):
+        del logger
+        calls.append("status")
+        return 0
+
+    monkeypatch.setattr("agent.cli.RunLogger", FakeLogger)
+    monkeypatch.setattr("agent.cli.ensure_web_server", fake_start)
+    monkeypatch.setattr("agent.cli.stop_web_server", fake_stop)
+    monkeypatch.setattr("agent.cli.server_status", fake_status)
+
+    assert main(["--config", str(path), "--start"]) == 0
+    assert main(["--config", str(path), "--stop"]) == 0
+    assert main(["--config", str(path), "--status"]) == 0
+    assert calls == ["start:5", "stop", "status"]
+
+
+def test_server_action_reports_bad_data_section(tmp_path: Path, capsys) -> None:
+    """Ошибка в разделе `data` видна, даже если остальная конфигурация неполная."""
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        json.dumps({"data": {"logs_retention_days": 0}}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    assert main(["--config", str(path), "--status"]) == 2
+    err = capsys.readouterr().err
+    assert "Ошибка конфигурации" in err
+    assert "logs_retention_days" in err
+
+
+def test_server_action_reports_missing_config(tmp_path: Path, capsys) -> None:
+    """Несуществующий файл `--config` остаётся ошибкой для служебных команд."""
+    assert main(["--config", str(tmp_path / "missing.yaml"), "--status"]) == 2
+    assert "Файл конфигурации не найден" in capsys.readouterr().err
 
 
 def test_main_rejects_two_server_commands(capsys) -> None:

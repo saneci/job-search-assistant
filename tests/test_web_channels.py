@@ -63,7 +63,7 @@ def test_report_table_columns_are_in_reading_order(client: TestClient) -> None:
     """Колонки идут от резюме к дате, причина стоит сразу после компании."""
     text = client.get("/report").text
     headers = [
-        "<th>Резюме</th>",
+        "<th>Профиль</th>",
         "<th>Вакансия</th>",
         "<th>Компания</th>",
         "<th>Причина / Комментарий</th>",
@@ -83,7 +83,7 @@ def test_report_page_filters_by_channel(client: TestClient) -> None:
     assert response.status_code == 200
     assert 'id="channelMenu"' in response.text
     assert 'data-channel="habr"' in response.text
-    assert 'data-channel="external"' in response.text
+    assert 'data-channel="external"' not in response.text
     assert 'id="filterReset"' in response.text
     # Кнопка видна всегда, но без выбранных условий она неактивна.
     assert 'id="filterReset" type="button" disabled' in response.text

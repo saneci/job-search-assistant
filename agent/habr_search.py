@@ -38,7 +38,6 @@ COMPANY_SELECTOR = ".vacancy-card__company a.link-comp"
 SALARY_SELECTOR = ".vacancy-card__salary"
 TOTAL_SELECTOR = ".search-total"
 BACKDROP_SELECTOR = "a.vacancy-card__backdrop-link"
-EXTERNAL_RESPONSE_SELECTOR = "a[href$='/external_response']"
 NO_SALARY_MARKER = "vacancy-card__meta--noSalary"
 # Признак уже отправленного отклика прямо на карточке ленты.
 SUCCESS_CHIP_SELECTOR = ".success-chip"
@@ -235,7 +234,6 @@ def collect_cards(page: Page) -> list[VacancyCard]:
                 company=_card_text(card, COMPANY_SELECTOR),
                 url=url,
                 salary=salary,
-                external_response=_has_selector(card, EXTERNAL_RESPONSE_SELECTOR),
                 already_responded=_already_responded(card),
             )
         )

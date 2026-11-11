@@ -75,6 +75,10 @@ def value_of(config: Any, field: str) -> Any:
         ("llm.decision.threshold", 0.8),
         ("llm.decision.model", "gpt-6-luna-decisions"),
         ("llm.generation.model", "gpt-6-luna-pro"),
+        ("llm.ocr.enabled", True),
+        ("llm.ocr.model", ""),
+        ("llm.ocr.max_images", 3),
+        ("llm.ocr.max_image_mb", 5.0),
         ("llm.decision.explain_rejections", False),
         ("llm.cover_letter.max_length", 1500),
         ("llm.cover_letter.pet_projects", ()),
@@ -104,6 +108,7 @@ def test_defaults(tmp_path: Path, field: str, expected: Any) -> None:
         ({"pipeline": {"retry": {"statuses": ["sent"]}}}, "pipeline.retry.statuses"),
         ({"llm": {"decision": {"threshold": 1.5}}}, "llm.decision.threshold"),
         ({"llm": {"decision": {"explain_rejections": "да"}}}, "explain_rejections"),
+        ({"llm": {"ocr": {"enabled": "да"}}}, "llm.ocr.enabled"),
         (
             {"notifications": {"captcha": {"enabled": "да"}}},
             "notifications.captcha.enabled",
@@ -166,6 +171,31 @@ def test_local_config_overrides_base(tmp_path: Path) -> None:
     assert config.pipeline.limit_per_run == 9
     assert config.search.queries == ("Kotlin",)
     assert config.search.area == "Москва"
+
+
+def test_custom_config_replaces_local(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--config <FILE>` заменяет config.local.yaml, а системный config.yaml остаётся базой."""
+    system = write_config(tmp_path, name="system.yaml")
+    (tmp_path / "config.local.yaml").write_text(
+        json.dumps({"search": {"queries": ["Kotlin"]}}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    custom = tmp_path / "profile.yaml"
+    custom.write_text(
+        json.dumps({"pipeline": {"limit_per_run": 9}}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("agent.config.DEFAULT_CONFIG_PATH", system)
+
+    config = load_config(custom, merge_system=True)
+
+    assert config.pipeline.limit_per_run == 9
+    assert config.search.area == "Москва"
+    assert config.pipeline.delay_between_actions.minimum == 0
+    assert config.search.queries == ("Java backend engineer",)
+    assert config.source_path == system
 
 
 def test_environment_overrides_yaml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -250,6 +280,30 @@ def test_pet_projects_must_be_list(tmp_path: Path) -> None:
         )
 
 
+def test_ocr_section_is_read_from_config(tmp_path: Path) -> None:
+    """Раздел llm.ocr настраивается в конфиге: выключатель, модель и лимиты картинок."""
+    config = load_config(
+        write_config(
+            tmp_path,
+            {
+                "llm": {
+                    "ocr": {
+                        "enabled": False,
+                        "model": "gpt-6.1-terra",
+                        "max_images": 5,
+                        "max_image_mb": 2,
+                    }
+                }
+            },
+        )
+    )
+
+    assert config.llm.ocr.enabled is False
+    assert config.llm.ocr.model == "gpt-6.1-terra"
+    assert config.llm.ocr.max_images == 5
+    assert config.llm.ocr.max_image_mb == 2.0
+
+
 def test_pet_projects_are_not_read_from_environment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -259,3 +313,83 @@ def test_pet_projects_are_not_read_from_environment(
 
     assert config.llm.cover_letter.pet_projects == ()
 
+
+
+def test_decision_questions_have_defaults(tmp_path: Path) -> None:
+    config = load_config(write_config(tmp_path))
+    questions = config.llm.decision.questions
+
+    assert set(questions) == {
+        "mandatory_missing",
+        "experience_short",
+        "stack_match",
+        "red_flags",
+    }
+    assert set(questions["mandatory_missing"].criteria) == {"true", "false"}
+
+
+def test_decision_questions_override_one_question(tmp_path: Path) -> None:
+    path = write_config(
+        tmp_path,
+        {
+            "llm": {
+                "decision": {
+                    "questions": {
+                        "stack_match": {
+                            "instructions": "МОЙ ВОПРОС",
+                            "criteria": {"true": "ДА", "false": "НЕТ"},
+                        }
+                    }
+                }
+            }
+        },
+    )
+
+    config = load_config(path)
+    question = config.llm.decision.questions["stack_match"]
+
+    assert question.instructions == "МОЙ ВОПРОС"
+    assert question.criteria == {"true": "ДА", "false": "НЕТ"}
+    assert "mandatory_missing" in config.llm.decision.questions
+
+
+def test_decision_questions_reject_unknown_name(tmp_path: Path) -> None:
+    path = write_config(
+        tmp_path,
+        {
+            "llm": {
+                "decision": {
+                    "questions": {
+                        "fit": {
+                            "instructions": "Подходит ли вакансия?",
+                            "criteria": {"true": "да", "false": "нет"},
+                        }
+                    }
+                }
+            }
+        },
+    )
+
+    with pytest.raises(ConfigError, match="неизвестный вопрос"):
+        load_config(path)
+
+
+def test_decision_questions_require_both_criteria(tmp_path: Path) -> None:
+    path = write_config(
+        tmp_path,
+        {
+            "llm": {
+                "decision": {
+                    "questions": {
+                        "stack_match": {
+                            "instructions": "Стек совпадает?",
+                            "criteria": {"true": "да"},
+                        }
+                    }
+                }
+            }
+        },
+    )
+
+    with pytest.raises(ConfigError, match="false"):
+        load_config(path)

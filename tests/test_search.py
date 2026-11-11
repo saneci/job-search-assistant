@@ -91,6 +91,12 @@ def test_is_excluded_matches_non_latin_keyword() -> None:
     assert is_excluded("1С-разработчик", ("1С",)) == "1С"
 
 
+def test_is_excluded_matches_cyrillic_twin_of_latin_letter() -> None:
+    """«Разработчик С++» с кириллической «С» ловится стоп-словом «C++»."""
+    assert is_excluded("Разработчик С++ (middle)", ("C++",)) == "C++"
+    assert is_excluded("Разработчик C++ (middle)", ("С++",)) == "С++"
+
+
 def test_is_excluded_returns_none() -> None:
     assert is_excluded("Java-разработчик", ("senior", "lead")) is None
     assert is_excluded("Java-разработчик", ()) is None

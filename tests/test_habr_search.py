@@ -82,7 +82,6 @@ def card(
     company: str,
     href: str,
     salary: str = "",
-    external: bool = False,
     no_salary: bool = False,
     responded: bool = False,
 ) -> FakeElement:
@@ -95,8 +94,6 @@ def card(
         mapping[".vacancy-card__salary"] = [FakeElement(salary)]
     if no_salary:
         mapping[".vacancy-card__meta--noSalary"] = [FakeElement()]
-    if external:
-        mapping["a[href$='/external_response']"] = [FakeElement()]
     text = "Вы откликнулись" if responded else ""
     return FakeElement(text=text, mapping=mapping)
 
@@ -137,7 +134,6 @@ def test_collect_cards_reads_fields() -> None:
                     title="QA инженер",
                     company="VK",
                     href="/vacancies/2?from=list",
-                    external=True,
                     no_salary=True,
                 ),
             ]
@@ -150,10 +146,8 @@ def test_collect_cards_reads_fields() -> None:
     assert cards[0].url == "https://career.habr.com/vacancies/1"
     assert cards[0].company == "Ozon"
     assert cards[0].salary == "от 100 000 ₽"
-    assert cards[0].external_response is False
     assert cards[1].url == "https://career.habr.com/vacancies/2"
     assert cards[1].salary == ""
-    assert cards[1].external_response is True
 
 
 def test_read_total_uses_search_total() -> None:

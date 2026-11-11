@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import re
 import time
@@ -11,10 +12,21 @@ from typing import Any, Mapping
 
 import httpx
 
-from .config import FIT_LABEL, LLMConfig, NOT_FIT_LABEL, default_decision_criteria
+from .config import (
+    DECISION_QUESTION_EXPERIENCE,
+    DECISION_QUESTION_FLAGS,
+    DECISION_QUESTION_MANDATORY,
+    DECISION_QUESTION_STACK,
+    FIT_LABEL,
+    LLMConfig,
+    NOT_FIT_LABEL,
+    default_decision_questions,
+)
 from .models import VacancyDetails
 from .profile import Profile
 from .prompts import (
+    DESCRIPTION_IMAGES_MAX_TOKENS,
+    DESCRIPTION_IMAGES_PROMPT,
     REJECTION_MAX_LENGTH,
     REJECTION_MAX_TOKENS,
     REJECTION_SYSTEM_PROMPT,
@@ -22,7 +34,9 @@ from .prompts import (
     build_rejection_prompt,
     build_user_prompt,
     detect_required_opening,
+    profile_facts,
     requires_project_links,
+    split_requirements,
     load_system_prompt,
 )
 
@@ -47,6 +61,10 @@ class DecisionResult:
     threshold: float
     probabilities: dict[str, float]
     chosen: str
+    # Вероятности отдельных проверок: у блокера ближе к 1 значит «блокер есть».
+    checks: dict[str, float] = field(default_factory=dict)
+    # Вердикт человеческим языком: модель решений объяснений не даёт, текст собирает код.
+    reason: str = ""
 
 
 def meets_threshold(probability: float, threshold: float) -> bool:
@@ -88,39 +106,60 @@ class LLMClient:
     # --- Decision-вызов -------------------------------------------------
 
     def decide(self, profile: Profile, vacancy: VacancyDetails) -> DecisionResult:
-        """Оценивает вакансию и возвращает вероятность варианта «подходит»."""
-        criteria = self.config.decision.criteria or default_decision_criteria()
+        """Оценивает вакансию отдельными проверками: стек и блокеры.
+
+        Одно суждение — один вопрос: стек задаёт вероятность «подходит», а
+        блокер с вероятностью не ниже порога отменяет отклик, поэтому
+        обязательное требование без опыта не тонет в совпадении стека.
+        """
+        questions = self.config.decision.questions or default_decision_questions()
+        requirements = split_requirements(vacancy.description)
+        vacancy_state: dict[str, Any] = {
+            "title": vacancy.title,
+            "company": vacancy.company,
+            "salary": vacancy.salary_text,
+            "description": vacancy.description,
+        }
+        if requirements.mandatory:
+            vacancy_state["requirements"] = requirements.mandatory
+        if requirements.optional:
+            vacancy_state["optional"] = requirements.optional
         payload = {
             "model": self.config.decision.model,
             "state": {
-                "profile": profile.text,
-                "vacancy": {
-                    "title": vacancy.title,
-                    "company": vacancy.company,
-                    "salary": vacancy.salary_text,
-                    "description": vacancy.description,
-                },
+                "profile": {"facts": profile_facts(profile), "text": profile.text},
+                "vacancy": vacancy_state,
             },
             "questions": {
-                "fit": {
-                    "type": "choice",
-                    "instructions": "Подходит ли вакансия профилю пользователя?",
-                    "criteria": dict(criteria),
+                name: {
+                    "type": "noul",
+                    "instructions": question.instructions,
+                    "criteria": dict(question.criteria),
                 }
+                for name, question in questions.items()
             },
         }
         url = _endpoint(self.config.base_url, "decisions")
         data = self._post(url, payload, "Decisions API")
-        probabilities = extract_probabilities(data)
-        probability = probability_for(probabilities, FIT_LABEL)
+        checks = {name: extract_truth_probability(data, name) for name in questions}
+        probability = _clamp_probability(checks.get(DECISION_QUESTION_STACK, 0.0))
         threshold = self.config.decision.threshold
-        chosen = max(probabilities, key=lambda label: probabilities[label])
+        blocked = blocking_checks(checks, self.config.decision.blocker_threshold)
+        probabilities = {
+            FIT_LABEL: probability,
+            NOT_FIT_LABEL: round(1.0 - probability, 4),
+        }
+        fits = meets_threshold(probability, threshold) and not blocked
         return DecisionResult(
-            fits=meets_threshold(probability, threshold),
+            fits=fits,
             probability=probability,
             threshold=threshold,
             probabilities=probabilities,
-            chosen=chosen,
+            chosen=max(probabilities, key=probabilities.__getitem__),
+            checks=checks,
+            reason=decision_reason(
+                checks, threshold, self.config.decision.blocker_threshold
+            ),
         )
 
     # --- Generation-вызов -----------------------------------------------
@@ -190,16 +229,36 @@ class LLMClient:
         content = self._chat(messages, max_tokens=REJECTION_MAX_TOKENS, temperature=0.0)
         return _one_line(content, REJECTION_MAX_LENGTH)
 
+    def transcribe_images(self, images: Sequence[bytes]) -> str:
+        """Переписывает текст вакансии с картинок: у работодателя описание может быть изображениями.
+
+        Провайдер принимает изображения внутри JSON, поэтому каждая картинка уходит
+        data URL с base64, а не ссылкой на CDN.
+        """
+        parts: list[dict[str, Any]] = [
+            {"type": "text", "text": DESCRIPTION_IMAGES_PROMPT}
+        ]
+        for data in images:
+            parts.append({"type": "image_url", "image_url": {"url": _image_data_url(data)}})
+        content = self._chat(
+            [{"role": "user", "content": parts}],
+            max_tokens=DESCRIPTION_IMAGES_MAX_TOKENS,
+            temperature=0.0,
+            model=self.config.ocr.model or self.config.generation.model,
+        )
+        return content.strip()
+
     # --- HTTP -----------------------------------------------------------
 
     def _chat(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         max_tokens: int | None = None,
         temperature: float | None = None,
+        model: str | None = None,
     ) -> str:
         payload: dict[str, Any] = {
-            "model": self.config.generation.model,
+            "model": model or self.config.generation.model,
             "messages": messages,
             "max_tokens": max_tokens or self.config.generation.max_tokens,
             "temperature": (
@@ -337,6 +396,95 @@ def probability_for(probabilities: Mapping[str, float], label: str = FIT_LABEL) 
     raise LLMResponseError(
         f"В ответе нет вероятности для варианта «{label}»: {sorted(probabilities)}"
     )
+
+
+def extract_truth_probability(payload: Mapping[str, Any], question: str) -> float:
+    """Вероятность «да» для вопроса noul (устойчиво к формату ответа)."""
+    answer = _find_answer(payload, question)
+    if _is_number(answer):
+        return _clamp_probability(float(answer))
+    if isinstance(answer, Mapping):
+        value = answer.get("noul", answer.get("value"))
+        if _is_number(value):
+            return _clamp_probability(float(value))
+        probabilities = answer.get("probabilities")
+        if isinstance(probabilities, Mapping):
+            parsed = _to_probability_map(probabilities)
+            for key, number in parsed.items():
+                if normalize_label(key) in ("true", "да", "yes"):
+                    return _clamp_probability(number)
+            if len(parsed) == 1:
+                return _clamp_probability(next(iter(parsed.values())))
+        flat = _to_probability_map(answer)
+        if "true" in flat:
+            return _clamp_probability(flat["true"])
+    raise LLMResponseError(
+        f"В ответе Decisions API нет вероятности для вопроса «{question}»: "
+        f"{_shorten(json.dumps(payload, ensure_ascii=False))}"
+    )
+
+
+_BLOCKER_QUESTIONS = (
+    DECISION_QUESTION_MANDATORY,
+    DECISION_QUESTION_EXPERIENCE,
+    DECISION_QUESTION_FLAGS,
+)
+
+_BLOCKER_LABELS = {
+    DECISION_QUESTION_MANDATORY: "обязательные требования без опыта",
+    DECISION_QUESTION_EXPERIENCE: "нехватка опыта",
+    DECISION_QUESTION_FLAGS: "красные флаги",
+}
+
+
+def blocking_checks(
+    checks: Mapping[str, float], blocker_threshold: float
+) -> dict[str, float]:
+    """Блокеры решения: проверки с вероятностью не ниже порога блокера.
+
+    Стек решает, насколько вакансия близка, а блокер отменяет отклик целиком:
+    обязательное требование без опыта не должно тонуть в общем совпадении.
+    """
+    return {
+        name: checks[name]
+        for name in _BLOCKER_QUESTIONS
+        if checks.get(name, 0.0) >= blocker_threshold
+    }
+
+
+def decision_reason(
+    checks: Mapping[str, float], threshold: float, blocker_threshold: float = 0.5
+) -> str:
+    """Вердикт Decision человеческим языком: процент соответствия и требование.
+
+    Числа отдельных проверок в отчёт не попадают: в окне деталей нужен итог,
+    а сами вероятности остаются в журнале событием `decision`. Блокеры
+    называются, только когда стек порог прошёл, иначе причину отказа уже
+    объясняет сама вероятность.
+    """
+    probability = checks.get(DECISION_QUESTION_STACK, 0.0)
+    percent = f"{probability:.0%}"
+    requirement = f"{threshold:.0%}"
+    if probability > threshold:
+        text = f"Вакансия подходит на {percent}, это выше требования {requirement}"
+        blocked = [
+            name
+            for name in _BLOCKER_QUESTIONS
+            if checks.get(name, 0.0) >= blocker_threshold
+        ]
+        if blocked:
+            text += ". Блокеры: " + ", ".join(
+                _BLOCKER_LABELS[name] for name in blocked
+            )
+        return text
+    if probability == threshold:
+        return f"Вакансия подходит на {percent}, но это не выше требования {requirement}"
+    return f"Вакансия подходит на {percent}, но это ниже требования {requirement}"
+
+
+def _clamp_probability(value: float) -> float:
+    """Вероятность в диапазоне 0…1: провайдер иногда отдаёт значения за границей."""
+    return min(max(value, 0.0), 1.0)
 
 
 def extract_json_object(text: str) -> dict[str, Any]:
@@ -644,6 +792,22 @@ def _chat_content(data: Mapping[str, Any]) -> str:
 
 def _endpoint(base_url: str, path: str) -> str:
     return base_url.rstrip("/") + "/" + path.lstrip("/")
+
+
+def _image_data_url(data: bytes) -> str:
+    """Data URL для картинки: изображения провайдер принимает только внутри JSON."""
+    return f"data:{_image_mime(data)};base64," + base64.b64encode(data).decode("ascii")
+
+
+def _image_mime(data: bytes) -> str:
+    """Тип картинки по сигнатуре: провайдеру нужен точный MIME, иначе запрос отклоняется."""
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith(b"GIF8"):
+        return "image/gif"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return "image/jpeg"
 
 
 def _sleep_before_retry(attempt: int, retry_after: str | None) -> None:
