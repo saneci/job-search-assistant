@@ -91,66 +91,71 @@ DECISION_QUESTION_NAMES = (
 
 # Значения по умолчанию; в config.yaml (llm.decision.questions) их можно
 # переопределить — это единственный источник формулировок для модели решений.
+# «Да» в каждом вопросе значит «проблем нет»: уверенность входит в оценку напрямую.
 DEFAULT_DECISION_QUESTIONS: dict[str, dict[str, object]] = {
     DECISION_QUESTION_MANDATORY: {
         "instructions": (
-            "В требованиях вакансии есть обязательное требование, которого нет "
-            "в профиле пользователя?"
+            "Все требования вакансии, кроме технологий, подтверждены профилем?"
         ),
         "criteria": {
             "true": (
-                "Хотя бы один пункт блока «Требования» не подтверждён профилем: языка, "
-                "технологии, домена, сертификата или уровня английского у пользователя "
-                "нет, и смежного опыта профиль не называет"
+                "Все требования, кроме технологий, подтверждены профилем прямо или "
+                "смежным опытом, который в профиле назван"
             ),
             "false": (
-                "Все обязательные требования подтверждены профилем прямо или смежным "
-                "опытом, который в профиле назван"
+                "Хотя бы одно требование, кроме технологий, не подтверждено профилем: "
+                "языка, домена, сертификата или уровня английского у пользователя "
+                "нет, и смежного опыта профиль не называет"
             ),
         },
     },
     DECISION_QUESTION_EXPERIENCE: {
         "instructions": (
-            "Требуемый в вакансии опыт работы существенно выше фактического опыта "
-            "пользователя в этой роли?"
+            "Требуемый опыт в роли не превышает фактический больше чем на два года?"
         ),
         "criteria": {
             "true": (
-                "Требуемый опыт в роли больше фактического больше чем на два года: например, "
-                "в вакансии 5 лет, а опыт в роли разработчика 2.5 года"
-            ),
-            "false": (
                 "Разница с фактическим опытом не больше двух лет (в том числе «от 3 лет» "
                 "при 2.5 года), требование к опыту не указано или опыт пользователя выше"
+            ),
+            "false": (
+                "Требуемый опыт в роли больше фактического больше чем на два года: "
+                "например, в вакансии 5 лет, а опыт в роли разработчика 2.5 года"
             ),
         },
     },
     DECISION_QUESTION_STACK: {
-        "instructions": (
-            "Ключевые технологии и обязанности вакансии подтверждены профилем?"
-        ),
+        "instructions": "Все технологии и обязанности вакансии подтверждены профилем?",
         "criteria": {
             "true": (
-                "Большинство ключевых технологий и обязанностей из вакансии "
+                "Все технологии и обязанности, перечисленные в вакансии, "
                 "подтверждены профилем"
             ),
             "false": (
-                "Половина и больше ключевых технологий или обязанностей в профиле "
-                "не подтверждены"
+                "Хотя бы одна технология или обязанность из вакансии "
+                "в профиле не подтверждена"
             ),
         },
     },
     DECISION_QUESTION_FLAGS: {
-        "instructions": "В вакансии есть красные флаги?",
+        "instructions": "Красных флагов в вакансии нет?",
         "criteria": {
-            "true": (
+            "true": "Обязанности конкретные, условия обычные, красных флагов нет",
+            "false": (
                 "Размытые обязанности без конкретики, «работа за идею», неоплачиваемое "
                 "тестовое без сроков и условий, оплата только процентом и другие "
                 "признаки недобросовестного работодателя"
             ),
-            "false": "Обязанности конкретные, условия обычные, красных флагов нет",
         },
     },
+}
+
+# Веса вопросов в итоговой оценке; сумма весов равна единице.
+DEFAULT_DECISION_WEIGHTS: dict[str, float] = {
+    DECISION_QUESTION_STACK: 0.4,
+    DECISION_QUESTION_MANDATORY: 0.3,
+    DECISION_QUESTION_EXPERIENCE: 0.15,
+    DECISION_QUESTION_FLAGS: 0.15,
 }
 
 AREA_IDS: dict[str, int] = {
@@ -193,6 +198,11 @@ def default_decision_questions() -> dict[str, DecisionQuestionConfig]:
         )
         for name, value in DEFAULT_DECISION_QUESTIONS.items()
     }
+
+
+def default_decision_weights() -> dict[str, float]:
+    """Веса вопросов Decision по умолчанию (переопределяются в config.yaml)."""
+    return dict(DEFAULT_DECISION_WEIGHTS)
 
 
 # --- Примитивы схемы ------------------------------------------------------
@@ -442,6 +452,42 @@ def _decision_questions(value: Any) -> dict[str, DecisionQuestionConfig]:
             )
         result[name] = DecisionQuestionConfig(instructions=instructions, criteria=texts)
     return result
+
+
+def _decision_weights(value: Any) -> dict[str, float]:
+    """Веса вопросов Decision: все четыре вопроса, сумма ровно единица."""
+    result = default_decision_weights()
+    if value is None:
+        return result
+    if not isinstance(value, Mapping):
+        raise ValueError(
+            "llm.decision.weights должен быть словарём вида {имя вопроса: вес}"
+        )
+    weights: dict[str, float] = {}
+    for question, raw in value.items():
+        name = str(question).strip()
+        if name not in DECISION_QUESTION_NAMES:
+            raise ValueError(
+                f"llm.decision.weights: неизвестный вопрос «{name}» "
+                f"(допустимо: {', '.join(DECISION_QUESTION_NAMES)})"
+            )
+        number = _as_float(raw)
+        if not 0 <= number <= 1:
+            raise ValueError(
+                f"llm.decision.weights.{name} должен быть в диапазоне [0, 1]"
+            )
+        weights[name] = number
+    missing = [name for name in DECISION_QUESTION_NAMES if name not in weights]
+    if missing:
+        raise ValueError(
+            "llm.decision.weights: нет веса для вопросов " + ", ".join(missing)
+        )
+    total = sum(weights.values())
+    if abs(total - 1.0) > 1e-6:
+        raise ValueError(
+            f"llm.decision.weights: сумма весов должна быть равна 1, сейчас {total:.2f}"
+        )
+    return weights
 
 
 def _drop_path(data: dict[str, Any], path: str) -> None:
@@ -921,8 +967,8 @@ class DecisionConfig(BaseModel):
 
     model: str = "gpt-6-luna-decisions"
     threshold: float = 0.8
-    # Блокером считается проверка с вероятностью не ниже этого порога.
-    blocker_threshold: float = 0.5
+    # Веса четырёх вопросов в итоговой оценке; сумма весов равна единице.
+    weights: dict[str, float] = Field(default_factory=default_decision_weights)
     questions: dict[str, DecisionQuestionConfig] = Field(
         default_factory=default_decision_questions
     )
@@ -941,15 +987,10 @@ class DecisionConfig(BaseModel):
             raise ValueError("llm.decision.threshold должен быть в диапазоне (0, 1]")
         return number
 
-    @field_validator("blocker_threshold", mode="before")
+    @field_validator("weights", mode="before")
     @classmethod
-    def _blocker_threshold(cls, value: Any) -> float:
-        number = _as_float(value)
-        if not 0 < number <= 1:
-            raise ValueError(
-                "llm.decision.blocker_threshold должен быть в диапазоне (0, 1]"
-            )
-        return number
+    def _weights(cls, value: Any) -> dict[str, float]:
+        return _decision_weights(value)
 
     @field_validator("questions", mode="before")
     @classmethod

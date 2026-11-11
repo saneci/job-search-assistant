@@ -73,6 +73,10 @@ def value_of(config: Any, field: str) -> Any:
         ("llm.base_url", "https://api.aitunnel.ru/v1"),
         ("llm.timeout_seconds", 120.0),
         ("llm.decision.threshold", 0.8),
+        (
+            "llm.decision.weights",
+            {"stack_match": 0.4, "mandatory_missing": 0.3, "experience_short": 0.15, "red_flags": 0.15},
+        ),
         ("llm.decision.model", "gpt-6-luna-decisions"),
         ("llm.generation.model", "gpt-6-luna-pro"),
         ("llm.ocr.enabled", True),
@@ -392,4 +396,78 @@ def test_decision_questions_require_both_criteria(tmp_path: Path) -> None:
     )
 
     with pytest.raises(ConfigError, match="false"):
+        load_config(path)
+
+
+def test_decision_weights_have_defaults(tmp_path: Path) -> None:
+    config = load_config(write_config(tmp_path))
+
+    assert config.llm.decision.weights == {
+        "stack_match": 0.4,
+        "mandatory_missing": 0.3,
+        "experience_short": 0.15,
+        "red_flags": 0.15,
+    }
+
+
+def test_decision_weights_override_one_weight(tmp_path: Path) -> None:
+    path = write_config(
+        tmp_path,
+        {
+            "llm": {
+                "decision": {
+                    "weights": {
+                        "stack_match": 0.5,
+                        "mandatory_missing": 0.3,
+                        "experience_short": 0.1,
+                        "red_flags": 0.1,
+                    }
+                }
+            }
+        },
+    )
+
+    assert load_config(path).llm.decision.weights["stack_match"] == 0.5
+
+
+@pytest.mark.parametrize(
+    ("weights", "error"),
+    [
+        ({"stack_match": 0.5}, "llm.decision.weights"),
+        (
+            {
+                "stack_match": 0.5,
+                "mandatory_missing": 0.3,
+                "experience_short": 0.15,
+                "red_flags": 0.15,
+            },
+            "сумма весов",
+        ),
+        (
+            {
+                "stack_match": 0.4,
+                "mandatory_missing": 0.3,
+                "experience_short": 0.3,
+                "red_flags": 0.0,
+                "fit": 0.0,
+            },
+            "неизвестный вопрос",
+        ),
+        (
+            {
+                "stack_match": 1.5,
+                "mandatory_missing": -0.3,
+                "experience_short": 0.0,
+                "red_flags": -0.2,
+            },
+            "диапазоне",
+        ),
+    ],
+)
+def test_decision_weights_are_validated(
+    tmp_path: Path, weights: dict[str, float], error: str
+) -> None:
+    path = write_config(tmp_path, {"llm": {"decision": {"weights": weights}}})
+
+    with pytest.raises(ConfigError, match=error):
         load_config(path)

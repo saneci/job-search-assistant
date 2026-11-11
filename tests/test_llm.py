@@ -25,6 +25,7 @@ from agent.llm import (
     LLMError,
     LLMResponseError,
     add_signature,
+    decision_reason,
     ensure_greeting,
     extract_json_object,
     extract_probabilities,
@@ -137,10 +138,10 @@ def test_meets_threshold_is_strict() -> None:
 def decision_response(**checks: float) -> httpx.Response:
     """Ответ Decisions API: по одному noul на каждый вопрос."""
     values = {
-        "mandatory_missing": 0.02,
-        "experience_short": 0.03,
+        "mandatory_missing": 0.98,
+        "experience_short": 0.97,
         "stack_match": 0.95,
-        "red_flags": 0.01,
+        "red_flags": 0.99,
     }
     values.update(checks)
     return httpx.Response(
@@ -164,8 +165,8 @@ def test_decide_sends_questions_and_reads_noul_answers() -> None:
         return decision_response(
             stack_match=0.9,
             mandatory_missing=0.9,
-            experience_short=0.05,
-            red_flags=0.05,
+            experience_short=0.9,
+            red_flags=0.9,
         )
 
     with make_client(handler) as client:
@@ -190,20 +191,17 @@ def test_decide_sends_questions_and_reads_noul_answers() -> None:
     assert vacancy["optional"] == "Kafka"
     assert result.checks["mandatory_missing"] == pytest.approx(0.9)
     assert result.probability == pytest.approx(0.9)
-    assert result.fits is False
-    assert result.reason == (
-        "Вакансия подходит на 90%, это выше требования 80%. "
-        "Блокеры: обязательные требования без опыта"
-    )
+    assert result.fits is True
+    assert result.reason == "Вакансия подходит на 90%, это выше требования 80%"
 
 
 def test_decide_is_strict_at_threshold() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return decision_response(
-            stack_match=0.8,
-            mandatory_missing=0.0,
-            experience_short=0.0,
-            red_flags=0.0,
+            stack_match=0.5,
+            mandatory_missing=1.0,
+            experience_short=1.0,
+            red_flags=1.0,
         )
 
     with make_client(handler) as client:
@@ -218,49 +216,52 @@ def test_decide_is_strict_at_threshold() -> None:
     [
         (0.21, "Вакансия подходит на 21%, но это ниже требования 80%"),
         (0.8, "Вакансия подходит на 80%, но это не выше требования 80%"),
+        (0.81, "Вакансия подходит на 81%, это выше требования 80%"),
     ],
 )
 def test_decision_reason_speaks_percent_and_requirement(
     probability: float, expected: str
 ) -> None:
     """В отчёт идёт фраза про проценты, а не служебные названия проверок."""
+    assert decision_reason(probability, 0.8) == expected
+
+
+def test_decide_missing_mandatory_caps_score_at_seventy_percent() -> None:
+    """Неподтверждённые обязательные требования не дают оценке подняться выше 70%."""
 
     def handler(request: httpx.Request) -> httpx.Response:
         return decision_response(
-            stack_match=probability,
+            stack_match=1.0,
+            mandatory_missing=0.0,
+            experience_short=1.0,
+            red_flags=1.0,
+        )
+
+    with make_client(handler) as client:
+        result = client.decide(PROFILE, VACANCY)
+
+    assert result.checks["mandatory_missing"] == pytest.approx(0.0)
+    assert result.probability == pytest.approx(0.7)
+    assert result.fits is False
+
+
+def test_decide_missing_stack_caps_score_at_sixty_percent() -> None:
+    """Неподтверждённый стек не даёт оценке подняться выше 60%."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return decision_response(
+            stack_match=0.0,
             mandatory_missing=1.0,
-            experience_short=0.16,
-            red_flags=0.06,
+            experience_short=1.0,
+            red_flags=1.0,
         )
 
     with make_client(handler) as client:
         result = client.decide(PROFILE, VACANCY)
 
+    assert result.checks["stack_match"] == pytest.approx(0.0)
+    assert result.probability == pytest.approx(0.6)
     assert result.fits is False
-    assert result.reason == expected
-
-
-def test_decide_blocker_rejects_high_stack() -> None:
-    """Обязательное требование без опыта роняет итог, даже если стек совпал."""
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        return decision_response(
-            stack_match=0.95,
-            mandatory_missing=0.91,
-            experience_short=0.0,
-            red_flags=0.0,
-        )
-
-    with make_client(handler) as client:
-        result = client.decide(PROFILE, VACANCY)
-
-    assert result.checks["mandatory_missing"] == pytest.approx(0.91)
-    assert result.probability == pytest.approx(0.95)
-    assert result.fits is False
-    assert result.reason == (
-        "Вакансия подходит на 95%, это выше требования 80%. "
-        "Блокеры: обязательные требования без опыта"
-    )
 
 
 def test_decide_small_experience_gap_is_not_blocker() -> None:
@@ -268,16 +269,16 @@ def test_decide_small_experience_gap_is_not_blocker() -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         return decision_response(
-            stack_match=0.95,
-            mandatory_missing=0.1,
+            stack_match=1.0,
+            mandatory_missing=1.0,
             experience_short=0.3,
-            red_flags=0.1,
+            red_flags=1.0,
         )
 
     with make_client(handler) as client:
         result = client.decide(PROFILE, VACANCY)
 
-    assert result.probability == pytest.approx(0.95)
+    assert result.probability == pytest.approx(0.895)
     assert result.fits is True
 
 
@@ -287,15 +288,15 @@ def test_decide_low_stack_is_rejected() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return decision_response(
             stack_match=0.4,
-            mandatory_missing=0.1,
-            experience_short=0.1,
-            red_flags=0.1,
+            mandatory_missing=1.0,
+            experience_short=1.0,
+            red_flags=1.0,
         )
 
     with make_client(handler) as client:
         result = client.decide(PROFILE, VACANCY)
 
-    assert result.probability == pytest.approx(0.4)
+    assert result.probability == pytest.approx(0.76)
     assert result.fits is False
 
 
@@ -306,18 +307,37 @@ def test_decide_parses_flat_answers() -> None:
         return httpx.Response(
             200,
             json={
-                "mandatory_missing": 0.1,
-                "experience_short": 0.1,
-                "stack_match": 0.95,
-                "red_flags": 0.1,
+                "mandatory_missing": 0.9,
+                "experience_short": 0.9,
+                "stack_match": 0.9,
+                "red_flags": 0.9,
             },
         )
 
     with make_client(handler) as client:
         result = client.decide(PROFILE, VACANCY)
 
-    assert result.probability == pytest.approx(0.95)
+    assert result.probability == pytest.approx(0.9)
     assert result.fits is True
+
+
+def test_decide_all_good_answers_give_one_hundred_percent() -> None:
+    """Если все четыре вопроса хорошие, оценка равна 100%."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return decision_response(
+            stack_match=1.0,
+            mandatory_missing=1.0,
+            experience_short=1.0,
+            red_flags=1.0,
+        )
+
+    with make_client(handler) as client:
+        result = client.decide(PROFILE, VACANCY)
+
+    assert result.probability == pytest.approx(1.0)
+    assert result.fits is True
+    assert result.reason == "Вакансия подходит на 100%, это выше требования 80%"
 
 
 def test_decide_requires_every_answer() -> None:
