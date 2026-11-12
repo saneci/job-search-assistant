@@ -75,11 +75,13 @@ from agent.pipeline import (
     _sync_habr_responses,
     _VacancyLog,
     channel_for,
+    run,
     with_resume,
 )
 from agent.processed import ProcessedStore
 from agent.profile import Profile
 from agent.report import RunStats
+from agent.resume import ResumeListNotFoundError
 
 
 def make_config(tmp_path: Path) -> AppConfig:
@@ -131,6 +133,61 @@ def test_require_resume_name_allows_habr_and_filled_name(tmp_path: Path) -> None
     )
 
     assert logger.events == []
+
+
+def test_run_stops_before_search_when_resume_list_has_no_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Нет настроенного резюме в списке: запуск падает до поиска, а не ищет вакансии."""
+    config = with_resume(make_config(tmp_path), "Senior Java Developer")
+    logger = RunLogger(tmp_path / "logs", run_id="resume-list")
+
+    monkeypatch.setattr(
+        "agent.pipeline.load_profile",
+        lambda path: Profile(text="Java", examples="", style_rules=""),
+    )
+    monkeypatch.setattr(
+        "agent.pipeline._open_report",
+        lambda *args, **kwargs: ProcessedStore(tmp_path / "report", today=date.today()),
+    )
+
+    class FakeSession:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> "FakeSession":
+            return self
+
+        def __exit__(self, *args: object) -> bool:
+            return False
+
+        def ensure_logged_in(self, *args: object, **kwargs: object) -> None:
+            return None
+
+        def new_page(self) -> SimpleNamespace:
+            return SimpleNamespace(close=lambda: None)
+
+        def close_blank_pages(self, page: object) -> None:
+            return None
+
+        def save_state(self) -> None:
+            return None
+
+    def fake_boost(*args: object, **kwargs: object) -> None:
+        raise ResumeListNotFoundError("Senior Java Developer")
+
+    searched: list[bool] = []
+    monkeypatch.setattr("agent.pipeline.BrowserSession", FakeSession)
+    monkeypatch.setattr("agent.pipeline.boost_resume", fake_boost)
+    monkeypatch.setattr(
+        "agent.pipeline._process_vacancies", lambda *args, **kwargs: searched.append(True)
+    )
+
+    with pytest.raises(ResumeListNotFoundError):
+        run(config, logger)
+
+    logger.close()
+    assert searched == []
 
 
 def test_with_resume_returns_copy_with_new_name(tmp_path: Path) -> None:
