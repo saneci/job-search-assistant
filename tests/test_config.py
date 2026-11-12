@@ -13,7 +13,13 @@ from typing import Any
 
 import pytest
 
-from agent.config import DEFAULT_DATA_DIR, ConfigError, load_config, resolve_area_id
+from agent.config import (
+    DEFAULT_DATA_DIR,
+    PROJECT_ROOT,
+    ConfigError,
+    load_config,
+    resolve_area_id,
+)
 
 
 def test_default_data_dir_uses_new_app_name() -> None:
@@ -320,16 +326,16 @@ def test_decision_questions_have_defaults(tmp_path: Path) -> None:
     questions = config.llm.decision.questions
 
     assert set(questions) == {
-        "mandatory_missing",
-        "experience_short",
+        "mandatory_match",
+        "experience_match",
         "stack_match",
         "red_flags",
     }
-    assert set(questions["mandatory_missing"].criteria) == {"true", "false"}
+    assert set(questions["mandatory_match"].criteria) == {"true", "false"}
     assert {name: question.weight for name, question in questions.items()} == {
         "stack_match": 0.4,
-        "mandatory_missing": 0.3,
-        "experience_short": 0.15,
+        "mandatory_match": 0.3,
+        "experience_match": 0.15,
         "red_flags": 0.15,
     }
 
@@ -357,7 +363,7 @@ def test_decision_questions_override_one_question(tmp_path: Path) -> None:
     assert question.instructions == "МОЙ ВОПРОС"
     assert question.criteria == {"true": "ДА", "false": "НЕТ"}
     assert question.weight == 0.4
-    assert "mandatory_missing" in config.llm.decision.questions
+    assert "mandatory_match" in config.llm.decision.questions
 
 
 def test_decision_questions_reject_unknown_name(tmp_path: Path) -> None:
@@ -375,6 +381,20 @@ def test_decision_questions_reject_unknown_name(tmp_path: Path) -> None:
                 }
             }
         },
+    )
+
+    with pytest.raises(ConfigError, match="неизвестный вопрос"):
+        load_config(path)
+
+
+@pytest.mark.parametrize("old_name", ["mandatory_missing", "experience_short"])
+def test_decision_questions_reject_old_negative_keys(
+    tmp_path: Path, old_name: str
+) -> None:
+    """Миграция ключей: старые отрицательные имена больше не принимаются."""
+    path = write_config(
+        tmp_path,
+        {"llm": {"decision": {"questions": {old_name: {"weight": 0.3}}}}},
     )
 
     with pytest.raises(ConfigError, match="неизвестный вопрос"):
@@ -410,8 +430,8 @@ def test_decision_weights_override_only_weight(tmp_path: Path) -> None:
                 "decision": {
                     "questions": {
                         "stack_match": {"weight": 0.5},
-                        "mandatory_missing": {"weight": 0.2},
-                        "experience_short": {"weight": 0.15},
+                        "mandatory_match": {"weight": 0.2},
+                        "experience_match": {"weight": 0.15},
                         "red_flags": {"weight": 0.15},
                     }
                 }
@@ -423,7 +443,11 @@ def test_decision_weights_override_only_weight(tmp_path: Path) -> None:
 
     assert question.weight == 0.5
     assert question.instructions == (
-        "Все технологии и обязанности вакансии подтверждены профилем?"
+        "Все обязательные технологии и обязанности из блока требований "
+        "подтверждены профилем? Технологии из блоков «Будет плюсом», "
+        "«Желательно» и аналогичных не влияют на ответ. Если профиль "
+        "подтверждает более высокий уровень в технологии, её базовые части "
+        "считаются подтверждёнными."
     )
     assert set(question.criteria) == {"true", "false"}
 
@@ -455,8 +479,8 @@ def test_decision_weights_reject_legacy_top_level_key(tmp_path: Path) -> None:
                 "decision": {
                     "weights": {
                         "stack_match": 0.4,
-                        "mandatory_missing": 0.3,
-                        "experience_short": 0.15,
+                        "mandatory_match": 0.3,
+                        "experience_match": 0.15,
                         "red_flags": 0.15,
                     }
                 }
@@ -466,3 +490,16 @@ def test_decision_weights_reject_legacy_top_level_key(tmp_path: Path) -> None:
 
     with pytest.raises(ConfigError, match="llm.decision.weights"):
         load_config(path)
+
+
+def test_system_config_stack_question_ignores_optional_technologies() -> None:
+    """Боевой config.yaml не должен возвращать плюсы в оценку обязательного стека."""
+    config = load_config(
+        PROJECT_ROOT / "config.local.example.yaml", merge_system=True
+    )
+    question = config.llm.decision.questions["stack_match"]
+    text = f"{question.instructions} {question.criteria['true']}"
+
+    assert "обязательн" in text.casefold()
+    assert "не влияют" in text.casefold()
+    assert "более высокого" in text.casefold()

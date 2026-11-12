@@ -172,7 +172,11 @@ def test_profile_facts_use_questionnaire_numbers() -> None:
     assert "всего опыта в IT: 11 лет" in facts
     assert "опыт в роли разработчика: 2.5 года" in facts
     assert "английский: b1" in facts
-    assert "чего нет в тексте профиля" in facts
+    assert "не доказывает отсутствие опыта" in facts
+    assert "более высокий подтверждённый уровень" in facts
+    assert "Java Core" in facts
+    assert "highload" in facts
+    assert "не подтверждены" in facts
 
 
 @pytest.mark.parametrize(

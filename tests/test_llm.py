@@ -69,6 +69,28 @@ DECISION_VACANCY = VacancyDetails(
     ),
 )
 
+OPTIONAL_STACK_VACANCY = VacancyDetails(
+    url="https://hh.ru/vacancy/139411862",
+    title="Backend-разработчик",
+    company="ООО Агенторика",
+    salary="от 120 000 до 150 000 ₽",
+    description=(
+        "Чем предстоит заниматься:\n"
+        "Разработка нового API и проектирование микросервисной архитектуры.\n\n"
+        "Наши ожидания:\n"
+        "Опыт коммерческой разработки на Java от 1 года.\n"
+        "Уверенное знание Spring (Boot, MVC, Data).\n"
+        "Опыт работы с реляционными базами данных (SQL).\n"
+        "Владение инструментами контроля версий (Git).\n"
+        "Опыт работы с брокерами сообщений (Kafka).\n"
+        "Понимание принципов работы REST API и микросервисной архитектуры.\n\n"
+        "Будет плюсом:\n"
+        "Опыт работы с Elasticsearch.\n"
+        "Знание Docker.\n"
+        "Уверенное владение Linux CLI."
+    ),
+)
+
 
 def make_config(
     *,
@@ -138,8 +160,8 @@ def test_meets_threshold_is_strict() -> None:
 def decision_response(**checks: float) -> httpx.Response:
     """Ответ Decisions API: по одному noul на каждый вопрос."""
     values = {
-        "mandatory_missing": 0.98,
-        "experience_short": 0.97,
+        "mandatory_match": 0.98,
+        "experience_match": 0.97,
         "stack_match": 0.95,
         "red_flags": 0.99,
     }
@@ -164,8 +186,8 @@ def test_decide_sends_questions_and_reads_noul_answers() -> None:
         captured["auth"] = request.headers["authorization"]
         return decision_response(
             stack_match=0.9,
-            mandatory_missing=0.9,
-            experience_short=0.9,
+            mandatory_match=0.9,
+            experience_match=0.9,
             red_flags=0.9,
         )
 
@@ -177,30 +199,54 @@ def test_decide_sends_questions_and_reads_noul_answers() -> None:
     assert captured["auth"] == "Bearer sk-aitunnel-test"
     assert payload["model"] == "gpt-6-luna-decisions"
     assert sorted(payload["questions"]) == [
-        "experience_short",
-        "mandatory_missing",
+        "experience_match",
+        "mandatory_match",
         "red_flags",
         "stack_match",
     ]
     assert all(item["type"] == "noul" for item in payload["questions"].values())
     assert payload["state"]["profile"]["text"] == "Java-разработчик"
-    assert "чего нет в тексте профиля" in payload["state"]["profile"]["facts"]
+    assert "не доказывает отсутствие опыта" in payload["state"]["profile"]["facts"]
+    assert "более высокий подтверждённый уровень" in payload["state"]["profile"]["facts"]
     vacancy = payload["state"]["vacancy"]
     assert vacancy["title"] == "Java-разработчик"
     assert vacancy["requirements"] == "Java, Spring Boot, PostgreSQL"
     assert vacancy["optional"] == "Kafka"
-    assert result.checks["mandatory_missing"] == pytest.approx(0.9)
+    assert result.checks["mandatory_match"] == pytest.approx(0.9)
     assert result.probability == pytest.approx(0.9)
     assert result.fits is True
     assert result.reason == "Вакансия подходит на 90%, это выше требования 80%"
+
+
+def test_stack_question_ignores_optional_technologies() -> None:
+    """Плюсы вакансии не входят в stack_match: вопрос только об обязательных технологиях."""
+
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["payload"] = json.loads(request.content)
+        return decision_response()
+
+    with make_client(handler) as client:
+        client.decide(PROFILE, OPTIONAL_STACK_VACANCY)
+
+    vacancy = captured["payload"]["state"]["vacancy"]
+    assert "Elasticsearch" in vacancy["optional"]
+    assert "Elasticsearch" not in vacancy["requirements"]
+
+    stack = captured["payload"]["questions"]["stack_match"]
+    text = f"{stack['instructions']} {stack['criteria']['true']}"
+    assert "обязательн" in text.casefold()
+    assert "не влияют" in text.casefold()
+    assert "более высокого" in text.casefold()
 
 
 def test_decide_is_strict_at_threshold() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return decision_response(
             stack_match=0.5,
-            mandatory_missing=1.0,
-            experience_short=1.0,
+            mandatory_match=1.0,
+            experience_match=1.0,
             red_flags=1.0,
         )
 
@@ -232,15 +278,15 @@ def test_decide_missing_mandatory_caps_score_at_seventy_percent() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return decision_response(
             stack_match=1.0,
-            mandatory_missing=0.0,
-            experience_short=1.0,
+            mandatory_match=0.0,
+            experience_match=1.0,
             red_flags=1.0,
         )
 
     with make_client(handler) as client:
         result = client.decide(PROFILE, VACANCY)
 
-    assert result.checks["mandatory_missing"] == pytest.approx(0.0)
+    assert result.checks["mandatory_match"] == pytest.approx(0.0)
     assert result.probability == pytest.approx(0.7)
     assert result.fits is False
 
@@ -251,8 +297,8 @@ def test_decide_missing_stack_caps_score_at_sixty_percent() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return decision_response(
             stack_match=0.0,
-            mandatory_missing=1.0,
-            experience_short=1.0,
+            mandatory_match=1.0,
+            experience_match=1.0,
             red_flags=1.0,
         )
 
@@ -270,8 +316,8 @@ def test_decide_small_experience_gap_is_not_blocker() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return decision_response(
             stack_match=1.0,
-            mandatory_missing=1.0,
-            experience_short=0.3,
+            mandatory_match=1.0,
+            experience_match=0.3,
             red_flags=1.0,
         )
 
@@ -288,8 +334,8 @@ def test_decide_low_stack_is_rejected() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return decision_response(
             stack_match=0.4,
-            mandatory_missing=1.0,
-            experience_short=1.0,
+            mandatory_match=1.0,
+            experience_match=1.0,
             red_flags=1.0,
         )
 
@@ -307,8 +353,8 @@ def test_decide_parses_flat_answers() -> None:
         return httpx.Response(
             200,
             json={
-                "mandatory_missing": 0.9,
-                "experience_short": 0.9,
+                "mandatory_match": 0.9,
+                "experience_match": 0.9,
                 "stack_match": 0.9,
                 "red_flags": 0.9,
             },
@@ -327,8 +373,8 @@ def test_decide_all_good_answers_give_one_hundred_percent() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return decision_response(
             stack_match=1.0,
-            mandatory_missing=1.0,
-            experience_short=1.0,
+            mandatory_match=1.0,
+            experience_match=1.0,
             red_flags=1.0,
         )
 
@@ -348,7 +394,7 @@ def test_decide_requires_every_answer() -> None:
         )
 
     with make_client(handler) as client:
-        with pytest.raises(LLMResponseError, match="mandatory_missing"):
+        with pytest.raises(LLMResponseError, match="mandatory_match"):
             client.decide(PROFILE, VACANCY)
 
 
@@ -730,7 +776,7 @@ def test_decide_sends_questions_from_config() -> None:
 
     config = make_config()
     questions = dict(config.decision.questions)
-    questions["mandatory_missing"] = questions["mandatory_missing"].model_copy(
+    questions["mandatory_match"] = questions["mandatory_match"].model_copy(
         update={
             "instructions": "МОЙ ВОПРОС",
             "criteria": {"true": "МОЙ КРИТЕРИЙ", "false": "МОЙ АНТИКРИТЕРИЙ"},
@@ -743,7 +789,7 @@ def test_decide_sends_questions_from_config() -> None:
     with LLMClient(config, transport=httpx.MockTransport(handler)) as client:
         client.decide(PROFILE, VACANCY)
 
-    sent = captured["payload"]["questions"]["mandatory_missing"]
+    sent = captured["payload"]["questions"]["mandatory_match"]
     assert sent["instructions"] == "МОЙ ВОПРОС"
     assert sent["criteria"] == {"true": "МОЙ КРИТЕРИЙ", "false": "МОЙ АНТИКРИТЕРИЙ"}
 
@@ -754,16 +800,16 @@ def test_decide_uses_weights_from_questions() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return decision_response(
             stack_match=0.0,
-            mandatory_missing=1.0,
-            experience_short=1.0,
+            mandatory_match=1.0,
+            experience_match=1.0,
             red_flags=1.0,
         )
 
     config = make_config()
     weights = {
         "stack_match": 0.1,
-        "mandatory_missing": 0.6,
-        "experience_short": 0.15,
+        "mandatory_match": 0.6,
+        "experience_match": 0.15,
         "red_flags": 0.15,
     }
     questions = {
