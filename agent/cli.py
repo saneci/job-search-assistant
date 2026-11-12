@@ -19,6 +19,7 @@ from .config import (
     web_server_config,
 )
 from .hh_vacancy import ResumeNotFoundError
+from .resume import ResumeListNotFoundError
 from .logging_setup import RunLogger
 from .models import (
     RETRYABLE_STATUSES,
@@ -698,7 +699,7 @@ def main(argv: list[str] | None = None) -> int:
             logger.event("fatal_error", error=f"{type(exc).__name__}: {exc}")
             print(f"Запуск прерван: {exc}", file=sys.stderr)
             return 1
-        except (ResumeNameError, ResumeNotFoundError) as exc:
+        except (ResumeNameError, ResumeNotFoundError, ResumeListNotFoundError) as exc:
             # События resume_name_is_empty и resume_not_found уже в журнале.
             print(f"Запуск прерван: {exc}", file=sys.stderr)
             return 1

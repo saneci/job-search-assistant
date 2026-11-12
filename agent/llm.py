@@ -13,10 +13,6 @@ from typing import Any, Mapping
 import httpx
 
 from .config import (
-    DECISION_QUESTION_EXPERIENCE,
-    DECISION_QUESTION_FLAGS,
-    DECISION_QUESTION_MANDATORY,
-    DECISION_QUESTION_STACK,
     FIT_LABEL,
     LLMConfig,
     NOT_FIT_LABEL,
@@ -61,7 +57,7 @@ class DecisionResult:
     threshold: float
     probabilities: dict[str, float]
     chosen: str
-    # Вероятности отдельных проверок: у блокера ближе к 1 значит «блокер есть».
+    # Уверенность по каждому вопросу: «да» значит «проблем нет».
     checks: dict[str, float] = field(default_factory=dict)
     # Вердикт человеческим языком: модель решений объяснений не даёт, текст собирает код.
     reason: str = ""
@@ -106,11 +102,10 @@ class LLMClient:
     # --- Decision-вызов -------------------------------------------------
 
     def decide(self, profile: Profile, vacancy: VacancyDetails) -> DecisionResult:
-        """Оценивает вакансию отдельными проверками: стек и блокеры.
+        """Оценивает вакансию четырьмя вопросами и складывает ответы в одну оценку.
 
-        Одно суждение — один вопрос: стек задаёт вероятность «подходит», а
-        блокер с вероятностью не ниже порога отменяет отклик, поэтому
-        обязательное требование без опыта не тонет в совпадении стека.
+        Вопросы сформулированы так, что «да» значит «проблем нет», поэтому
+        уверенность каждого ответа входит в оценку с весом из конфигурации.
         """
         questions = self.config.decision.questions or default_decision_questions()
         requirements = split_requirements(vacancy.description)
@@ -142,24 +137,21 @@ class LLMClient:
         url = _endpoint(self.config.base_url, "decisions")
         data = self._post(url, payload, "Decisions API")
         checks = {name: extract_truth_probability(data, name) for name in questions}
-        probability = _clamp_probability(checks.get(DECISION_QUESTION_STACK, 0.0))
+        weights = {name: question.weight for name, question in questions.items()}
+        score = weighted_score(checks, weights)
         threshold = self.config.decision.threshold
-        blocked = blocking_checks(checks, self.config.decision.blocker_threshold)
         probabilities = {
-            FIT_LABEL: probability,
-            NOT_FIT_LABEL: round(1.0 - probability, 4),
+            FIT_LABEL: score,
+            NOT_FIT_LABEL: round(1.0 - score, 4),
         }
-        fits = meets_threshold(probability, threshold) and not blocked
         return DecisionResult(
-            fits=fits,
-            probability=probability,
+            fits=meets_threshold(score, threshold),
+            probability=score,
             threshold=threshold,
             probabilities=probabilities,
             chosen=max(probabilities, key=probabilities.__getitem__),
             checks=checks,
-            reason=decision_reason(
-                checks, threshold, self.config.decision.blocker_threshold
-            ),
+            reason=decision_reason(score, threshold),
         )
 
     # --- Generation-вызов -----------------------------------------------
@@ -424,59 +416,31 @@ def extract_truth_probability(payload: Mapping[str, Any], question: str) -> floa
     )
 
 
-_BLOCKER_QUESTIONS = (
-    DECISION_QUESTION_MANDATORY,
-    DECISION_QUESTION_EXPERIENCE,
-    DECISION_QUESTION_FLAGS,
-)
+def weighted_score(
+    checks: Mapping[str, float], weights: Mapping[str, float]
+) -> float:
+    """Оценка соответствия: сумма уверенностей по вопросам с весами.
 
-_BLOCKER_LABELS = {
-    DECISION_QUESTION_MANDATORY: "обязательные требования без опыта",
-    DECISION_QUESTION_EXPERIENCE: "нехватка опыта",
-    DECISION_QUESTION_FLAGS: "красные флаги",
-}
-
-
-def blocking_checks(
-    checks: Mapping[str, float], blocker_threshold: float
-) -> dict[str, float]:
-    """Блокеры решения: проверки с вероятностью не ниже порога блокера.
-
-    Стек решает, насколько вакансия близка, а блокер отменяет отклик целиком:
-    обязательное требование без опыта не должно тонуть в общем совпадении.
+    Вопросы сформулированы так, что «да» значит «проблем нет», поэтому
+    уверенность входит в оценку напрямую, без инверсии.
     """
-    return {
-        name: checks[name]
-        for name in _BLOCKER_QUESTIONS
-        if checks.get(name, 0.0) >= blocker_threshold
-    }
+    total = sum(
+        _clamp_probability(checks.get(name, 0.0)) * weight
+        for name, weight in weights.items()
+    )
+    return round(total, 4)
 
 
-def decision_reason(
-    checks: Mapping[str, float], threshold: float, blocker_threshold: float = 0.5
-) -> str:
-    """Вердикт Decision человеческим языком: процент соответствия и требование.
+def decision_reason(probability: float, threshold: float) -> str:
+    """Вердикт Decision человеческим языком: оценка соответствия и требование.
 
-    Числа отдельных проверок в отчёт не попадают: в окне деталей нужен итог,
-    а сами вероятности остаются в журнале событием `decision`. Блокеры
-    называются, только когда стек порог прошёл, иначе причину отказа уже
-    объясняет сама вероятность.
+    Названия проверок и их вероятности в отчёт не попадают: в окне деталей
+    нужен итог, а сами ответы остаются в журнале событием `decision`.
     """
-    probability = checks.get(DECISION_QUESTION_STACK, 0.0)
     percent = f"{probability:.0%}"
     requirement = f"{threshold:.0%}"
     if probability > threshold:
-        text = f"Вакансия подходит на {percent}, это выше требования {requirement}"
-        blocked = [
-            name
-            for name in _BLOCKER_QUESTIONS
-            if checks.get(name, 0.0) >= blocker_threshold
-        ]
-        if blocked:
-            text += ". Блокеры: " + ", ".join(
-                _BLOCKER_LABELS[name] for name in blocked
-            )
-        return text
+        return f"Вакансия подходит на {percent}, это выше требования {requirement}"
     if probability == threshold:
         return f"Вакансия подходит на {percent}, но это не выше требования {requirement}"
     return f"Вакансия подходит на {percent}, но это ниже требования {requirement}"

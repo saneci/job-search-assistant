@@ -110,7 +110,7 @@ RETRY_JSON_INSTRUCTION = (
 )
 
 REJECTION_SYSTEM_PROMPT = """Ты объясняешь кандидату, насколько вакансия ему подходит.
-Два-три предложения до 400 символов: сначала что из требований подтверждено профилем, затем чего не хватает.
+Два-три предложения до 400 символов: сначала что из требований подтверждено профилем, затем какого конкретного требования не хватает.
 Только факты из профиля и вакансии, без вступлений, извинений и советов. Пиши по-русски."""
 
 # Описание картинками: работодатель на Habr отдаёт текст вакансии изображениями.
@@ -125,7 +125,6 @@ DESCRIPTION_IMAGES_MAX_TOKENS = 2000
 
 REJECTION_MAX_TOKENS = 250
 REJECTION_MAX_LENGTH = 400
-_REJECTION_DESCRIPTION_LIMIT = 1500
 
 
 def build_rejection_prompt(
@@ -134,18 +133,23 @@ def build_rejection_prompt(
     probability: float,
     threshold: float,
 ) -> str:
-    """Короткий user-промпт для объяснения отказа (дешёвый запрос)."""
+    """User-промпт для объяснения отказа: профиль, требования и полное описание.
+
+    Описание не обрезается: требование может стоять в конце, а объяснение
+    должно называть конкретную причину отказа.
+    """
     description = vacancy.description or ""
-    if len(description) > _REJECTION_DESCRIPTION_LIMIT:
-        description = description[: _REJECTION_DESCRIPTION_LIMIT] + "…"
+    requirements = split_requirements(description).mandatory
+    requirements_block = (
+        f"ТРЕБОВАНИЯ ВАКАНСИИ:\n{requirements}\n\n" if requirements else ""
+    )
     return (
         f"ПРОФИЛЬ:\n{profile.text}\n\n"
         f"ВАКАНСИЯ:\n{vacancy.title} — {vacancy.company or 'компания не указана'}\n"
-        f"{description}\n\n"
-        f"Вероятность соответствия: {probability:.2f} (порог {threshold:.2f})."
+        f"{requirements_block}"
+        f"ОПИСАНИЕ ВАКАНСИИ:\n{description}\n\n"
+        f"Оценка соответствия: {probability:.0%} (порог {threshold:.0%})."
     )
-
-
 
 
 def build_user_prompt(
@@ -279,6 +283,9 @@ _REQUIREMENTS_HEADINGS = (
     "кого ищем",
     "наши ожидания",
     "ключевые навыки",
+    "какие знания и навыки нам важны",
+    "навыки и знания",
+    "что важно знать",
 )
 _OPTIONAL_HEADINGS = (
     "будет большим плюсом",
@@ -291,6 +298,7 @@ _OPTIONAL_HEADINGS = (
 _OTHER_HEADINGS = (
     "обязанности",
     "задачи",
+    "что нужно делать",
     "условия работы",
     "условия",
     "мы предлагаем",
@@ -375,8 +383,19 @@ def profile_facts(profile: Profile) -> str:
     if profile.english_level:
         lines.append(f"- английский: {profile.english_level}")
     lines.append(
-        "- чего нет в тексте профиля, того у пользователя нет: требование выполнено, "
-        "только если профиль подтверждает его прямо или называет смежный опыт"
+        "- чего нет в тексте профиля, нельзя считать подтверждённым. Отсутствие в профиле "
+        "не доказывает отсутствие опыта: это значит только «не подтверждено»"
+    )
+    lines.append(
+        "- более высокий подтверждённый уровень в той же роли или технологии "
+        "подразумевает базовые знания предыдущего уровня: коммерческий опыт Java и "
+        "Spring подтверждает Java Core, OOP, Collections, Generics, исключения, "
+        "HTTP/REST, SQL и клиент-серверную архитектуру, если вакансия не требует "
+        "более высокого уровня"
+    )
+    lines.append(
+        "- доменный опыт, highload, конкретные процессы и инструменты, а также уровень "
+        "английского не выводятся из грейда: без факта в профиле они не подтверждены"
     )
     return "\n".join(lines)
 

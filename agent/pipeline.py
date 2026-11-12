@@ -107,7 +107,7 @@ from .prompts import requires_project_links
 from .processed import ProcessedError, ProcessedStore
 from . import questionary as questionary_store
 from .report import RunStats, build_report, send_email
-from .resume import boost_resume
+from .resume import ResumeListNotFoundError, boost_resume
 
 
 class SessionLostError(RuntimeError):
@@ -328,7 +328,7 @@ def run(
                 _sync_habr_responses(
                     page, processed, logger, _profile_name(config, channel, profile)
                 )
-        except (ResumeNameError, ResumeNotFoundError):
+        except (ResumeNameError, ResumeNotFoundError, ResumeListNotFoundError):
             # Отклик без выбранного резюме невозможен: запуск завершается ошибкой.
             raise
         except KeyboardInterrupt:

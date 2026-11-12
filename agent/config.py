@@ -78,8 +78,8 @@ FIT_LABEL = "подходит"
 NOT_FIT_LABEL = "не подходит"
 
 # Вопросы Decision API: одно суждение — один вопрос, итог считается в коде.
-DECISION_QUESTION_MANDATORY = "mandatory_missing"
-DECISION_QUESTION_EXPERIENCE = "experience_short"
+DECISION_QUESTION_MANDATORY = "mandatory_match"
+DECISION_QUESTION_EXPERIENCE = "experience_match"
 DECISION_QUESTION_STACK = "stack_match"
 DECISION_QUESTION_FLAGS = "red_flags"
 DECISION_QUESTION_NAMES = (
@@ -91,64 +91,72 @@ DECISION_QUESTION_NAMES = (
 
 # Значения по умолчанию; в config.yaml (llm.decision.questions) их можно
 # переопределить — это единственный источник формулировок для модели решений.
+# «Да» в каждом вопросе значит «проблем нет»: уверенность входит в оценку напрямую.
 DEFAULT_DECISION_QUESTIONS: dict[str, dict[str, object]] = {
     DECISION_QUESTION_MANDATORY: {
+        "weight": 0.3,
         "instructions": (
-            "В требованиях вакансии есть обязательное требование, которого нет "
-            "в профиле пользователя?"
+            "Все требования вакансии, кроме технологий, подтверждены профилем?"
         ),
         "criteria": {
             "true": (
-                "Хотя бы один пункт блока «Требования» не подтверждён профилем: языка, "
-                "технологии, домена, сертификата или уровня английского у пользователя "
-                "нет, и смежного опыта профиль не называет"
+                "Все требования, кроме технологий, подтверждены профилем прямо или "
+                "смежным опытом, который в профиле назван"
             ),
             "false": (
-                "Все обязательные требования подтверждены профилем прямо или смежным "
-                "опытом, который в профиле назван"
+                "Хотя бы одно требование, кроме технологий, не подтверждено профилем: "
+                "языка, домена, сертификата или уровня английского у пользователя "
+                "нет, и смежного опыта профиль не называет"
             ),
         },
     },
     DECISION_QUESTION_EXPERIENCE: {
+        "weight": 0.15,
         "instructions": (
-            "Требуемый в вакансии опыт работы существенно выше фактического опыта "
-            "пользователя в этой роли?"
+            "Требуемый опыт в роли не превышает фактический больше чем на два года?"
         ),
         "criteria": {
             "true": (
-                "Требуемый опыт в роли больше фактического больше чем на два года: например, "
-                "в вакансии 5 лет, а опыт в роли разработчика 2.5 года"
-            ),
-            "false": (
                 "Разница с фактическим опытом не больше двух лет (в том числе «от 3 лет» "
                 "при 2.5 года), требование к опыту не указано или опыт пользователя выше"
+            ),
+            "false": (
+                "Требуемый опыт в роли больше фактического больше чем на два года: "
+                "например, в вакансии 5 лет, а опыт в роли разработчика 2.5 года"
             ),
         },
     },
     DECISION_QUESTION_STACK: {
+        "weight": 0.4,
         "instructions": (
-            "Ключевые технологии и обязанности вакансии подтверждены профилем?"
+            "Все обязательные технологии и обязанности из блока требований "
+            "подтверждены профилем? Технологии из блоков «Будет плюсом», "
+            "«Желательно» и аналогичных не влияют на ответ. Если профиль "
+            "подтверждает более высокий уровень в технологии, её базовые части "
+            "считаются подтверждёнными."
         ),
         "criteria": {
             "true": (
-                "Большинство ключевых технологий и обязанностей из вакансии "
-                "подтверждены профилем"
+                "Все обязательные технологии и обязанности из блока требований "
+                "подтверждены профилем или следуют из более высокого "
+                "подтверждённого уровня, плюсы и «желательно» не учитываются"
             ),
             "false": (
-                "Половина и больше ключевых технологий или обязанностей в профиле "
-                "не подтверждены"
+                "Хотя бы одна обязательная технология или обязанность из блока "
+                "требований не подтверждена и не следует из более высокого уровня"
             ),
         },
     },
     DECISION_QUESTION_FLAGS: {
-        "instructions": "В вакансии есть красные флаги?",
+        "weight": 0.15,
+        "instructions": "Красных флагов в вакансии нет?",
         "criteria": {
-            "true": (
+            "true": "Обязанности конкретные, условия обычные, красных флагов нет",
+            "false": (
                 "Размытые обязанности без конкретики, «работа за идею», неоплачиваемое "
                 "тестовое без сроков и условий, оплата только процентом и другие "
                 "признаки недобросовестного работодателя"
             ),
-            "false": "Обязанности конкретные, условия обычные, красных флагов нет",
         },
     },
 }
@@ -185,9 +193,10 @@ class ConfigError(RuntimeError):
 
 
 def default_decision_questions() -> dict[str, DecisionQuestionConfig]:
-    """Вопросы Decision API по умолчанию (переопределяются в config.yaml)."""
+    """Вопросы Decision API по умолчанию вместе с весами в итоговой оценке."""
     return {
         name: DecisionQuestionConfig(
+            weight=float(value["weight"]),
             instructions=str(value["instructions"]),
             criteria=dict(value["criteria"]),  # type: ignore[arg-type]
         )
@@ -222,6 +231,14 @@ def _as_float(value: Any) -> float:
         except ValueError:
             raise ValueError("должно быть числом") from None
     raise ValueError("должно быть числом")
+
+
+def _decision_weight(value: Any, path: str) -> float:
+    """Вес вопроса Decision: число от 0 до 1, ошибка называет полный путь."""
+    number = _as_float(value)
+    if not 0 <= number <= 1:
+        raise ValueError(f"{path} должен быть в диапазоне [0, 1]")
+    return number
 
 
 def _as_bool(value: Any) -> bool:
@@ -397,14 +414,18 @@ def _area_id(value: Any) -> int:
 
 
 def _decision_questions(value: Any) -> dict[str, DecisionQuestionConfig]:
-    """Вопросы Decision API: значения по умолчанию, переопределённые из конфига."""
+    """Вопросы Decision API: значения по умолчанию, переопределённые из конфига.
+
+    Вес можно задать отдельно, не повторяя формулировку вопроса и критерии.
+    """
     result = default_decision_questions()
     if value is None:
         return result
     if not isinstance(value, Mapping):
         raise ValueError(
             "llm.decision.questions должен быть словарём вида "
-            "{имя вопроса: {instructions: '...', criteria: {true: '...', false: '...'}}}"
+            "{имя вопроса: {weight: 0.4, instructions: '...', "
+            "criteria: {true: '...', false: '...'}}}"
         )
     for question, raw in value.items():
         name = str(question).strip()
@@ -415,32 +436,49 @@ def _decision_questions(value: Any) -> dict[str, DecisionQuestionConfig]:
             )
         if not isinstance(raw, Mapping):
             raise ValueError(f"llm.decision.questions.{name} должен быть словарём")
-        instructions = _str(
-            raw.get("instructions"), f"llm.decision.questions.{name}.instructions"
-        )
-        criteria = raw.get("criteria")
-        if not isinstance(criteria, Mapping):
-            raise ValueError(
-                f"llm.decision.questions.{name}.criteria должен быть словарём "
-                "{true: '...', false: '...'}"
+        current = result[name]
+        instructions = current.instructions
+        if "instructions" in raw:
+            instructions = _str(
+                raw["instructions"], f"llm.decision.questions.{name}.instructions"
             )
-        normalized = {str(key).strip().lower(): value for key, value in criteria.items()}
-        unknown = sorted(set(normalized) - {"true", "false"})
-        if unknown:
-            raise ValueError(
-                f"llm.decision.questions.{name}.criteria: неизвестные ключи "
-                f"{', '.join(unknown)} (допустимо: true, false)"
-            )
-        texts: dict[str, str] = {}
-        for label in ("true", "false"):
-            if label not in normalized:
+        criteria = dict(current.criteria)
+        if "criteria" in raw:
+            raw_criteria = raw["criteria"]
+            if not isinstance(raw_criteria, Mapping):
                 raise ValueError(
-                    f"llm.decision.questions.{name}.criteria: нет ключа «{label}»"
+                    f"llm.decision.questions.{name}.criteria должен быть словарём "
+                    "{true: '...', false: '...'}"
                 )
-            texts[label] = _str(
-                normalized[label], f"llm.decision.questions.{name}.criteria.{label}"
+            normalized = {
+                str(key).strip().lower(): value
+                for key, value in raw_criteria.items()
+            }
+            unknown = sorted(set(normalized) - {"true", "false"})
+            if unknown:
+                raise ValueError(
+                    f"llm.decision.questions.{name}.criteria: неизвестные ключи "
+                    f"{', '.join(unknown)} (допустимо: true, false)"
+                )
+            criteria = {}
+            for label in ("true", "false"):
+                if label not in normalized:
+                    raise ValueError(
+                        f"llm.decision.questions.{name}.criteria: "
+                        f"нет ключа «{label}»"
+                    )
+                criteria[label] = _str(
+                    normalized[label],
+                    f"llm.decision.questions.{name}.criteria.{label}",
+                )
+        weight = current.weight
+        if "weight" in raw:
+            weight = _decision_weight(
+                raw["weight"], f"llm.decision.questions.{name}.weight"
             )
-        result[name] = DecisionQuestionConfig(instructions=instructions, criteria=texts)
+        result[name] = DecisionQuestionConfig(
+            weight=weight, instructions=instructions, criteria=criteria
+        )
     return result
 
 
@@ -906,12 +944,18 @@ class PipelineConfig(BaseModel):
 
 
 class DecisionQuestionConfig(BaseModel):
-    """Один вопрос Decision API: утверждение и что считать «да» и «нет»."""
+    """Один вопрос Decision API: вес, утверждение и что считать «да» и «нет»."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
+    weight: float = 0.0
     instructions: str
     criteria: dict[str, str]
+
+    @field_validator("weight", mode="before")
+    @classmethod
+    def _weight(cls, value: Any) -> float:
+        return _decision_weight(value, "llm.decision.questions.weight")
 
 
 class DecisionConfig(BaseModel):
@@ -921,8 +965,7 @@ class DecisionConfig(BaseModel):
 
     model: str = "gpt-6-luna-decisions"
     threshold: float = 0.8
-    # Блокером считается проверка с вероятностью не ниже этого порога.
-    blocker_threshold: float = 0.5
+    # Вес задаётся у каждого вопроса: llm.decision.questions.<question>.weight.
     questions: dict[str, DecisionQuestionConfig] = Field(
         default_factory=default_decision_questions
     )
@@ -941,16 +984,6 @@ class DecisionConfig(BaseModel):
             raise ValueError("llm.decision.threshold должен быть в диапазоне (0, 1]")
         return number
 
-    @field_validator("blocker_threshold", mode="before")
-    @classmethod
-    def _blocker_threshold(cls, value: Any) -> float:
-        number = _as_float(value)
-        if not 0 < number <= 1:
-            raise ValueError(
-                "llm.decision.blocker_threshold должен быть в диапазоне (0, 1]"
-            )
-        return number
-
     @field_validator("questions", mode="before")
     @classmethod
     def _questions(cls, value: Any) -> dict[str, DecisionQuestionConfig]:
@@ -960,6 +993,16 @@ class DecisionConfig(BaseModel):
     @classmethod
     def _explain(cls, value: Any) -> bool:
         return _as_bool(value)
+
+    @model_validator(mode="after")
+    def _weights_total(self) -> DecisionConfig:
+        total = sum(question.weight for question in self.questions.values())
+        if abs(total - 1.0) > 1e-6:
+            raise ValueError(
+                "llm.decision.questions: сумма весов должна быть равна 1, "
+                f"сейчас {total:.2f}"
+            )
+        return self
 
 
 class GenerationConfig(BaseModel):

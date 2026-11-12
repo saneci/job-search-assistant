@@ -7,6 +7,7 @@ import pytest
 from agent.models import VacancyDetails
 from agent.profile import Profile
 from agent.prompts import (
+    build_rejection_prompt,
     build_user_prompt,
     detect_required_opening,
     opening_from_text,
@@ -171,7 +172,11 @@ def test_profile_facts_use_questionnaire_numbers() -> None:
     assert "всего опыта в IT: 11 лет" in facts
     assert "опыт в роли разработчика: 2.5 года" in facts
     assert "английский: b1" in facts
-    assert "чего нет в тексте профиля" in facts
+    assert "не доказывает отсутствие опыта" in facts
+    assert "более высокий подтверждённый уровень" in facts
+    assert "Java Core" in facts
+    assert "highload" in facts
+    assert "не подтверждены" in facts
 
 
 @pytest.mark.parametrize(
@@ -180,3 +185,40 @@ def test_profile_facts_use_questionnaire_numbers() -> None:
 )
 def test_years_text(value: float, expected: str) -> None:
     assert years_text(value) == expected
+
+
+@pytest.mark.parametrize(
+    "heading",
+    ["Какие знания и навыки нам важны", "Навыки и знания", "Что важно знать"],
+)
+def test_requirements_heading_synonyms(heading: str) -> None:
+    """Новые заголовки блока требований дают тот же результат, что и «Требования»."""
+    result = split_requirements("\n".join([heading, "Java, Spring"]))
+
+    assert result.mandatory == "Java, Spring"
+
+
+def test_duties_heading_stops_requirements_block() -> None:
+    """«Что нужно делать» относится к обязанностям и не попадает в требования."""
+    result = split_requirements(
+        "Требования\nJava, Spring\n\nЧто нужно делать\nРазработка сервисов"
+    )
+
+    assert result.mandatory == "Java, Spring"
+
+
+def test_rejection_prompt_has_full_description_and_requirements() -> None:
+    """Объяснение отказа получает полное описание и отдельный блок требований."""
+    description = (
+        "Требования\nJava, Spring Boot\n\n"
+        + "Очень длинное описание. " * 200
+        + "\nФинальное требование: опыт с Kafka."
+    )
+    prompt = build_rejection_prompt(
+        PROFILE, make_vacancy(description), probability=0.21, threshold=0.8
+    )
+
+    assert "ТРЕБОВАНИЯ ВАКАНСИИ" in prompt
+    assert "ОПИСАНИЕ ВАКАНСИИ" in prompt
+    assert "Финальное требование: опыт с Kafka." in prompt
+    assert "Оценка соответствия: 21% (порог 80%)." in prompt
