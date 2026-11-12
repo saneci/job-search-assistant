@@ -137,7 +137,8 @@ class LLMClient:
         url = _endpoint(self.config.base_url, "decisions")
         data = self._post(url, payload, "Decisions API")
         checks = {name: extract_truth_probability(data, name) for name in questions}
-        score = weighted_score(checks, self.config.decision.weights)
+        weights = {name: question.weight for name, question in questions.items()}
+        score = weighted_score(checks, weights)
         threshold = self.config.decision.threshold
         probabilities = {
             FIT_LABEL: score,

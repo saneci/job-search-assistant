@@ -73,10 +73,6 @@ def value_of(config: Any, field: str) -> Any:
         ("llm.base_url", "https://api.aitunnel.ru/v1"),
         ("llm.timeout_seconds", 120.0),
         ("llm.decision.threshold", 0.8),
-        (
-            "llm.decision.weights",
-            {"stack_match": 0.4, "mandatory_missing": 0.3, "experience_short": 0.15, "red_flags": 0.15},
-        ),
         ("llm.decision.model", "gpt-6-luna-decisions"),
         ("llm.generation.model", "gpt-6-luna-pro"),
         ("llm.ocr.enabled", True),
@@ -330,6 +326,12 @@ def test_decision_questions_have_defaults(tmp_path: Path) -> None:
         "red_flags",
     }
     assert set(questions["mandatory_missing"].criteria) == {"true", "false"}
+    assert {name: question.weight for name, question in questions.items()} == {
+        "stack_match": 0.4,
+        "mandatory_missing": 0.3,
+        "experience_short": 0.15,
+        "red_flags": 0.15,
+    }
 
 
 def test_decision_questions_override_one_question(tmp_path: Path) -> None:
@@ -354,6 +356,7 @@ def test_decision_questions_override_one_question(tmp_path: Path) -> None:
 
     assert question.instructions == "МОЙ ВОПРОС"
     assert question.criteria == {"true": "ДА", "false": "НЕТ"}
+    assert question.weight == 0.4
     assert "mandatory_missing" in config.llm.decision.questions
 
 
@@ -399,75 +402,67 @@ def test_decision_questions_require_both_criteria(tmp_path: Path) -> None:
         load_config(path)
 
 
-def test_decision_weights_have_defaults(tmp_path: Path) -> None:
-    config = load_config(write_config(tmp_path))
-
-    assert config.llm.decision.weights == {
-        "stack_match": 0.4,
-        "mandatory_missing": 0.3,
-        "experience_short": 0.15,
-        "red_flags": 0.15,
-    }
-
-
-def test_decision_weights_override_one_weight(tmp_path: Path) -> None:
+def test_decision_weights_override_only_weight(tmp_path: Path) -> None:
     path = write_config(
         tmp_path,
         {
             "llm": {
                 "decision": {
-                    "weights": {
-                        "stack_match": 0.5,
-                        "mandatory_missing": 0.3,
-                        "experience_short": 0.1,
-                        "red_flags": 0.1,
+                    "questions": {
+                        "stack_match": {"weight": 0.5},
+                        "mandatory_missing": {"weight": 0.2},
+                        "experience_short": {"weight": 0.15},
+                        "red_flags": {"weight": 0.15},
                     }
                 }
             }
         },
     )
 
-    assert load_config(path).llm.decision.weights["stack_match"] == 0.5
+    question = load_config(path).llm.decision.questions["stack_match"]
+
+    assert question.weight == 0.5
+    assert question.instructions == (
+        "Все технологии и обязанности вакансии подтверждены профилем?"
+    )
+    assert set(question.criteria) == {"true", "false"}
 
 
 @pytest.mark.parametrize(
-    ("weights", "error"),
+    ("questions", "error"),
     [
-        ({"stack_match": 0.5}, "llm.decision.weights"),
-        (
-            {
-                "stack_match": 0.5,
-                "mandatory_missing": 0.3,
-                "experience_short": 0.15,
-                "red_flags": 0.15,
-            },
-            "сумма весов",
-        ),
-        (
-            {
-                "stack_match": 0.4,
-                "mandatory_missing": 0.3,
-                "experience_short": 0.3,
-                "red_flags": 0.0,
-                "fit": 0.0,
-            },
-            "неизвестный вопрос",
-        ),
-        (
-            {
-                "stack_match": 1.5,
-                "mandatory_missing": -0.3,
-                "experience_short": 0.0,
-                "red_flags": -0.2,
-            },
-            "диапазоне",
-        ),
+        ({"stack_match": {"weight": 0.5}}, "сумма весов"),
+        ({"stack_match": {"weight": 1.5}}, "диапазоне"),
+        ({"fit": {"weight": 0.0}}, "неизвестный вопрос"),
     ],
 )
 def test_decision_weights_are_validated(
-    tmp_path: Path, weights: dict[str, float], error: str
+    tmp_path: Path, questions: dict[str, dict[str, float]], error: str
 ) -> None:
-    path = write_config(tmp_path, {"llm": {"decision": {"weights": weights}}})
+    path = write_config(
+        tmp_path, {"llm": {"decision": {"questions": questions}}}
+    )
 
     with pytest.raises(ConfigError, match=error):
+        load_config(path)
+
+
+def test_decision_weights_reject_legacy_top_level_key(tmp_path: Path) -> None:
+    path = write_config(
+        tmp_path,
+        {
+            "llm": {
+                "decision": {
+                    "weights": {
+                        "stack_match": 0.4,
+                        "mandatory_missing": 0.3,
+                        "experience_short": 0.15,
+                        "red_flags": 0.15,
+                    }
+                }
+            }
+        },
+    )
+
+    with pytest.raises(ConfigError, match="llm.decision.weights"):
         load_config(path)

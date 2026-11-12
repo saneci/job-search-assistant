@@ -94,6 +94,7 @@ DECISION_QUESTION_NAMES = (
 # «Да» в каждом вопросе значит «проблем нет»: уверенность входит в оценку напрямую.
 DEFAULT_DECISION_QUESTIONS: dict[str, dict[str, object]] = {
     DECISION_QUESTION_MANDATORY: {
+        "weight": 0.3,
         "instructions": (
             "Все требования вакансии, кроме технологий, подтверждены профилем?"
         ),
@@ -110,6 +111,7 @@ DEFAULT_DECISION_QUESTIONS: dict[str, dict[str, object]] = {
         },
     },
     DECISION_QUESTION_EXPERIENCE: {
+        "weight": 0.15,
         "instructions": (
             "Требуемый опыт в роли не превышает фактический больше чем на два года?"
         ),
@@ -125,6 +127,7 @@ DEFAULT_DECISION_QUESTIONS: dict[str, dict[str, object]] = {
         },
     },
     DECISION_QUESTION_STACK: {
+        "weight": 0.4,
         "instructions": "Все технологии и обязанности вакансии подтверждены профилем?",
         "criteria": {
             "true": (
@@ -138,6 +141,7 @@ DEFAULT_DECISION_QUESTIONS: dict[str, dict[str, object]] = {
         },
     },
     DECISION_QUESTION_FLAGS: {
+        "weight": 0.15,
         "instructions": "Красных флагов в вакансии нет?",
         "criteria": {
             "true": "Обязанности конкретные, условия обычные, красных флагов нет",
@@ -148,14 +152,6 @@ DEFAULT_DECISION_QUESTIONS: dict[str, dict[str, object]] = {
             ),
         },
     },
-}
-
-# Веса вопросов в итоговой оценке; сумма весов равна единице.
-DEFAULT_DECISION_WEIGHTS: dict[str, float] = {
-    DECISION_QUESTION_STACK: 0.4,
-    DECISION_QUESTION_MANDATORY: 0.3,
-    DECISION_QUESTION_EXPERIENCE: 0.15,
-    DECISION_QUESTION_FLAGS: 0.15,
 }
 
 AREA_IDS: dict[str, int] = {
@@ -190,19 +186,15 @@ class ConfigError(RuntimeError):
 
 
 def default_decision_questions() -> dict[str, DecisionQuestionConfig]:
-    """Вопросы Decision API по умолчанию (переопределяются в config.yaml)."""
+    """Вопросы Decision API по умолчанию вместе с весами в итоговой оценке."""
     return {
         name: DecisionQuestionConfig(
+            weight=float(value["weight"]),
             instructions=str(value["instructions"]),
             criteria=dict(value["criteria"]),  # type: ignore[arg-type]
         )
         for name, value in DEFAULT_DECISION_QUESTIONS.items()
     }
-
-
-def default_decision_weights() -> dict[str, float]:
-    """Веса вопросов Decision по умолчанию (переопределяются в config.yaml)."""
-    return dict(DEFAULT_DECISION_WEIGHTS)
 
 
 # --- Примитивы схемы ------------------------------------------------------
@@ -232,6 +224,14 @@ def _as_float(value: Any) -> float:
         except ValueError:
             raise ValueError("должно быть числом") from None
     raise ValueError("должно быть числом")
+
+
+def _decision_weight(value: Any, path: str) -> float:
+    """Вес вопроса Decision: число от 0 до 1, ошибка называет полный путь."""
+    number = _as_float(value)
+    if not 0 <= number <= 1:
+        raise ValueError(f"{path} должен быть в диапазоне [0, 1]")
+    return number
 
 
 def _as_bool(value: Any) -> bool:
@@ -407,14 +407,18 @@ def _area_id(value: Any) -> int:
 
 
 def _decision_questions(value: Any) -> dict[str, DecisionQuestionConfig]:
-    """Вопросы Decision API: значения по умолчанию, переопределённые из конфига."""
+    """Вопросы Decision API: значения по умолчанию, переопределённые из конфига.
+
+    Вес можно задать отдельно, не повторяя формулировку вопроса и критерии.
+    """
     result = default_decision_questions()
     if value is None:
         return result
     if not isinstance(value, Mapping):
         raise ValueError(
             "llm.decision.questions должен быть словарём вида "
-            "{имя вопроса: {instructions: '...', criteria: {true: '...', false: '...'}}}"
+            "{имя вопроса: {weight: 0.4, instructions: '...', "
+            "criteria: {true: '...', false: '...'}}}"
         )
     for question, raw in value.items():
         name = str(question).strip()
@@ -425,69 +429,50 @@ def _decision_questions(value: Any) -> dict[str, DecisionQuestionConfig]:
             )
         if not isinstance(raw, Mapping):
             raise ValueError(f"llm.decision.questions.{name} должен быть словарём")
-        instructions = _str(
-            raw.get("instructions"), f"llm.decision.questions.{name}.instructions"
-        )
-        criteria = raw.get("criteria")
-        if not isinstance(criteria, Mapping):
-            raise ValueError(
-                f"llm.decision.questions.{name}.criteria должен быть словарём "
-                "{true: '...', false: '...'}"
+        current = result[name]
+        instructions = current.instructions
+        if "instructions" in raw:
+            instructions = _str(
+                raw["instructions"], f"llm.decision.questions.{name}.instructions"
             )
-        normalized = {str(key).strip().lower(): value for key, value in criteria.items()}
-        unknown = sorted(set(normalized) - {"true", "false"})
-        if unknown:
-            raise ValueError(
-                f"llm.decision.questions.{name}.criteria: неизвестные ключи "
-                f"{', '.join(unknown)} (допустимо: true, false)"
-            )
-        texts: dict[str, str] = {}
-        for label in ("true", "false"):
-            if label not in normalized:
+        criteria = dict(current.criteria)
+        if "criteria" in raw:
+            raw_criteria = raw["criteria"]
+            if not isinstance(raw_criteria, Mapping):
                 raise ValueError(
-                    f"llm.decision.questions.{name}.criteria: нет ключа «{label}»"
+                    f"llm.decision.questions.{name}.criteria должен быть словарём "
+                    "{true: '...', false: '...'}"
                 )
-            texts[label] = _str(
-                normalized[label], f"llm.decision.questions.{name}.criteria.{label}"
+            normalized = {
+                str(key).strip().lower(): value
+                for key, value in raw_criteria.items()
+            }
+            unknown = sorted(set(normalized) - {"true", "false"})
+            if unknown:
+                raise ValueError(
+                    f"llm.decision.questions.{name}.criteria: неизвестные ключи "
+                    f"{', '.join(unknown)} (допустимо: true, false)"
+                )
+            criteria = {}
+            for label in ("true", "false"):
+                if label not in normalized:
+                    raise ValueError(
+                        f"llm.decision.questions.{name}.criteria: "
+                        f"нет ключа «{label}»"
+                    )
+                criteria[label] = _str(
+                    normalized[label],
+                    f"llm.decision.questions.{name}.criteria.{label}",
+                )
+        weight = current.weight
+        if "weight" in raw:
+            weight = _decision_weight(
+                raw["weight"], f"llm.decision.questions.{name}.weight"
             )
-        result[name] = DecisionQuestionConfig(instructions=instructions, criteria=texts)
+        result[name] = DecisionQuestionConfig(
+            weight=weight, instructions=instructions, criteria=criteria
+        )
     return result
-
-
-def _decision_weights(value: Any) -> dict[str, float]:
-    """Веса вопросов Decision: все четыре вопроса, сумма ровно единица."""
-    result = default_decision_weights()
-    if value is None:
-        return result
-    if not isinstance(value, Mapping):
-        raise ValueError(
-            "llm.decision.weights должен быть словарём вида {имя вопроса: вес}"
-        )
-    weights: dict[str, float] = {}
-    for question, raw in value.items():
-        name = str(question).strip()
-        if name not in DECISION_QUESTION_NAMES:
-            raise ValueError(
-                f"llm.decision.weights: неизвестный вопрос «{name}» "
-                f"(допустимо: {', '.join(DECISION_QUESTION_NAMES)})"
-            )
-        number = _as_float(raw)
-        if not 0 <= number <= 1:
-            raise ValueError(
-                f"llm.decision.weights.{name} должен быть в диапазоне [0, 1]"
-            )
-        weights[name] = number
-    missing = [name for name in DECISION_QUESTION_NAMES if name not in weights]
-    if missing:
-        raise ValueError(
-            "llm.decision.weights: нет веса для вопросов " + ", ".join(missing)
-        )
-    total = sum(weights.values())
-    if abs(total - 1.0) > 1e-6:
-        raise ValueError(
-            f"llm.decision.weights: сумма весов должна быть равна 1, сейчас {total:.2f}"
-        )
-    return weights
 
 
 def _drop_path(data: dict[str, Any], path: str) -> None:
@@ -952,12 +937,18 @@ class PipelineConfig(BaseModel):
 
 
 class DecisionQuestionConfig(BaseModel):
-    """Один вопрос Decision API: утверждение и что считать «да» и «нет»."""
+    """Один вопрос Decision API: вес, утверждение и что считать «да» и «нет»."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
+    weight: float = 0.0
     instructions: str
     criteria: dict[str, str]
+
+    @field_validator("weight", mode="before")
+    @classmethod
+    def _weight(cls, value: Any) -> float:
+        return _decision_weight(value, "llm.decision.questions.weight")
 
 
 class DecisionConfig(BaseModel):
@@ -967,8 +958,7 @@ class DecisionConfig(BaseModel):
 
     model: str = "gpt-6-luna-decisions"
     threshold: float = 0.8
-    # Веса четырёх вопросов в итоговой оценке; сумма весов равна единице.
-    weights: dict[str, float] = Field(default_factory=default_decision_weights)
+    # Вес задаётся у каждого вопроса: llm.decision.questions.<question>.weight.
     questions: dict[str, DecisionQuestionConfig] = Field(
         default_factory=default_decision_questions
     )
@@ -987,11 +977,6 @@ class DecisionConfig(BaseModel):
             raise ValueError("llm.decision.threshold должен быть в диапазоне (0, 1]")
         return number
 
-    @field_validator("weights", mode="before")
-    @classmethod
-    def _weights(cls, value: Any) -> dict[str, float]:
-        return _decision_weights(value)
-
     @field_validator("questions", mode="before")
     @classmethod
     def _questions(cls, value: Any) -> dict[str, DecisionQuestionConfig]:
@@ -1001,6 +986,16 @@ class DecisionConfig(BaseModel):
     @classmethod
     def _explain(cls, value: Any) -> bool:
         return _as_bool(value)
+
+    @model_validator(mode="after")
+    def _weights_total(self) -> DecisionConfig:
+        total = sum(question.weight for question in self.questions.values())
+        if abs(total - 1.0) > 1e-6:
+            raise ValueError(
+                "llm.decision.questions: сумма весов должна быть равна 1, "
+                f"сейчас {total:.2f}"
+            )
+        return self
 
 
 class GenerationConfig(BaseModel):

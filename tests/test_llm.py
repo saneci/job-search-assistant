@@ -748,6 +748,39 @@ def test_decide_sends_questions_from_config() -> None:
     assert sent["criteria"] == {"true": "МОЙ КРИТЕРИЙ", "false": "МОЙ АНТИКРИТЕРИЙ"}
 
 
+def test_decide_uses_weights_from_questions() -> None:
+    """Итоговая оценка берёт вес из каждого вопроса, а не из отдельного словаря."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return decision_response(
+            stack_match=0.0,
+            mandatory_missing=1.0,
+            experience_short=1.0,
+            red_flags=1.0,
+        )
+
+    config = make_config()
+    weights = {
+        "stack_match": 0.1,
+        "mandatory_missing": 0.6,
+        "experience_short": 0.15,
+        "red_flags": 0.15,
+    }
+    questions = {
+        name: question.model_copy(update={"weight": weights[name]})
+        for name, question in config.decision.questions.items()
+    }
+    config = config.model_copy(
+        update={"decision": config.decision.model_copy(update={"questions": questions})}
+    )
+
+    with LLMClient(config, transport=httpx.MockTransport(handler)) as client:
+        result = client.decide(PROFILE, VACANCY)
+
+    assert result.probability == pytest.approx(0.9)
+    assert result.fits is True
+
+
 def test_explain_rejection_is_cheap_and_single_line() -> None:
     captured: dict[str, Any] = {}
 
